@@ -7,7 +7,7 @@ import type Store from 'electron-store'
 import { logger } from './logger'
 import { streamToFile, type HttpGet } from './install/downloadStream'
 import { resolveDownloadLink, type HttpGetJson } from './nexus/downloadLink'
-import { isRetryableError, backoffWithJitter, CircuitBreaker } from './install/retryPolicy'
+import { classifyDownloadFailure, backoffWithJitter, CircuitBreaker } from './install/retryPolicy'
 
 // Adapt axios to the injectable HttpGet shape used by the resumable stream core.
 const axiosGet: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
@@ -95,7 +95,7 @@ export function initDownloadManager(
 
   // Catalog rows store the mod PAGE url. A real file download needs either a direct
   // CDN link or a Nexus-generated (Premium) link built from nexus_id + file_id.
-  async function resolveUrl(row: DownloadRow): Promise<string> {
+  async function resolveUrl(row: DownloadRow, signal?: AbortSignal): Promise<string> {
     // A direct CDN/file URL (not a mod PAGE) is used as-is.
     const isModPage = !!row.url && /nexusmods\.com\/.*\/mods\/\d+\/?$/i.test(row.url)
     if (row.url && !isModPage && /^https?:\/\//i.test(row.url)) return row.url
@@ -115,6 +115,7 @@ export function initDownloadManager(
         apiKey: getApiKey(),
         key: row.nxm_key ?? undefined,
         expires: row.nxm_expires ?? undefined,
+        signal, // forward the abort signal so a pause tears down an in-flight resolve promptly
       })
     }
     throw new Error('Link di download non disponibile: serve un URL diretto oppure mod/file id Nexus.')
@@ -178,7 +179,7 @@ export function initDownloadManager(
       // from the Nexus download_link endpoint (now carrying its status via
       // DownloadLinkError) is classified retryable and re-enqueued with backoff, instead
       // of failing the download permanently. A 401/403/404 stays a definitive failure.
-      const url = await resolveUrl(row)
+      const url = await resolveUrl(row, ac.signal)
       if (ac.signal.aborted) throw new Error('annullato')
       db.prepare("UPDATE downloads SET status='downloading', error=NULL WHERE id=?").run(downloadId)
 
@@ -205,7 +206,10 @@ export function initDownloadManager(
         signal: ac.signal,
         // Idle guard: abort + retry a socket that connects then goes silent (no headers
         // or no bytes) past this window, rather than wedging a queue slot forever.
-        stallTimeoutMs: Math.max(5_000, Number(store.get('downloadStallTimeoutMs')) || 120_000),
+        // 30 s floor: a body-idle abort is driven by consumed-byte cadence, which disk
+        // backpressure can pause on a healthy transfer — too low a value would false-trip
+        // under heavy concurrent writes to one slow disk.
+        stallTimeoutMs: Math.max(30_000, Number(store.get('downloadStallTimeoutMs')) || 120_000),
         onProgress: (downloaded, total) => {
           if (total > 0 && total !== knownTotal) {
             knownTotal = total
@@ -249,8 +253,13 @@ export function initDownloadManager(
       const msg = (err as Error).message
       activeDownloads.delete(downloadId)
 
-      // User-initiated pause/cancel: not an error, never retried.
-      if (msg.toLowerCase().includes('abort') || msg.toLowerCase().includes('canceled')) {
+      // User-initiated pause/cancel is judged by THIS download's signal state, not by
+      // the error text: a resolve-phase abort throws the Italian 'annullato' (which the
+      // old 'abort'/'canceled' substring check missed → mis-marked failed), while the
+      // retryable 'ECONNABORTED' socket code contains the substring 'abort' (→ was wrongly
+      // parked as a pause and never retried). Signal state is authoritative and must be
+      // handled BEFORE the breaker so a pause never counts as a failure.
+      if (ac.signal.aborted) {
         db.prepare("UPDATE downloads SET status='paused', error=? WHERE id=?").run(msg, downloadId)
         win()?.webContents.send('download:error', { id: downloadId, error: msg })
         return
@@ -269,8 +278,16 @@ export function initDownloadManager(
         win()?.webContents.send('download:queue-halted', { errors: breaker.failures })
       }
 
-      // Retry ONLY classified-transient errors (429/5xx/ECONNRESET/TLS/CF), with jittered backoff.
-      if (isRetryableError(err) && tried <= maxRetries() && !queueHalted) {
+      // Retry ONLY classified-transient errors (429/5xx/ECONNRESET/ECONNABORTED/ESTALLED/
+      // TLS/CF), with jittered backoff; a tripped breaker forces a definitive failure.
+      const outcome = classifyDownloadFailure({
+        aborted: false, // already handled above
+        err,
+        tried,
+        maxRetries: maxRetries(),
+        breakerOpen: queueHalted,
+      })
+      if (outcome === 'retry') {
         const backoff = backoffWithJitter(tried - 1) // jittered 0.5s,1s,2s… capped 8s
         db.prepare("UPDATE downloads SET status='pending', error=? WHERE id=?").run(
           `Tentativo ${tried}/${maxRetries()}: ${msg}`,

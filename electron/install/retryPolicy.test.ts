@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import {
   isRetryableError,
+  classifyDownloadFailure,
   backoffWithJitter,
   CircuitBreaker,
   abortableSleep,
@@ -28,9 +29,49 @@ describe('retryPolicy: classification', () => {
     expect(isRetryableError({ status: 422 })).toBe(false)
     expect(isRetryableError({ message: 'md5 non combacia' })).toBe(false)
   })
+  it('retries our own stall (ESTALLED) and transient ECONNABORTED', () => {
+    expect(isRetryableError({ code: 'ESTALLED' })).toBe(true)
+    expect(isRetryableError({ code: 'ECONNABORTED' })).toBe(true)
+    expect(isRetryableError({ cause: { code: 'ECONNABORTED' } })).toBe(true) // wrapped in DownloadLinkError
+  })
   it('httpStatusOf reads status or response.status', () => {
     expect(httpStatusOf({ status: 500 })).toBe(500)
     expect(httpStatusOf({ response: { status: 429 } })).toBe(429)
+  })
+})
+
+describe('retryPolicy: classifyDownloadFailure (cancel vs retry vs fail)', () => {
+  const base = { err: { code: 'ECONNRESET' }, tried: 1, maxRetries: 3, breakerOpen: false }
+
+  it('a cancel (aborted) is ALWAYS paused — even when the error looks retryable', () => {
+    // Regression: the abort came from THIS download's controller; the error text is
+    // irrelevant. Covers the 'annullato' sentinel that the old substring check missed.
+    expect(classifyDownloadFailure({ ...base, aborted: true })).toBe('paused')
+    expect(classifyDownloadFailure({ ...base, aborted: true, err: new Error('annullato') })).toBe('paused')
+    expect(classifyDownloadFailure({ ...base, aborted: true, err: { status: 503 } })).toBe('paused')
+  })
+
+  it('retries a transient ECONNABORTED that is NOT a user cancel', () => {
+    // Regression: 'ECONNABORTED' contains the substring 'abort' — the old code parked it
+    // as a pause and never retried. It must now reach the retry path.
+    expect(classifyDownloadFailure({ ...base, aborted: false, err: { code: 'ECONNABORTED' } })).toBe('retry')
+    expect(classifyDownloadFailure({ ...base, aborted: false, err: { message: 'read ECONNABORTED' } })).toBe(
+      'retry',
+    )
+  })
+
+  it('retries 429/5xx while attempts remain, fails permanent 4xx', () => {
+    expect(classifyDownloadFailure({ ...base, aborted: false, err: { status: 429 } })).toBe('retry')
+    expect(classifyDownloadFailure({ ...base, aborted: false, err: { status: 403 } })).toBe('failed')
+  })
+
+  it('fails once retries are exhausted or the breaker is open', () => {
+    expect(classifyDownloadFailure({ ...base, aborted: false, tried: 4, maxRetries: 3 })).toBe('failed')
+    expect(classifyDownloadFailure({ ...base, aborted: false, breakerOpen: true })).toBe('failed')
+    // breaker precedence: even a retryable error stops when the breaker is open
+    expect(
+      classifyDownloadFailure({ ...base, aborted: false, err: { status: 503 }, breakerOpen: true }),
+    ).toBe('failed')
   })
 })
 

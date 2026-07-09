@@ -193,6 +193,11 @@ export async function streamToFile(opts: StreamToFileOptions): Promise<StreamRes
     }
 
     opts.onProgress?.(downloaded, total)
+    // Byte-count gate needs a declared size. A server that sends neither Content-Length
+    // nor Content-Range (total === 0) gives no completeness signal, so a graceful early
+    // close cannot be told from a full body here — the archive extractor's own integrity
+    // check is the backstop, and the Nexus path (which carries Content-Length + an md5
+    // verified by the caller) never reaches this blind spot.
     if (total > 0 && downloaded !== total) {
       throw new Error(`Download incompleto: ${downloaded}/${total} byte`)
     }

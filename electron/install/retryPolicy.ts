@@ -55,9 +55,33 @@ export function isRetryableError(e: unknown): boolean {
   const code = x?.code ?? x?.cause?.code
   if (code && RETRYABLE_CODES.has(code)) return true
   const msg = `${x?.message ?? ''} ${x?.cause?.message ?? ''}`.toLowerCase()
-  return /socket hang up|econnreset|etimedout|timed? ?out|reset by peer|\btls\b|handshake|cloudflare|temporarily|try again|premature close|network error|connection (closed|reset|aborted)|download incompleto|incomplete download/.test(
+  return /socket hang up|econnreset|econnaborted|etimedout|timed? ?out|reset by peer|\btls\b|handshake|cloudflare|temporarily|try again|premature close|network error|connection (closed|reset|aborted)|download incompleto|incomplete download/.test(
     msg,
   )
+}
+
+export type DownloadFailureOutcome = 'paused' | 'retry' | 'failed'
+
+/**
+ * Decide what a settled download error means. Cancel is judged by the AUTHORITATIVE
+ * signal state (`aborted`), never by matching the error message — message substrings
+ * both miss the project's Italian 'annullato' sentinel AND false-match 'ECONNABORTED'
+ * (a retryable socket code whose text contains 'abort'). Order matters:
+ *   1) aborted  → 'paused' (a user cancel is never a failure; must not touch the breaker)
+ *   2) breaker  → 'failed' (systemic halt: stop retrying the whole queue)
+ *   3) transient & attempts left → 'retry'; otherwise 'failed'.
+ */
+export function classifyDownloadFailure(p: {
+  aborted: boolean
+  err: unknown
+  tried: number // attempts including this one (1-based)
+  maxRetries: number
+  breakerOpen: boolean
+}): DownloadFailureOutcome {
+  if (p.aborted) return 'paused'
+  if (p.breakerOpen) return 'failed'
+  if (isRetryableError(p.err) && p.tried <= p.maxRetries) return 'retry'
+  return 'failed'
 }
 
 /**
