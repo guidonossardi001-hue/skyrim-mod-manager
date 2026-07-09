@@ -82,6 +82,9 @@ export default function Dashboard() {
     exePath: string | null
     path: string | null
   } | null>(null)
+  // Run-Prog: dimensione del blocco progressivo (prossime N mod non ancora
+  // sincronizzate). 0 = intera modlist in un unico run.
+  const [blockSize, setBlockSize] = useState(100)
   const autoRan = useRef(false)
 
   const occupiedGB = (vortexStats?.totalBytes ?? 0) / 1024 / 1024 / 1024
@@ -111,11 +114,16 @@ export default function Dashboard() {
         toast.error('Non disponibile', "La sincronizzazione reale è solo nell'app desktop.")
         return
       }
+      const scopeMsg =
+        blockSize > 0
+          ? `Scaricherà ed estrarrà il PROSSIMO BLOCCO di ${blockSize} mod non ancora presenti (Run-Prog), `
+          : "Scaricherà ed estrarrà l'elenco completo (fino a ~329 GB, migliaia di mod), "
       if (
         !auto &&
         !window.confirm(
-          "Avviare il DOWNLOAD REALE dell'intera modlist?\n\n" +
-            "Scaricherà ed estrarrà l'elenco completo (fino a ~329 GB, migliaia di mod) UNICAMENTE nella cartella isolata StockGame. " +
+          'Avviare il DOWNLOAD REALE da Nexus?\n\n' +
+            scopeMsg +
+            'UNICAMENTE nella cartella isolata StockGame. ' +
             'Il tuo Skyrim di Steam originale resta intatto.\n\n' +
             'Richiede Nexus Premium attivo nelle Impostazioni. Puoi annullare in qualsiasi momento.\n\nContinuare?',
         )
@@ -123,9 +131,14 @@ export default function Dashboard() {
         return
       setSyncing(true)
       setSyncProgress(null)
-      pushLog('Avvio sincronizzazione di massa nello StockGame isolato…', 'info')
+      pushLog(
+        blockSize > 0
+          ? `Avvio Run-Prog: blocco di ${blockSize} mod nello StockGame isolato…`
+          : 'Avvio sincronizzazione completa nello StockGame isolato…',
+        'info',
+      )
       try {
-        const r = await api.sync.start()
+        const r = await api.sync.start(blockSize > 0 ? { limit: blockSize } : undefined)
         if (!r.ok) {
           pushLog(`Sincronizzazione non avviata: ${r.error}`, 'error')
           toast.error('Sincronizzazione non avviata', r.error ?? '')
@@ -140,7 +153,7 @@ export default function Dashboard() {
         setSyncing(false)
       }
     },
-    [syncing, pushLog],
+    [syncing, pushLog, blockSize],
   )
 
   const cancelSync = useCallback(() => {
@@ -176,14 +189,17 @@ export default function Dashboard() {
     }
   }, [pushLog])
 
-  // Aggregate disk pre-flight (PRECHECK-01): fetch the GO/NO-GO readout for the modlist.
+  // Aggregate disk pre-flight (PRECHECK-01): fetch the GO/NO-GO readout for the
+  // run PIANIFICATO — con un blocco Run-Prog valuta lo spazio del solo blocco.
   const refreshPreflight = useCallback(() => {
-    const api = syncBridge() as unknown as { sync?: { preflight?: () => Promise<DiskPreflightUI> } }
+    const api = syncBridge() as unknown as {
+      sync?: { preflight?: (o?: { limit?: number }) => Promise<DiskPreflightUI> }
+    }
     api?.sync
-      ?.preflight?.()
+      ?.preflight?.(blockSize > 0 ? { limit: blockSize } : undefined)
       .then(setDiskPf)
       .catch(() => setDiskPf(null))
-  }, [])
+  }, [blockSize])
   useEffect(() => {
     refreshPreflight()
   }, [refreshPreflight])
@@ -341,6 +357,22 @@ export default function Dashboard() {
                 </>
               )}
             </button>
+            {/* Run-Prog: blocco progressivo */}
+            <label className="flex items-center justify-between gap-2 text-xs text-dark-300">
+              <span title="Ogni esecuzione elabora le prossime N mod non ancora presenti nello StockGame. 0 = intera modlist in un unico run.">
+                Blocco Run-Prog (mod per esecuzione)
+              </span>
+              <input
+                type="number"
+                min={0}
+                max={5000}
+                step={50}
+                value={blockSize}
+                disabled={syncing}
+                onChange={(e) => setBlockSize(Math.max(0, Math.min(5000, Number(e.target.value) || 0)))}
+                className="input-field w-24 text-right"
+              />
+            </label>
             <Toggle
               checked={!!settings.autoSyncOnLaunch}
               onChange={toggleAutoStart}
@@ -640,6 +672,11 @@ export default function Dashboard() {
               <HardDrive size={16} className={diskPf.ok ? 'text-green-400' : 'text-red-400'} />
               <span className="text-sm font-bold text-dark-100" style={{ fontFamily: 'Cinzel, serif' }}>
                 Pre-flight disco · StockGame
+                {diskPf.modsSelected != null && diskPf.modsSelected < diskPf.modsTotal && (
+                  <span className="ml-2 text-[10px] font-normal text-soul-300">
+                    blocco {diskPf.modsSelected} / {diskPf.modsTotal} mod
+                  </span>
+                )}
               </span>
             </div>
             <span
@@ -652,7 +689,7 @@ export default function Dashboard() {
             <PfStat
               label="Richiesto"
               value={`${(diskPf.requiredBytes / 1024 ** 3).toFixed(1)} GB`}
-              sub={`${diskPf.modsTotal} mod × ${diskPf.extractionOverhead} × ${diskPf.safetyFactor}`}
+              sub={`${diskPf.modsSelected ?? diskPf.modsTotal} mod × ${diskPf.extractionOverhead} × ${diskPf.safetyFactor}`}
             />
             <PfStat label="Disponibile" value={`${(diskPf.freeBytes / 1024 ** 3).toFixed(1)} GB`} />
             <PfStat

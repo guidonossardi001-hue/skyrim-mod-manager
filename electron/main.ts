@@ -31,6 +31,7 @@ import {
 import {
   runMassSync,
   stockGameModsDir,
+  modDestDir,
   diskPreflight,
   type MassSyncDeps,
   type SyncMod,
@@ -584,6 +585,14 @@ app.whenReady().then(() => {
     return []
   }
 
+  // Selezione del blocco Run-Prog: senza limit → tutta la lista; con limit → le
+  // prossime N mod il cui dir di estrazione non esiste ancora (progressione reale).
+  const selectSyncBlock = (all: SyncMod[], stockDir: string, limit?: number): SyncMod[] => {
+    if (!limit || limit <= 0) return all
+    const modsDir = stockGameModsDir(stockDir)
+    return all.filter((m) => !existsSync(modDestDir(modsDir, m))).slice(0, limit)
+  }
+
   let syncAbort: AbortController | null = null
   let syncState: SyncProgress | null = null
   ipcMain.handle('sync:start', (_e, opts?: { concurrency?: number; limit?: number }) => {
@@ -599,7 +608,11 @@ app.whenReady().then(() => {
     const steam = resolveGameSource()
     const all = loadSyncMods()
     if (!all.length) return { ok: false, error: 'Nessun mod da sincronizzare (backup e scan Vortex vuoti).' }
-    const mods = opts?.limit && opts.limit > 0 ? all.slice(0, opts.limit) : all
+    // Run-Prog: con un limit il blocco è composto dalle prossime N mod NON ancora
+    // presenti nello StockGame (non le prime N della lista, che dopo il primo run
+    // sarebbero tutte skip). Senza limit: intera lista (lo skip fa da resume).
+    const mods = selectSyncBlock(all, stockDir, opts?.limit)
+    if (!mods.length) return { ok: false, error: 'Tutte le mod risultano già sincronizzate nello StockGame.' }
     const downloadsDir = join(app.getPath('userData'), 'downloads')
     const concurrency =
       opts?.concurrency ?? Math.max(1, Math.min(8, Number(store.get('downloadThreads')) || 4))
@@ -659,14 +672,17 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('sync:status', () => syncState)
   // Aggregate disk pre-flight WITHOUT starting the sync — for the Dashboard GO/NO-GO readout.
-  ipcMain.handle('sync:preflight', async () => {
+  // Con un limit valuta lo spazio del SOLO blocco pianificato (Run-Prog), così la
+  // card riflette il run che verrà davvero lanciato, non l'intera modlist.
+  ipcMain.handle('sync:preflight', async (_e, opts?: { limit?: number }) => {
     const stockDir = resolveStockTarget()
-    const mods = loadSyncMods()
+    const all = loadSyncMods()
+    const mods = selectSyncBlock(all, stockDir, opts?.limit)
     const pf = await diskPreflight(
       { exists: existsSync, freeSpace: getFreeSpace },
       { mods, stockGameDir: stockDir, ...syncFactors() },
     )
-    return { ...pf, stockGameDir: stockDir, modsTotal: mods.length }
+    return { ...pf, stockGameDir: stockDir, modsTotal: all.length, modsSelected: mods.length }
   })
 
   // ── Vortex importer ────────────────────────────────────────────────────────

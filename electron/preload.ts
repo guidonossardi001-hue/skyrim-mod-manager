@@ -157,7 +157,7 @@ contextBridge.exposeInMainWorld('api', {
     start: (opts?: { concurrency?: number; limit?: number }) => invoke('sync:start', opts),
     cancel: () => invoke('sync:cancel'),
     status: () => invoke('sync:status'),
-    preflight: () => invoke('sync:preflight'),
+    preflight: (opts?: { limit?: number }) => invoke('sync:preflight', opts),
   },
 
   // Incremental (delta) update engine — signed-manifest ingest + gated apply

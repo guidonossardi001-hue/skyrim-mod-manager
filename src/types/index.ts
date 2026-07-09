@@ -260,7 +260,7 @@ declare global {
         }): Promise<{ ok: boolean; total?: number; stockGameDir?: string; error?: string }>
         cancel(): Promise<{ ok: boolean }>
         status(): Promise<SyncProgressUI | null>
-        preflight(): Promise<DiskPreflightUI>
+        preflight(opts?: { limit?: number }): Promise<DiskPreflightUI>
       }
     }
   }
@@ -277,6 +277,8 @@ export interface DiskPreflightUI {
   ok: boolean
   stockGameDir: string
   modsTotal: number
+  /** Mod effettivamente selezionate per il run pianificato (blocco Run-Prog). */
+  modsSelected?: number
 }
 
 // Live mass-sync progress pushed on the 'sync:progress' channel.
