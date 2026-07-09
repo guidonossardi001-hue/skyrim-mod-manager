@@ -8,16 +8,49 @@
 // signature it emits verifies against the pinned public key exactly like Python's.
 //
 // Usage:  node scripts/build_remote_catalog.mjs
-// Reads:  secrets/release_priv.pem   (gitignored; matches pinnedKey.ts)
+// Reads:  la chiave privata dal percorso in $SKYRIM_RELEASE_PRIV_KEY_PATH
+//         (FUORI dall'albero del progetto; se cifrata, passphrase da
+//         $SKYRIM_RELEASE_KEY_PASSPHRASE) — mai un path fisso nel repo.
 // Writes: electron/delta/examples/catalog.remote.json         (manifest body)
 //         electron/delta/examples/catalog.remote.signed.json  (signed envelope)
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
+
+// ── Chiave privata: SOLO da env, SOLO fuori dal progetto ─────────────────────
+function loadReleasePrivateKey() {
+  const raw = process.env.SKYRIM_RELEASE_PRIV_KEY_PATH
+  if (!raw) {
+    console.error(
+      'Percorso chiave privata non impostato.\n' +
+        'Imposta SKYRIM_RELEASE_PRIV_KEY_PATH (es. %USERPROFILE%\\.skyrim-release-keys\\release_priv.pem)',
+    )
+    process.exit(1)
+  }
+  const keyPath = resolve(raw)
+  if (keyPath.toLowerCase().startsWith(resolve(ROOT).toLowerCase())) {
+    console.error(`RIFIUTATO: la chiave privata (${keyPath}) è DENTRO l'albero del progetto. Spostala fuori.`)
+    process.exit(1)
+  }
+  const pem = readFileSync(keyPath)
+  if (pem.includes('ENCRYPTED')) {
+    const passphrase = process.env.SKYRIM_RELEASE_KEY_PASSPHRASE
+    if (!passphrase) {
+      console.error(
+        'La chiave è cifrata: imposta SKYRIM_RELEASE_KEY_PASSPHRASE nella sessione corrente.\n' +
+          '(PowerShell:  $env:SKYRIM_RELEASE_KEY_PASSPHRASE = Read-Host -MaskInput "Passphrase")',
+      )
+      process.exit(1)
+    }
+    return createPrivateKey({ key: pem, passphrase })
+  }
+  console.error(`⚠ ATTENZIONE: la chiave ${keyPath} è IN CHIARO su disco — migrala al formato cifrato.`)
+  return createPrivateKey(pem)
+}
 
 // MUST stay byte-identical to electron/delta/canonicalJson.ts.
 function sortDeep(v) {
@@ -126,12 +159,13 @@ const body = {
 
 const payload = Buffer.from(canonical(body), 'utf8')
 const sha256 = createHash('sha256').update(payload).digest('hex')
-const priv = createPrivateKey(readFileSync(join(ROOT, 'secrets/release_priv.pem')))
+const priv = loadReleasePrivateKey()
 const sig_ed25519 = sign(null, payload, priv).toString('hex')
 const envelope = { manifest: body, sha256, sig_ed25519 }
 
 // Self-verify against the committed PUBLIC key before writing (sign→verify roundtrip).
-const pub = createPublicKey(readFileSync(join(ROOT, 'secrets/release_pub.pem')))
+// La pubblica è tracciata in docs/keys/ (è pubblica per definizione).
+const pub = createPublicKey(readFileSync(join(ROOT, 'docs/keys/release_pub.pem')))
 if (!verify(null, payload, pub, Buffer.from(sig_ed25519, 'hex'))) throw new Error('self-verify FAILED')
 
 writeFileSync(join(ROOT, 'electron/delta/examples/catalog.remote.json'), JSON.stringify(body, null, 2) + '\n')

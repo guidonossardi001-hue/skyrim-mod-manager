@@ -27,7 +27,7 @@ const apiKey =
     ? readFileSync(join(ROOT, 'secrets', 'nexus.key'), 'utf8').trim()
     : '')
 if (!apiKey) {
-  console.error('manca secrets/nexus.key')
+  console.error('NEXUS_API_KEY non impostata (il file secrets/nexus.key è stato dismesso)')
   process.exit(1)
 }
 

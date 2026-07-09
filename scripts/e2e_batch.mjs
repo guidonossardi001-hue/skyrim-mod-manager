@@ -326,7 +326,7 @@ async function processMod(m, apiKey, { resumeTest = false } = {}) {
   log(`═══ E2E-BATCH @ ${new Date().toISOString()} ═══`)
   if (!existsSync(SEVENZIP)) fail('7-Zip non trovato')
   const apiKey = readApiKey()
-  if (!apiKey) fail('nessuna chiave (secrets/nexus.key o $NEXUS_API_KEY)')
+  if (!apiKey) fail('NEXUS_API_KEY non impostata (il file secrets/nexus.key è stato dismesso)')
 
   const batch = await discoverBatch(apiKey)
   if (!batch.length) fail('nessun target selezionato')

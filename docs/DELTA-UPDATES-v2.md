@@ -135,12 +135,26 @@ La canonicalizzazione JSON (`sort_keys`, `separators=(",",":")`, `ensure_ascii=F
 
 ## 9. Setup chiave di firma (runbook CI)
 
+La chiave privata vive SEMPRE cifrata (PKCS8 + passphrase) e SEMPRE fuori
+dall'albero del progetto: gli script la risolvono da
+`SKYRIM_RELEASE_PRIV_KEY_PATH` e rifiutano percorsi interni al repo.
+
 ```bash
 pip install cryptography
-python scripts/sign_manifest.py keygen release_priv.pem release_pub.pem
-# 1) conserva release_priv.pem nel secret store CI (mai nel repo)
-# 2) incolla release_pub.pem in PINNED_PUBLIC_KEY_PEM (electron/delta/engine.ts)
-# 3) in pipeline di pubblicazione catalogo:
-python scripts/sign_manifest.py sign catalog.json release_priv.pem catalog.signed.json
-# 4) pubblica catalog.signed.json su raw.githubusercontent (l'app lo verifica con la chiave pinnata)
+
+# Generazione (chiede la passphrase in modo interattivo; la privata è cifrata):
+set SKYRIM_RELEASE_PRIV_KEY_PATH=%USERPROFILE%\.skyrim-release-keys\release_priv.pem
+python scripts/sign_manifest.py keygen
+# 1) la privata cifrata resta in %USERPROFILE%\.skyrim-release-keys (o nel secret store CI)
+# 2) la pubblica è scritta in docs/keys/release_pub.pem → incollala in
+#    PINNED_PUBLIC_KEY_PEM (electron/delta/pinnedKey.ts)
+
+# Migrazione di una vecchia chiave in chiaro:
+python scripts/sign_manifest.py encrypt-key --in vecchia_priv.pem
+#   (equivalente Node senza Python: node scripts/protect_release_key.mjs)
+
+# In pipeline di pubblicazione catalogo (CI: passphrase da secret store):
+#   env: SKYRIM_RELEASE_PRIV_KEY_PATH, SKYRIM_RELEASE_KEY_PASSPHRASE
+python scripts/sign_manifest.py sign catalog.json catalog.signed.json
+# pubblica catalog.signed.json su raw.githubusercontent (l'app lo verifica con la chiave pinnata)
 ```

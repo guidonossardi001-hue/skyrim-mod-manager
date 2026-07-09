@@ -194,9 +194,9 @@ function countFilesRec(dir) {
   const apiKey = readApiKey()
   if (!apiKey) {
     log('⏸  NESSUNA CHIAVE TROVATA — dry-run completato (selezione target OK).')
-    log('   Per il download reale, inserisci la chiave Premium in UNO di questi modi:')
-    log('     • crea il file  secrets\\nexus.key  con dentro SOLO la chiave (una riga), oppure')
-    log('     • PowerShell:    $env:NEXUS_API_KEY = "la-tua-chiave"   (vale per la sessione)')
+    log('   Per il download reale, imposta la chiave Premium via ambiente:')
+    log('     • PowerShell:    $env:NEXUS_API_KEY = Read-Host -MaskInput "API key"   (vale per la sessione)')
+    log('     (il file secrets/nexus.key in chiaro è stato dismesso)')
     log('   Poi rilancia:   node scripts/e2e_download.mjs')
     process.exit(2)
   }

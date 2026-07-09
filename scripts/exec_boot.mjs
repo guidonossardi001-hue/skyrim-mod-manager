@@ -17,7 +17,15 @@ import { Readable } from 'stream'
 import { pipeline } from 'stream/promises'
 
 const ROOT = 'C:/ai/skyrim-mod-manager'
-const KEY = readFileSync(join(ROOT, 'secrets', 'nexus.key'), 'utf8').trim()
+// La chiave arriva SOLO dall'ambiente: il file secrets/nexus.key in chiaro è stato
+// dismesso (l'app usa il secret store cifrato; gli script usano $NEXUS_API_KEY).
+const KEY = process.env.NEXUS_API_KEY?.trim()
+if (!KEY) {
+  console.error(
+    'NEXUS_API_KEY non impostata. PowerShell:  $env:NEXUS_API_KEY = Read-Host -MaskInput "API key"',
+  )
+  process.exit(1)
+}
 const SEVENZIP = join(ROOT, 'resources', '7zip-full', '7z.exe')
 const DL = join(ROOT, 'data', 'boot_cache', 'downloads')
 const SG = join(ROOT, 'data', 'StockGame', 'mods')
