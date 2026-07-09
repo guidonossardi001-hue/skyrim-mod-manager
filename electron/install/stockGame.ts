@@ -76,6 +76,31 @@ export function classifyDataEntry(name: string, isDir: boolean): FileKind {
   return DATA_VANILLA_PATTERNS.some((re) => re.test(name)) ? 'vanilla' : 'skip'
 }
 
+// ── Hybrid isolation policy ───────────────────────────────────────────────────
+//
+// HARDLINK-FIRST is unsafe for the load-bearing, mutation-sensitive files: a
+// hardlink shares the inode with the Steam source, so a Steam verify/update — or
+// any tool that writes the source file in place — would silently reach into the
+// "isolated" StockGame. So we force a REAL physical copy for the executables and
+// every plugin/load-order file (.esm/.esl/.ccc); the large, effectively read-only
+// bulk (.bsa archives + the Strings/ and Video/ folders) may still be hardlinked
+// to keep the StockGame at ~0 extra bytes.
+
+/** Root executables that must never be a hardlink (independent from Steam). */
+export const PHYSICAL_COPY_ROOT_FILES = new Set<string>(['skyrimse.exe', 'skyrimselauncher.exe'])
+
+/** Plugin/load-order extensions that must be a real copy (not a hardlink). */
+export const PHYSICAL_COPY_EXTS = /\.(esm|esl|ccc)$/i
+
+/**
+ * True ⇒ this planned file MUST be a real byte copy (never a hardlink), even on
+ * the same volume. `rel` is the path relative to the game root (forward slashes).
+ */
+export function requiresPhysicalCopy(rel: string): boolean {
+  const base = rel.replace(/\\/g, '/').split('/').pop()?.toLowerCase() ?? ''
+  return PHYSICAL_COPY_ROOT_FILES.has(base) || PHYSICAL_COPY_EXTS.test(base)
+}
+
 // ── Plan ─────────────────────────────────────────────────────────────────────
 
 export interface PlannedFile {
@@ -268,7 +293,7 @@ export function createStockGame(
   const filesTotal = plan.files.length
   for (let i = 0; i < filesTotal; i++) {
     const f = plan.files[i]
-    const placed = placeFile(f.src, join(targetDir, f.rel), preferLink)
+    const placed = placeFile(f.src, join(targetDir, f.rel), preferLink && !requiresPhysicalCopy(f.rel))
     if (placed === 'hardlinked') hardlinked++
     else if (placed === 'copied') copied++
     else alreadyPresent++
@@ -365,7 +390,11 @@ export async function createStockGameAsync(
   const now = () => globalThis.performance?.now?.() ?? 0
   for (let i = 0; i < filesTotal; i++) {
     const f = plan.files[i]
-    const placed = await placeFileAsync(f.src, join(targetDir, f.rel), preferLink)
+    const placed = await placeFileAsync(
+      f.src,
+      join(targetDir, f.rel),
+      preferLink && !requiresPhysicalCopy(f.rel),
+    )
     if (placed === 'hardlinked') hardlinked++
     else if (placed === 'copied') copied++
     else alreadyPresent++

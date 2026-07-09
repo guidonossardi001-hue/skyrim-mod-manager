@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
 import { join, resolve, dirname } from 'path'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
@@ -505,6 +505,27 @@ app.whenReady().then(() => {
         .on('end', () => res(h.digest('hex')))
         .on('error', rej)
     })
+  // Recursively sum file sizes under `p` (0 if missing/empty). Used by the resume
+  // check to distinguish a finished extraction from an empty/corrupt partial dir.
+  const dirBytesSync = (p: string): number => {
+    let total = 0
+    let entries: import('fs').Dirent[]
+    try {
+      entries = readdirSync(p, { withFileTypes: true })
+    } catch {
+      return 0
+    }
+    for (const e of entries) {
+      const abs = join(p, e.name)
+      try {
+        if (e.isDirectory()) total += dirBytesSync(abs)
+        else if (e.isFile()) total += statSync(abs).size
+      } catch {
+        /* skip unreadable entry */
+      }
+    }
+    return total
+  }
   const buildSyncDeps = (): MassSyncDeps => ({
     resolveLink: (modId, fileId) =>
       resolveDownloadLink(axiosJson, { modId, fileId, apiKey: readSecret('nexusApiKey') || undefined }),
@@ -530,6 +551,9 @@ app.whenReady().then(() => {
       }
     },
     freeSpace: (p) => getFreeSpace(p),
+    // Real bytes under an extracted mod dir (statSync-summed) — resume uses this to tell
+    // a completed mod from an empty/corrupt partial and re-extract the latter.
+    dirBytes: (p) => dirBytesSync(p),
   })
   const syncFactors = () => ({
     extractionOverhead:
@@ -680,7 +704,12 @@ app.whenReady().then(() => {
     const mods = selectSyncBlock(all, stockDir, opts?.limit)
     const pf = await diskPreflight(
       { exists: existsSync, freeSpace: getFreeSpace },
-      { mods, stockGameDir: stockDir, ...syncFactors() },
+      {
+        mods,
+        stockGameDir: stockDir,
+        downloadsDir: join(app.getPath('userData'), 'downloads'),
+        ...syncFactors(),
+      },
     )
     return { ...pf, stockGameDir: stockDir, modsTotal: all.length, modsSelected: mods.length }
   })

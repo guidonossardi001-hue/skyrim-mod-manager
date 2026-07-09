@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { isPathInside } from './../install/extract'
+import { sameVolume } from './../install/stockGame'
 import { CircuitBreaker, withRetry } from './../install/retryPolicy'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -70,6 +71,10 @@ export interface MassSyncDeps {
   ensureDir(p: string): void
   remove(p: string): void // file OR dir (rmSync recursive/force) — archive cleanup + partial-extract cleanup
   freeSpace(path: string): Promise<number> // bytes free on the volume containing `path`
+  // Total real bytes under an extracted mod dir (statSync-summed). 0 ⇒ empty/corrupt
+  // partial folder that resume must DISCARD and re-extract rather than skip. Optional:
+  // when absent, resume falls back to presence-only (an existing dir counts as done).
+  dirBytes?(p: string): number
 }
 
 export interface MassSyncConfig {
@@ -139,14 +144,21 @@ export function modDestDir(modsDir: string, m: SyncMod): string {
 }
 
 // ── Aggregate disk pre-flight (PRECHECK-01) ──────────────────────────────────
+
+/** Extracted output is estimated as pendingBytes × extractionOverhead. */
+export const SAME_DISK_EXTRACT_FACTOR = 1.5 // same-disk: room for archives + extracted×1.5
+export const MIN_FREE_MARGIN_BYTES = 15 * 1024 ** 3 // hard NO-GO floor: keep ≥15 GB free after the run
+
 export interface DiskPreflight {
   pendingBytes: number // raw sum of fileSize for mods NOT yet present
   extractionOverhead: number // extracted-vs-archive multiplier applied
   safetyFactor: number // headroom multiplier applied
-  requiredBytes: number // pendingBytes × extractionOverhead × safetyFactor
+  sameDisk: boolean // downloads cache and StockGame share one volume
+  requiredBytes: number // same-disk: pending + extracted×1.5 ; else extracted×safetyFactor
   freeBytes: number // free space on the StockGame volume
-  marginBytes: number // freeBytes − requiredBytes (negative ⇒ NO-GO)
-  ok: boolean // marginBytes ≥ 0
+  minFreeMarginBytes: number // required residual free space AFTER the run (15 GB floor)
+  marginBytes: number // freeBytes − requiredBytes (the projected residual)
+  ok: boolean // marginBytes ≥ minFreeMarginBytes
 }
 
 /** Sum fileSize of mods STILL TO sync (their extract dir does not yet exist). */
@@ -166,35 +178,56 @@ export function computeDiskPreflight(p: {
   freeBytes: number
   extractionOverhead?: number
   safetyFactor?: number
+  sameDisk?: boolean
 }): DiskPreflight {
   const extractionOverhead = p.extractionOverhead ?? 1.1
   const safetyFactor = p.safetyFactor ?? 1.15
-  const requiredBytes = Math.ceil(Math.max(0, p.pendingBytes) * extractionOverhead * safetyFactor)
+  const sameDisk = p.sameDisk ?? false
+  const pending = Math.max(0, p.pendingBytes)
+  const extractedBytes = pending * extractionOverhead
+  // Same disk ⇒ the downloaded archives AND the extracted output live on ONE volume,
+  // so both must fit: Fabbisogno = Archivi_Pending + (Estratto × 1.5). Cross-disk ⇒
+  // only the extracted output lands here, with the usual safety headroom.
+  const requiredBytes = Math.ceil(
+    sameDisk ? pending + extractedBytes * SAME_DISK_EXTRACT_FACTOR : extractedBytes * safetyFactor,
+  )
   const marginBytes = p.freeBytes - requiredBytes
   return {
     pendingBytes: p.pendingBytes,
     extractionOverhead,
     safetyFactor,
+    sameDisk,
     requiredBytes,
     freeBytes: p.freeBytes,
+    minFreeMarginBytes: MIN_FREE_MARGIN_BYTES,
     marginBytes,
-    ok: marginBytes >= 0,
+    // NO-GO unless the projected residual free space stays at/above the 15 GB floor.
+    ok: marginBytes >= MIN_FREE_MARGIN_BYTES,
   }
 }
 
 /** IO wrapper: compute the pre-flight for a run (sums pending, reads free space). */
 export async function diskPreflight(
   deps: Pick<MassSyncDeps, 'exists' | 'freeSpace'>,
-  cfg: { mods: SyncMod[]; stockGameDir: string; extractionOverhead?: number; safetyFactor?: number },
+  cfg: {
+    mods: SyncMod[]
+    stockGameDir: string
+    downloadsDir?: string
+    extractionOverhead?: number
+    safetyFactor?: number
+  },
 ): Promise<DiskPreflight> {
   const modsDir = stockGameModsDir(cfg.stockGameDir)
   const pend = pendingBytes(cfg.mods, modsDir, deps.exists)
   const free = await deps.freeSpace(cfg.stockGameDir)
+  // Same-disk ⇒ archives + extracted output compete for one volume (heavier estimate).
+  const sameDisk = cfg.downloadsDir ? sameVolume(cfg.downloadsDir, cfg.stockGameDir) : false
   return computeDiskPreflight({
     pendingBytes: pend,
     freeBytes: free,
     extractionOverhead: cfg.extractionOverhead,
     safetyFactor: cfg.safetyFactor,
+    sameDisk,
   })
 }
 
@@ -210,17 +243,21 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     const pf = await diskPreflight(deps, {
       mods: cfg.mods,
       stockGameDir: cfg.stockGameDir,
+      downloadsDir: cfg.downloadsDir,
       extractionOverhead: cfg.extractionOverhead,
       safetyFactor: cfg.safetyFactor,
     })
     const gb = (b: number) => (b / 1024 ** 3).toFixed(1)
     if (!pf.ok) {
-      const msg = `Spazio su disco insufficiente per lo StockGame: richiesti ~${gb(pf.requiredBytes)} GB (pending ${gb(pf.pendingBytes)} × ${pf.extractionOverhead} estrazione × ${pf.safetyFactor} sicurezza), liberi ${gb(pf.freeBytes)} GB → mancano ${gb(-pf.marginBytes)} GB. Libera spazio o sposta lo StockGame su un volume più capiente.`
+      const formula = pf.sameDisk
+        ? `stesso disco: archivi ${gb(pf.pendingBytes)} + estratto×${SAME_DISK_EXTRACT_FACTOR}`
+        : `${gb(pf.pendingBytes)} pending × ${pf.extractionOverhead} estrazione × ${pf.safetyFactor} sicurezza`
+      const msg = `Spazio su disco insufficiente per lo StockGame: richiesti ~${gb(pf.requiredBytes)} GB (${formula}), liberi ${gb(pf.freeBytes)} GB → residuo previsto ${gb(pf.marginBytes)} GB, sotto il minimo di ${gb(pf.minFreeMarginBytes)} GB. Libera spazio o sposta lo StockGame su un volume più capiente.`
       cfg.onLog?.(msg)
       throw new Error(msg)
     }
     cfg.onLog?.(
-      `Pre-flight disco OK: richiesti ~${gb(pf.requiredBytes)} GB · liberi ${gb(pf.freeBytes)} GB · margine ${gb(pf.marginBytes)} GB`,
+      `Pre-flight disco OK${pf.sameDisk ? ' (stesso disco)' : ''}: richiesti ~${gb(pf.requiredBytes)} GB · liberi ${gb(pf.freeBytes)} GB · residuo ${gb(pf.marginBytes)} GB (min ${gb(pf.minFreeMarginBytes)} GB)`,
     )
   }
 
@@ -283,7 +320,14 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     const destDir = modDestDir(modsDir, m)
     if (!isPathInside(cfg.stockGameDir, destDir))
       throw new Error('target di estrazione fuori dallo StockGame')
-    if (deps.exists(destDir)) return 'skipped'
+    // Resume: an existing dest dir counts as "done" ONLY if it actually holds bytes.
+    // A prior crash could leave an empty/corrupt partial dir — check real bytes with
+    // dirBytes (statSync-summed) and DISCARD it so it gets re-extracted, not skipped.
+    if (deps.exists(destDir)) {
+      const bytes = deps.dirBytes ? deps.dirBytes(destDir) : 1
+      if (bytes > 0) return 'skipped'
+      deps.remove(destDir) // empty/corrupt partial → wipe and fall through to re-download+extract
+    }
 
     // 1) download with retry (resume-aware: streamDownload resumes from .part via Range).
     let archive = ''

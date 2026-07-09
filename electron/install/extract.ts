@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, statSync } from 'fs'
+import { createReadStream, existsSync, mkdirSync, statSync, rmSync, renameSync } from 'fs'
 import { createHash } from 'crypto'
 import { spawn } from 'child_process'
 import { resolve, relative, isAbsolute, extname } from 'path'
@@ -160,42 +160,73 @@ export async function extractArchive(
   destDir: string,
   opts: ExtractOptions = {},
 ): Promise<{ method: '7z' | '7za' | 'zip' }> {
-  // destDir (mods/<modname>) is shallow; create it plainly. The DEEP internal tree is
-  // created by the extractor itself (7-Zip handles \\?\ via its -o argument).
-  if (!existsSync(destDir)) mkdirSync(destDir, { recursive: true })
+  // ATOMIC extraction: unpack into a sibling `<destDir>.tmp` and, only on full
+  // success, atomically rename it into place. A crash/abort/partial extract then
+  // leaves ONLY the .tmp behind — never a half-written destDir that a resumed run
+  // would mistake for a completed mod. Any stale .tmp from a previous crash is
+  // discarded first, and the .tmp is cleaned up if extraction fails.
   const ext = extname(archivePath).toLowerCase()
   const full7z = opts.full7zPath && existsSync(opts.full7zPath) ? opts.full7zPath : null
   const bundled = opts.bundled7zaPath && existsSync(opts.bundled7zaPath) ? opts.bundled7zaPath : null
 
-  if (ext === '.rar') {
-    // .rar needs the FULL 7-Zip (Rar codec): system install (primary) or the bundled
-    // full 7z (fallback) — both resolved by the caller via resolveRar7z.
-    if (full7z) {
-      await run7z(full7z, archivePath, toLongPath(destDir), opts.onProgress, opts.signal)
-      return { method: '7z' }
+  const tmpDir = destDir + '.tmp'
+  if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+  // tmpDir (mods/<modname>.tmp) is shallow; create it plainly. The DEEP internal tree is
+  // created by the extractor itself (7-Zip handles \\?\ via its -o argument).
+  mkdirSync(tmpDir, { recursive: true })
+
+  const cleanupTmp = () => {
+    try {
+      if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+    } catch {
+      /* best effort */
     }
-    throw new Error(
-      'Estrazione .rar non disponibile: nessun 7-Zip completo trovato. Installa 7-Zip da 7-zip.org (verrà rilevato automaticamente).',
-    )
   }
 
-  // .7z/.zip/…: the bundled standalone 7za is the default (cross-platform, no config);
-  // a full 7-Zip works too and serves as a fallback.
-  const engine = bundled ?? full7z
-  if (engine) {
-    await run7z(engine, archivePath, toLongPath(destDir), opts.onProgress, opts.signal)
-    return { method: engine === bundled ? '7za' : '7z' }
+  let method: '7z' | '7za' | 'zip'
+  try {
+    if (ext === '.rar') {
+      // .rar needs the FULL 7-Zip (Rar codec): system install (primary) or the bundled
+      // full 7z (fallback) — both resolved by the caller via resolveRar7z.
+      if (!full7z) {
+        throw new Error(
+          'Estrazione .rar non disponibile: nessun 7-Zip completo trovato. Installa 7-Zip da 7-zip.org (verrà rilevato automaticamente).',
+        )
+      }
+      await run7z(full7z, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal)
+      method = '7z'
+    } else {
+      // .7z/.zip/…: the bundled standalone 7za is the default (cross-platform, no config);
+      // a full 7-Zip works too and serves as a fallback.
+      const engine = bundled ?? full7z
+      if (engine) {
+        await run7z(engine, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal)
+        method = engine === bundled ? '7za' : '7z'
+      } else if (ext === '.zip') {
+        await extractZipSafely(
+          archivePath,
+          tmpDir,
+          opts.admZipMaxBytes ?? 256 * 1024 * 1024,
+          opts.onProgress,
+          opts.signal,
+        )
+        method = 'zip'
+      } else {
+        throw new Error(`Nessun estrattore 7-Zip disponibile per ${ext || '(sconosciuto)'}`)
+      }
+    }
+  } catch (e) {
+    cleanupTmp()
+    throw e
   }
 
-  if (ext === '.zip') {
-    await extractZipSafely(
-      archivePath,
-      destDir,
-      opts.admZipMaxBytes ?? 256 * 1024 * 1024,
-      opts.onProgress,
-      opts.signal,
-    )
-    return { method: 'zip' }
+  // Commit: replace any prior/partial destDir, then atomic same-volume rename.
+  try {
+    if (existsSync(destDir)) rmSync(destDir, { recursive: true, force: true })
+    renameSync(tmpDir, destDir)
+  } catch (e) {
+    cleanupTmp()
+    throw e
   }
-  throw new Error(`Nessun estrattore 7-Zip disponibile per ${ext || '(sconosciuto)'}`)
+  return { method }
 }
