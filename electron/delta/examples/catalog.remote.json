@@ -1,0 +1,73 @@
+{
+  "release_tag": "2026.06-core",
+  "release_counter": 2,
+  "published_at": "2026-06-24T00:00:00Z",
+  "mods": [
+    {
+      "nexus_id": 17230,
+      "name": "SKSE64 – Skyrim Script Extender",
+      "version": "2.2.6",
+      "file_id": 430000,
+      "file_name": "skse64_2_02_06.7z",
+      "file_hash": "f7ea4d973220137f0949c22fbb66d71af19540a871dea4e16c34bd08e80a3d7a",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/17230/skse64_2_02_06.7z",
+      "priority_order": 1,
+      "category": "framework"
+    },
+    {
+      "nexus_id": 1137,
+      "name": "SkyUI",
+      "version": "5.2SE",
+      "file_id": 12604,
+      "file_name": "SkyUI_5_2_SE.7z",
+      "file_hash": "cdf96a841c73263c523ed8a3a4bf728bc8d339c70faad14d3457373f3d2d73b5",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/1137/SkyUI_5_2_SE.7z",
+      "priority_order": 2,
+      "category": "ui"
+    },
+    {
+      "nexus_id": 32444,
+      "name": "Address Library for SKSE Plugins",
+      "version": "1.6.1170.0",
+      "file_id": 559459,
+      "file_name": "AddressLibrary_1_6_1170.7z",
+      "file_hash": "7d481820d44cc5334b8abb65ae037ea52010e2d856ec150bbc1075786e477219",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/32444/AddressLibrary_1_6_1170.7z",
+      "priority_order": 3,
+      "category": "framework"
+    },
+    {
+      "nexus_id": 198,
+      "name": "CBBE – Caliente Beautiful Bodies",
+      "version": "2.7.0",
+      "file_id": 1572730,
+      "file_name": "CBBE_2_7_0.7z",
+      "file_hash": "457138ed75ad1deb6e2b2b464d3bb41cae363d6c04814ebe2837f7037e3cbcdb",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/198/CBBE_2_7_0.7z",
+      "priority_order": 4,
+      "category": "character"
+    },
+    {
+      "nexus_id": 89368,
+      "name": "MCO – Modern Combat Overhaul",
+      "version": "1.6.0.6",
+      "file_id": 451680,
+      "file_name": "MCO_1_6_0_6.7z",
+      "file_hash": "404bf41b35fbba535bf5acfb55e06502e39768c9ae88f15a45e8e68bd9471631",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/89368/MCO_1_6_0_6.7z",
+      "priority_order": 5,
+      "category": "combat"
+    },
+    {
+      "nexus_id": 1845,
+      "name": "Apocalypse – Magic of Skyrim",
+      "version": "9.46",
+      "file_id": 51382,
+      "file_name": "Apocalypse_9_46.7z",
+      "file_hash": "5b497676e233104c03615adbe03911e2bc5ee2c42834aea3b677a8def5e9fe44",
+      "download_url": "https://files.nexusmods.com/skyrimspecialedition/1845/Apocalypse_9_46.7z",
+      "priority_order": 6,
+      "category": "gameplay"
+    }
+  ]
+}

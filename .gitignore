@@ -1,0 +1,49 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# SEGRETI E CREDENZIALI — mai tracciati, in nessuna forma
+# ══════════════════════════════════════════════════════════════════════════════
+# NB: si esclude il CONTENUTO (secrets/*) e non la directory (secrets/), perché
+# git non può re-includere un file dentro una directory esclusa — così il solo
+# README di avvertenza resta tracciato, le chiavi mai.
+secrets/*
+!secrets/README-SICUREZZA.md
+*.pem
+!docs/keys/release_pub.pem
+*.key
+.env
+.env.*
+!.env.example
+
+# Database locali (secret store cifrato + dati app): vivono in userData, ma se
+# mai finissero nell'albero del progetto non devono essere tracciati.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dipendenze e output di build
+# ══════════════════════════════════════════════════════════════════════════════
+node_modules/
+dist/
+dist-electron/
+dist-smoke/
+release/
+coverage/
+*.tsbuildinfo
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Dati locali pesanti (download cache, StockGame, log)
+# ══════════════════════════════════════════════════════════════════════════════
+data/
+logs/
+*.log
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Editor e sistema operativo
+# ══════════════════════════════════════════════════════════════════════════════
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini

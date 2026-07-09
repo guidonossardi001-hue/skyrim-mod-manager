@@ -1,0 +1,17 @@
+{
+  // Dedicated config for the Electron main/preload code, which runs in Node
+  // (CommonJS) rather than the browser/ESM-bundler renderer. The root tsconfig.json
+  // still type-checks both during `npm run build`; this config gives editors and
+  // the production electron compile (build.ps1 / electron-builder) the correct
+  // module + resolution settings instead of the renderer's bundler semantics.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "allowImportingTsExtensions": false,
+    "isolatedModules": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": ["electron"]
+}

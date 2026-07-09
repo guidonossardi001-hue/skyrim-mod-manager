@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-electron/
+dist-smoke/
+release/
+data/
+resources/
+secrets/
+docs/
+coverage/
+package-lock.json
+*.md

@@ -1,0 +1,44 @@
+{
+  "manifest": {
+    "release_tag": "2026.06.22",
+    "release_counter": 1,
+    "published_at": "2026-06-22T00:00:00Z",
+    "mods": [
+      {
+        "nexus_id": 17230,
+        "name": "SKSE64",
+        "version": "2.2.6",
+        "file_id": 430000,
+        "file_name": "skse64_2_02_06.7z",
+        "file_hash": "a1b2c3",
+        "download_url": "https://files.nexusmods.com/skyrimspecialedition/17230/skse.7z",
+        "priority_order": 1,
+        "category": "framework"
+      },
+      {
+        "nexus_id": 1137,
+        "name": "SkyUI",
+        "version": "5.2SE",
+        "file_id": 120000,
+        "file_name": "SkyUI_5_2_SE.7z",
+        "file_hash": "d4e5f6",
+        "download_url": "https://files.nexusmods.com/skyrimspecialedition/1137/skyui.7z",
+        "priority_order": 2,
+        "category": "ui"
+      },
+      {
+        "nexus_id": 32444,
+        "name": "Address Library",
+        "version": "5.0",
+        "file_id": 88000,
+        "file_name": "AddressLibrary.7z",
+        "file_hash": "070809",
+        "download_url": "https://files.nexusmods.com/skyrimspecialedition/32444/addrlib.7z",
+        "priority_order": 3,
+        "category": "framework"
+      }
+    ]
+  },
+  "sha256": "1f74b27d166f290ea9666491e14e70c95c6ff3b6f8ef306744b4536335362dcd",
+  "sig_ed25519": "3132d510eb3d4327f683d0a169974d34354d97450cdc1e88bd5ce071c4ab577b44a7d7955f33c60866e522ec908b70d52af1482930703bb7c6487adf807c5408"
+}
