@@ -3,14 +3,14 @@
 > Lista azionabile. Ogni voce: contesto, azione, file, criticità. Niente è bloccante per la build (vedi GO_NO_GO.md).
 
 ## 🔴 Alta priorità (attivazione produzione)
-### T1 — Attivare Nexus reale  *(parz. sbloccato 2026-06-25)*
+### T1 — Attivare Nexus reale  *(parz. sbloccato 2026-06-25; sicurezza rinforzata 2026-07-09)*
 - **Contesto:** provider HTTP implementato e disabled-safe; oggi gira il mock. **Fatto:** toggle in-app `nexusEnabled` (Impostazioni) + gating `main.ts` su env **oppure** setting; chiave cifrata già iniettata in provider + `download_link`.
-- **Azione residua (utente):** incollare la **API key Premium** in Impostazioni → Nexus, premere **Verifica**, attivare il toggle. Poi verificare `getMod`/`getFiles`/`checkUpdate` reali + cache ETag/429 contro l'API vera.
+- **Fatto (2026-07-09):** la chiave NON transita più in chiaro sull'IPC — `settings:get/get-all` restituiscono solo un segnaposto mascherato (`********`), gli handler `nexus:*` la leggono **esclusivamente** dal secret store del main (mai passata dal renderer). `nexus:validate-key` accetta un candidato appena digitato (non ancora salvato) senza mai esporre il valore persistito.
+- **Azione residua (utente):** incollare la **API key Premium ruotata** (vedi nota sicurezza sotto) in Impostazioni → Nexus, premere **Verifica**, attivare il toggle. Poi verificare `getMod`/`getFiles`/`checkUpdate` reali + cache ETag/429 contro l'API vera.
 - **File:** `electron/nexus/httpProvider.ts`, `electron/main.ts` (handler `nexus:*`), `src/components/pages/Settings.tsx`.
 
-### Stock-UI — Pannello StockGame nel renderer
-- **Contesto:** backend StockGame completo (modulo + IPC `stockgame:detect|create` + evento progresso + `window.api.stockGame`), ma **manca la UI** che mostri sorgente/target/peso-stimato e lanci la build con barra di avanzamento.
-- **Azione:** sezione in Impostazioni o Dashboard: `stockGame.detect()` per anteprima (file/byte vanilla, byte mod saltati), bottone "Crea StockGame", listener `stockgame:progress`, scelta hardlink/copy.
+### ~~Stock-UI — Pannello StockGame nel renderer~~ → ✅ FATTO
+- `src/components/ui/StockGamePanel.tsx`: anteprima sorgente/destinazione + peso vanilla stimato/mod scartati (`stockGame.detect()`), bottone "Crea StockGame", barra di avanzamento live su `stockgame:progress`, scelta hardlink/copy. Cablato nella Dashboard.
 
 ### ~~E2E-DL — Test download reale end-to-end~~ → ✅ FATTO (2026-06-25)
 - **Superato con Premium reale:** `4k Farmhouse Fences SE` (38912/153295, 50 MB) → link CDN (`cf-files.nexusmods.com`) → download → **md5 ✓** vs backup → `7z t` ✓ → **8 file estratti** (96,3 MB) in `data/StockGame/mods/`. Harness `scripts/e2e_download.mjs` riusabile.
@@ -24,21 +24,74 @@
 - Orchestratore `electron/sync/massSync.ts` (resolve→download resumibile→md5 vs backup→estrai, concorrente, idempotente, cancellabile, **isolamento StockGame fail-closed**) + IPC `sync:start|cancel|status` + `window.api.sync`. Bottone "Sincronizza e Avvia" → conferma scale-aware + barra live `sync:progress`. 9 test.
 - **Residuo (utente):** il run reale dei 329 GB parte solo cliccando il bottone nell'**app desktop** (non nel preview browser) con Nexus abilitato. Eventuale step finale: cablare anche la creazione StockGame come pre-fase del sync + lancio Pandora/launch post-sync.
 
-### ~~Precheck-01 — Pre-flight disco aggregato~~ → ✅ FATTO (2026-06-26)
+### ~~Precheck-01 — Pre-flight disco aggregato~~ → ✅ FATTO (2026-06-26; ricalcolato per blocco 2026-07-09)
 - `massSync.ts`: `pendingBytes`/`computeDiskPreflight`/`diskPreflight` + enforcement bloccante fail-closed prima di ogni download; IPC `sync:preflight` + card GO/NO-GO Dashboard. +5 test.
-- **Verdetto reale ADESSO: NO-GO** — 4.568 mod → richiesti **416,8 GB** (329,5 × 1.10 × 1.15) vs **276 GB liberi su C:** = margine **−140,8 GB**. Il disco è saturo da Steam (236 GB) + archivi Vortex (329 GB). **Dipendenza**: liberare spazio (es. eliminare Vortex, ma è ciò che stiamo gating) o puntare lo StockGame su un volume ≥417 GB liberi.
+- **Verdetto storico (2026-06-26): NO-GO** — 4.568 mod → richiesti **416,8 GB** (329,5 × 1.10 × 1.15) vs **276 GB liberi su C:** = margine **−140,8 GB**.
+- **Aggiornamento (2026-07-09):** spazio libero su C: ricontrollato — ora **648,4 GB liberi** (282,1 GB usati), un salto di +372 GB rispetto al 26/06. Contro lo stesso requisito stimato (~416,8 GB per l'intera modlist), il margine tornerebbe **positivo (+231,6 GB)** → verdetto **presumibilmente GO** per l'intera lista, ma **da confermare nell'app** (la card Dashboard è la fonte di verità: il calcolo esatto dipende dal numero di mod ancora *pending* in quel momento). Con la card ora **per-blocco** (vedi Run-Prog sotto) il fabbisogno del primo blocco da 100 mod è comunque un ordine di grandezza più piccolo e quasi certamente GO anche nello scenario peggiore.
 
-### Run-Prog — Run reale progressivo (prossimo passo)
-- **Piano:** 100 mod → 300 mod → 500 mod → decisione finale. Misurare throughput/ETA reali, osservare 429+breaker+resume al limite API (~2500 req/giorno), confermare cleanup e isolamento a scala.
-- **Bloccante prima del run completo:** risolvere lo spazio disco (pre-flight NO-GO) e scegliere il volume StockGame.
+### ~~Run-Prog — Run reale progressivo~~ → ✅ IMPLEMENTATO (2026-07-09)
+- **Fatto:** `sync:start` accetta `limit` e seleziona le **prossime N mod non ancora presenti** nello StockGame (progressione reale tra run successivi — non le prime N della lista, che dopo il primo run sarebbero tutte skip). `sync:preflight` valuta lo spazio del **solo blocco pianificato** quando `limit` è impostato, così la card GO/NO-GO riflette il run che sta per partire. Dashboard: campo "Blocco Run-Prog" (default **100**, 0 = intera lista), badge "blocco N/tot" sulla card pre-flight, conferma e log consapevoli del blocco.
+- **File:** `electron/main.ts` (`selectSyncBlock`, handler `sync:start`/`sync:preflight`), `src/components/pages/Dashboard.tsx`, `electron/preload.ts`, `src/types/index.ts`.
+- **Residuo (utente):** eseguire davvero la sequenza 100 → 300 → 500 → decisione finale, osservando throughput/ETA reali, comportamento di 429+breaker+resume al limite API (~2500 req/giorno) e cleanup a scala. Ogni click successivo su "Sincronizza e Avvia" riprende automaticamente dal punto giusto (nessuna azione manuale tra un blocco e l'altro).
 
-### Run-Real — Avvio grafico reale (utente)
-- **Contesto:** tutto cablato; manca solo l'esecuzione reale dall'app desktop (e lo spazio disco).
-- **Azione:** `.\start.ps1 electron` → Dashboard → (opz.) crea StockGame → "Sincronizza e Avvia" → osservare barra live + card pre-flight.
+### ~~Run-Real — Avvio grafico reale~~ → ✅ FATTO (2026-07-09)
+- **Contesto:** tutto cablato; mancava solo l'esecuzione reale dall'app desktop.
+- **Fatto:** build di produzione verificata (`tsc` + `vite build`, `dist-electron` pulita a ogni build) e **boot reale dell'app collaudato**: finestra avviata, migrazioni schema v6 applicate (inclusi gli indici), auto-detect percorsi riuscito, sorgente sync caricata (4.568 mod dal backup).
+- **Avvio zero-sforzo:** `avvia_launcher.bat` in root — doppio click da Esplora Risorse: si posiziona da solo nel progetto (niente più ENOENT), ripara automaticamente un binario Electron mancante/corrotto, esegue `npm run build`, poi lancia `electron.exe` direttamente (bypassa del tutto la Execution Policy di PowerShell). Modalità rapida senza rebuild: `avvia_launcher.bat veloce`.
+- **Azione utente:** doppio click su `avvia_launcher.bat` → Dashboard → verificare card pre-flight (GO) → (opz.) "Crea StockGame" → "Sincronizza e Avvia" per il primo blocco Run-Prog.
 
 ### ~~T2 — Manifest catalogo remoto firmato~~ → ✅ FATTO (2026-06-24)
 - Catalogo reale firmato `electron/delta/examples/catalog.remote.signed.json` (release `2026.06-core`, counter 2, 6 mod con `version`/`file_id`/`file_hash` sha256 reale/host Nexus). Producer `scripts/build_remote_catalog.mjs` (parità Node del signer Python — stesso `canonicalJSON`+Ed25519, firma verificata dalla chiave pinnata). Cablato nella pagina Aggiornamenti. Test `electron/delta/remoteCatalog.test.ts` (4: verifica pinnata, schema, anti-tamper, ingest+drift).
 - **Residuo:** è un artefatto **bundlato** (non ancora servito via HTTP da un host reale) e i `file_hash` sono sha256 di un descrittore deterministico finché non si dispone degli archivi reali. Il fetch su rete reale resta Act-03.
+
+## 🔒 Sicurezza (hardening di produzione, 2026-07-09)
+### ~~SEC-01 — Materiale crittografico fuori dal repo, sempre cifrato~~ → ✅ FATTO
+- `scripts/sign_manifest.py`: la chiave privata di firma NON ha più un percorso fisso nel progetto — si risolve da `SKYRIM_RELEASE_PRIV_KEY_PATH` (o `--key`) e lo script **rifiuta** esplicitamente percorsi interni all'albero del repo. Su disco è **sempre** PKCS8 + `BestAvailableEncryption(passphrase)` (mai più `NoEncryption`); passphrase da prompt nascosto (`getpass`) o, in CI, da `SKYRIM_RELEASE_KEY_PASSPHRASE`. Nuovo comando `encrypt-key` per migrare una chiave storica in chiaro.
+- `scripts/build_remote_catalog.mjs` (il secondo produttore, prima hardcodava `secrets/release_priv.pem`) allineato alla stessa risoluzione via env + supporto PEM cifrata.
+- `scripts/protect_release_key.mjs` (nuovo, per macchine senza Python): migrazione one-shot — cifra, sposta fuori dal repo, e **valida il roundtrip di firma contro la chiave pubblica pinnata** prima di suggerire la cancellazione dell'originale. Eseguito con successo sulla chiave reale del progetto.
+- **Azione residua (utente):** eseguire i 3 comandi di migrazione (`node scripts/protect_release_key.mjs` → `icacls` → `setx SKYRIM_RELEASE_PRIV_KEY_PATH`), poi cancellare `secrets/release_priv.pem` e `secrets/release_pub.pem` (la pubblica canonica è tracciata in `docs/keys/release_pub.pem`).
+
+### ~~SEC-02 — `nexus.key` dismessa~~ → ✅ FATTO
+- Nessun codice applicativo l'ha mai letta (l'app usa il secret store cifrato via `safeStorage`/DPAPI). Gli script di sviluppo (`exec_boot.mjs`, `sync_smoke.ts`, `sync_batch_smoke.ts`, `e2e_download.mjs`, `e2e_batch.mjs`) ora richiedono **solo** `$env:NEXUS_API_KEY`.
+- **Azione residua (utente):** cancellare `secrets/nexus.key` e **ruotare la chiave** su nexusmods.com (è rimasta in chiaro su disco → va considerata esposta).
+
+### ~~SEC-03 — API key mai esposta al renderer~~ → ✅ FATTO
+- `settings:get`/`settings:get-all` restituiscono solo il segnaposto `********`; gli handler `nexus:search`/`nexus:get-mod` leggono la chiave **esclusivamente** main-side. `encryptSecret` ora è fail-closed (rifiuta di salvare se `safeStorage` non è disponibile, invece di ripiegare silenziosamente sul plaintext).
+
+### ~~SEC-04 — Lockdown IPC (esecuzione arbitraria, canali, path traversal)~~ → ✅ FATTO
+- `tools:launch-*` non accettano più un percorso `.exe` dal renderer: il main risolve l'eseguibile dal settings store (`toolPath()`); il renderer sceglie solo *quale* tool avviare. `electron/preload.ts`: whitelist esplicita dei 10 canali evento legittimi per `on()`/`off()` (prima si poteva sottoscrivere qualunque canale IPC interno); `off()` ora funziona anche passando il listener originale (non solo il wrapper). `fs:open-external` accetta solo `http(s)://`. `fs:read-dir` reso asincrono (niente più blocco del main process su directory grandi).
+
+### ~~SEC-05 — `.gitignore` blindato + primo repository Git~~ → ✅ FATTO
+- Il progetto **non era un repository Git** (rischio di versionamento nullo, segnalato in RISK_MATRIX R9) — ora inizializzato (`git init -b main`) con **4 commit** puliti. `.gitignore` esclude `secrets/*` (tranne il README di bonifica), `*.pem` (tranne `docs/keys/release_pub.pem`), `*.key`, `.env*`, i database locali (`*.db*`, `*.sqlite*`), `node_modules/`, `dist*/`, `release/`, `data/` (30+ GB di cache/StockGame). Verificato con `git check-ignore` su ogni segreto **prima** del primo commit; audit dei file in staging confermato senza materiale sensibile.
+
+## ⚙️ Qualità del codice (2026-07-09)
+### ~~QUAL-01 — ESLint 9 + Prettier + CI~~ → ✅ FATTO
+- `eslint.config.js` (flat config): recommended JS + TypeScript + React Hooks, baseline pragmatica (violazioni di solo stile → warning, non bloccanti). `.prettierrc.json` calibrato sullo stile esistente. Script npm: `lint`, `lint:fix`, `format`, `format:check`, `typecheck`. Durante la calibrazione il lint ha scovato **3 bug latenti reali** (un `require()` CommonJS fragile in `electron/steam/detect.ts`, caratteri BOM letterali invisibili nei regex di `electron/steam/mo2.ts`, un escape regex errato in `scripts/exec_boot.mjs`) — tutti corretti.
+- `.github/workflows/ci.yml`: pipeline GitHub Actions su `windows-latest` (coerente con la piattaforma target: `better-sqlite3` nativo + 7-Zip bundled), tre step lint → typecheck → test (266 test vitest) a ogni push/PR.
+- **Stato attuale:** 0 errori ESLint, 26 warning informativi (da stringere in futuro), `tsc --noEmit` pulito, 266/266 test verdi.
+
+## 📈 Performance & refactor funzionale/reattivo (2026-07-09)
+### ~~PERF-01 — Indici SQLite + throttling scritture~~ → ✅ FATTO
+- Migrazione **v6**: indici su `mods(profile_id)`, `mods(nexus_id)`, `downloads(profile_id)`, `downloads(status)`, `downloads(mod_id)`, `delta_changeset(download_id)` — prima ogni query calda (liste mod/download, resume, callback delta) faceva full scan. Persistenza del progresso download throttlata a 1 scrittura/secondo per download (prima: una scrittura WAL per ogni tick da 250ms, fino a ~32/s con 8 download concorrenti).
+
+### ~~PERF-02 — Virtualizzazione completa + selettori Zustand shallow~~ → ✅ FATTO
+- `ModList.tsx`: **tutte e tre le viste** ora virtualizzate con `react-virtuoso` (prima solo il ramo filtrato/ordinato lo era — la vista di default, riordinabile via drag&drop, montava ~70.000 nodi DOM alla scala target di ~4.500 mod). Righe `React.memo` con handler stabili condivisi via `useMemo`, lookup conflitti O(1) (era `Array.find` per riga per render).
+- `Downloads.tsx`: `DownloadRow` memoizzata (un evento di progresso ora aggiorna solo la riga interessata, non l'intera pagina — prima ~16 re-render/s dell'intera lista con 4 download attivi).
+- Selettori `useShallow` sui componenti sempre montati (`App`, `Sidebar`, `TitleBar`) — prima ogni `set()` dello store (incluse le righe di log) ri-renderizzava l'intero albero.
+
+### ~~PERF-03 — Batch IPC, cancellazione stale, error handling~~ → ✅ FATTO
+- `appStore.ts`: guard di staleness (token incrementale) su `loadMods`/`loadDownloads` — la risposta IPC di un profilo vecchio, se arriva dopo un cambio profilo rapido, viene ora scartata invece di sovrascrivere i dati nuovi. Check aggiornamenti Nexus con pool a concorrenza 4 + un solo `set()` finale (prima: loop seriale, 15-40 minuti a 4.500 mod + un re-render globale per mod). Import MO2 in un solo batch IPC/transazione (`mods:add-many`, nuovo handler) invece di un round-trip per riga.
+- `App.tsx` bootstrap con `try/finally` (un errore di init non lascia più l'app bloccata sull'overlay "Inizializzazione…"); handler globali `uncaughtException`/`unhandledRejection` nel main; mock backend caricato **solo in DEV** (in produzione un preload rotto ora fallisce visibilmente invece di ripiegare silenziosamente su dati simulati).
+
+### ~~PERF-04 — Robustezza pipeline download/installer~~ → ✅ FATTO
+- `downloadStream.ts`: gestito il caso 416 (`.part` già completo dopo un crash pre-promozione — prima restava bloccato per sempre, essendo un 4xx non ritentabile). `downloadManager.ts`: cache-hit ora validato sulla dimensione attesa (prima si fidava di qualsiasi file omonimo con size>0); nomi archivio includono il `file_id` Nexus (niente più collisioni tra file diversi della stessa mod); il task viene registrato **prima** degli `await` di rete (fix race sul limite di concorrenza + pause/cancel "fantasma" durante la risoluzione del link). `installManager.ts`: il cleanup su errore non cancella più una installazione preesistente in caso di reinstallazione fallita.
+
+## 🚀 Produzione (2026-07-09)
+### ~~PROD-01 — Icona placeholder per il packaging~~ → ✅ FATTO
+- `resources/icons/icon.ico` era referenziata (`package.json` build config, `electron/main.ts`) ma **inesistente** — `electron-builder` sarebbe fallito al primo build dell'installer. Generata via `scripts/make_placeholder_icon.mjs` (zero dipendenze, PNG 256×256 + container ICO scritti a mano). Rigenerabile con `npm run icon:placeholder`; da sostituire con l'icona definitiva quando disponibile (stesso percorso).
+
+### ~~PROD-02 — Igiene build/packaging~~ → ✅ FATTO
+- `vite.config.ts`: `emptyOutDir: true` sul build del main process (prima `dist-electron/` accumulava ~50 bundle hashati stale tra una build e l'altra, tutti spediti nell'installer). `package.json` build.files: rimosso `node_modules/**/*` ridondante (electron-builder colleziona già le sole dipendenze di produzione). `electron/logger.ts`: rotazione del log a 5 MB (prima cresceva senza limite). Corretto un bug reale: il pulsante Pandora in `Tools.tsx` chiamava `launchMO2` invece di `launchPandora`.
 
 ## 🟠 Media priorità (debito tecnico)
 ### ~~T3 — Parsing reale plugins.txt~~ → ✅ FATTO (2026-06-23)
@@ -50,7 +103,7 @@
 ### ~~T5 — Versione runtime Skyrim & compatibilità SKSE~~ → ✅ FATTO (2026-06-23)
 - `electron/steam/version.ts` (parse `version-1-6-1170-0.bin` + `skse64_1_6_1170.dll`, match su 3 componenti, `null`=no blocco spurio) + `detectSkse()` in `detect.ts` (multi-bin → versione più alta) cablato in `preflight` → `gameVersionSupported` popolato realmente. Test: `electron/steam/version.test.ts` (8). NB: reviewer T5 caduto per limite sessione → auto-review applicata sui casi noti (multi-bin, VR/loader esclusi dal regex, fail-safe null).
 
-## 🟢 Fatto in questa sessione
+## 🟢 Fatto in sessioni precedenti
 ### ~~Foundation Nolvus Ascension nel catalogo ("il necessario")~~ → ✅ FATTO (2026-06-25)
 - +12 framework/SKSE-plugin base dalla guida ufficiale Nolvus Ascension (ID Nexus reali verificati). Sono le dipendenze richieste dalle mod di contenuto (script libs/distributori/hook). Esclusi i grafici (ENB Helper/Upscaler) come da vincolo. Catalogo 115→127 voci; peso invariato (foundation = pochi MB).
 - **Riconferma:** il peso non sta nella foundation né nei contenuti non-grafici; i 300 GB sono texture (escluse).
@@ -89,7 +142,7 @@
 - `electron/nexus/nxm.ts` (parse/find/createNxmDownload) + migrazione **v5** (`downloads.nxm_key/nxm_expires`); `main.ts` `setAsDefaultProtocolClient('nxm')` + single-instance rigoroso (seconda istanza → argv → primaria accoda) + cold-start + `open-url` (macOS) + `protocols` in electron-builder. `resolveUrl` inoltra key/expires; renderer naviga su `nxm:queued`. Test `nxm.test.ts` (8).
 - **Residuo:** registrazione di sistema effettiva avviene a runtime (HKCU) o all'install (NSIS `protocols`); il flusso completo va provato con un vero click nxm dal browser + account Nexus reale. Il flusso Premium (download diretto) e non-Premium (key/expires) sono entrambi cablati ma non esercitati end-to-end senza credenziali reali.
 
-### ~~Chiave API Nexus persistita nel DB (cifrata)~~ → ✅ FATTO (2026-06-24)
+### ~~Chiave API Nexus persistita nel DB (cifrata)~~ → ✅ FATTO (2026-06-24; irrobustito 2026-07-09, vedi SEC-03)
 - Migrazione **v4** + `electron/db/secrets.ts` (tabella `app_secrets`, valore cifrato DPAPI via `safeStorage`); `settings:get/set/get-all` instradano i secret al DB con migrazione automatica dal vecchio `electron-store`. `downloadManager.getApiKey`/provider Nexus leggono dal DB → header reale `apikey`/`Bearer`. Test `secrets.test.ts` (6), smoke→v4.
 - **Nota sicurezza:** il valore in `app_secrets` è SEMPRE ciphertext (mai chiaro), coerente con la regola "mai chiave in chiaro". Il file DB è in `userData` (non nel repo).
 
@@ -97,8 +150,8 @@
 - `electron/nexus/downloadLink.ts`: endpoint reale con header `apikey`/`Authorization: Bearer` + nxm `key`/`expires`, errori parlanti (401/403→Premium, 404, 429); cablato in `downloadManager.resolveUrl`. `electron/install/sevenZip.ts` + IPC `tools:validate-7z` (auto-detect + validazione binario) + sezione Impostazioni (Sfoglia/Rileva/Verifica + warning). Test: `downloadLink.test.ts` (10) + `sevenZip.test.ts` (5).
 - **Residuo:** download diretto reale = Nexus **Premium** (o flusso nxm:// per non-premium, non ancora gestito a livello di protocol handler). OAuth Bearer è supportato nell'header ma non c'è ancora un flusso di login OAuth.
 
-### ~~Archivi reali — download streaming + estrazione sicura~~ → ✅ FATTO (2026-06-24)
-- `electron/install/downloadStream.ts` (`.part` + resume Range, promozione atomica, integrità) e `electron/install/extract.ts` (7z streaming + progress, zip-slip guard, OOM cap adm-zip, sha256 streaming) cablati in `downloadManager`/`installManager` (verifica hash pre-estrazione, cleanup su errore). UI: stadio installazione (verifica/estrazione %) via `install:progress`. Test: `extract.test.ts` + `downloadStream.test.ts` (13).
+### ~~Archivi reali — download streaming + estrazione sicura~~ → ✅ FATTO (2026-06-24; irrobustito 2026-07-09, vedi PERF-04)
+- `electron/install/downloadStream.ts` (`.part` + resume Range, promozione atomica, integrità) e `electron/install/extract.ts` (7z streaming + progress, zip-slip guard, OOM cap adm-zip, sha256 streaming) cablati in `downloadManager`/`installManager` (verifica hash pre-estrazione, cleanup su errore). UI: stadio installazione (verifica/estrazione %) via `install:progress`. Test: `extract.test.ts` + `downloadStream.test.ts` (13, +2 per il caso 416).
 - **Residuo:** il download REALE end-to-end richiede una chiave Nexus Premium (link `download_link.json`) non disponibile in questo ambiente → provato l'intero stack (resume/integrità/estrazione/hash) con server HTTP e archivi reali in test, ma non un vero scaricamento multi-GB da Nexus. L'estrazione `.7z`/`.rar` richiede `7z.exe` configurato (path in Impostazioni).
 
 ### ~~Act-03 — Fetch HTTP reale del catalogo + verifica firma~~ → ✅ FATTO (2026-06-24)
@@ -122,12 +175,15 @@
 - **T9** — Coverage: alzare verso 95%+ includendo i wrapper electron (oggi testato il core puro/DB; le sonde sono machine-dependent).
 - **T10** — `launchGame` rimosso; verificare che nessun import morto resti (`toast` in Dashboard se inutilizzato).
 - **T11** — Backup incrementali + compressione (Fase 6).
+- **T12** *(nuovo 2026-07-09)* — 26 warning ESLint residui (per lo più `react-hooks/exhaustive-deps` e qualche `no-unused-vars` in pagine minori: `Docs.tsx`, `Stats.tsx`, `StockGamePanel.tsx`, `Toast.tsx`). Nessuno bloccante; da stringere quando si toccano quei file.
+- **T13** *(nuovo 2026-07-09)* — 3 `nexus_id` duplicati residui nel `secrets/release_pub.pem` vs `docs/keys/release_pub.pem`: confermate byte-identiche, la copia in `secrets/` è ridondante e va rimossa insieme a `release_priv.pem` (vedi SEC-01).
 
 ## 🚢 Deployment
 ### D1 — Produrre l'installer NSIS
 - **Contesto:** l'app è già impacchettata (`release/win-unpacked/`, better-sqlite3 unpacked); manca solo il wrapper NSIS. `electron-builder` NSIS fallisce in questo ambiente perché winCodeSign richiede la creazione di symlink (privilegio negato).
-- **Azione:** sulla macchina di build abilitare **Windows Developer Mode** (Impostazioni → Privacy e sicurezza → Per sviluppatori) **o** eseguire il terminale come **Amministratore**, poi `electron-builder --win` (target `nsis`). Per release firmata: fornire certificato (`CSC_LINK`/`CSC_KEY_PASSWORD`).
-- **Verificato:** `--dir` produce l'app spacchettata correttamente; smoke runtime PASS.
+- **Fatto (2026-07-09):** l'icona placeholder che avrebbe fatto fallire il build ora esiste (vedi PROD-01) — questo blocco è rimosso dal percorso critico.
+- **Azione:** sulla macchina di build abilitare **Windows Developer Mode** (Impostazioni → Privacy e sicurezza → Per sviluppatori) **o** eseguire il terminale come **Amministratore**, poi `electron-builder --win` (target `nsis`). Per release firmata: fornire certificato (`CSC_LINK`/`CSC_KEY_PASSWORD`); oggi `signAndEditExecutable: false` → installer non firmato (SmartScreen segnalerà l'app).
+- **Verificato:** `--dir` produce l'app spacchettata correttamente; smoke runtime PASS. Boot reale via `avvia_launcher.bat` confermato il 2026-07-09.
 
 ## Note QA
-Prima di chiudere ogni sessione: `npm test` verde, `tsc` 0 errori, renderer build OK, aggiornare gli 8 documenti di stato.
+Prima di chiudere ogni sessione: `npm test` verde, `npm run lint` (0 errori), `npm run typecheck` (0 errori), `npm run build` OK, aggiornare gli 8 documenti di stato. Da CI (GitHub Actions, `windows-latest`): stessa sequenza lint→typecheck→test ad ogni push/PR — vedi `.github/workflows/ci.yml`.

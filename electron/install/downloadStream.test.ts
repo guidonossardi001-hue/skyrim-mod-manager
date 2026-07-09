@@ -6,7 +6,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import axios from 'axios'
-import { parseContentRange, planResume, streamToFile, type HttpGet } from './downloadStream'
+import { parseContentRange, planResume, streamToFile, StallError, type HttpGet } from './downloadStream'
+import { isRetryableError } from './retryPolicy'
 
 const http: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
 
@@ -143,5 +144,57 @@ describe('downloadStream: real socket transfer', () => {
       /incompleto/i,
     )
     expect(existsSync(dest)).toBe(false)
+  })
+})
+
+describe('downloadStream: stall guard (HARDENING)', () => {
+  it('aborts a connect that never sends headers, with a RETRYABLE StallError', async () => {
+    const hang: HttpGet = () => new Promise(() => {}) // socket accepted, headers never arrive
+    const dest = join(dir, 'mod.7z')
+    const err = await streamToFile({
+      url: 'http://x/file.7z',
+      destPath: dest,
+      http: hang,
+      stallTimeoutMs: 40,
+    }).catch((e) => e)
+    expect(err).toBeInstanceOf(StallError)
+    expect(isRetryableError(err)).toBe(true) // ESTALLED → withRetry will re-attempt
+  })
+
+  it('aborts a body that stops sending bytes (idle stall) and never promotes', async () => {
+    const stub: HttpGet = async () => ({
+      status: 200,
+      headers: { 'content-length': '100000' },
+      data: new Readable({ read() {} }), // emits nothing and never ends
+    })
+    const dest = join(dir, 'mod.7z')
+    const err = await streamToFile({
+      url: 'http://x/file.7z',
+      destPath: dest,
+      http: stub,
+      stallTimeoutMs: 40,
+    }).catch((e) => e)
+    expect(err).toBeInstanceOf(StallError)
+    expect(existsSync(dest)).toBe(false) // not promoted; .part left for resume
+  })
+
+  it('a user cancel stays an AbortError — NOT misclassified as a retryable stall', async () => {
+    const ac = new AbortController()
+    const stub: HttpGet = async () => ({
+      status: 200,
+      headers: { 'content-length': '100000' },
+      data: new Readable({ read() {} }),
+    })
+    const dest = join(dir, 'mod.7z')
+    const p = streamToFile({
+      url: 'http://x/file.7z',
+      destPath: dest,
+      http: stub,
+      signal: ac.signal,
+      stallTimeoutMs: 10_000, // long: the cancel must win, not the stall timer
+    }).catch((e) => e)
+    setTimeout(() => ac.abort(), 20)
+    const err = await p
+    expect(err).not.toBeInstanceOf(StallError)
   })
 })

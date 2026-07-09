@@ -267,26 +267,29 @@ describe('massSync: hardening', () => {
 })
 
 describe('massSync: PRECHECK-01 disk pre-flight', () => {
-  it('computeDiskPreflight applies extractionOverhead × safetyFactor and computes margin/ok', () => {
-    const pf = computeDiskPreflight({ pendingBytes: 100 * 1024 ** 3, freeBytes: 200 * 1024 ** 3 })
-    expect(pf.extractionOverhead).toBe(1.1)
+  it('defaults to overhead 1.5 / safety 1.15 and counts the archive cache', () => {
+    const GB = 1024 ** 3
+    const pf = computeDiskPreflight({ pendingBytes: 100 * GB, freeBytes: 400 * GB })
+    expect(pf.extractionOverhead).toBe(1.5) // honest: was 1.10, too optimistic for texture archives
     expect(pf.safetyFactor).toBe(1.15)
-    expect(pf.requiredBytes).toBe(Math.ceil(100 * 1024 ** 3 * 1.1 * 1.15)) // ≈ 126.5 GB
-    expect(pf.ok).toBe(true)
+    // cross-disk: cache(pending) + extracted×safety = 100 + 100×1.5×1.15 = 272.5 GB
+    expect(pf.requiredBytes).toBe(Math.ceil(100 * GB + 100 * GB * 1.5 * 1.15))
+    expect(pf.ok).toBe(true) // 400 free − 272.5 req = 127.5 GB residual > 15 GB floor
     expect(pf.marginBytes).toBeGreaterThan(0)
   })
-  it('flags NO-GO when free < required, and honours custom factors', () => {
-    const tight = computeDiskPreflight({ pendingBytes: 100 * 1024 ** 3, freeBytes: 110 * 1024 ** 3 })
+  it('includes the retained archive cache on BOTH cross- and same-disk paths', () => {
+    const cross = computeDiskPreflight({ pendingBytes: 100, freeBytes: 1e9, extractionOverhead: 2, safetyFactor: 1 })
+    expect(cross.requiredBytes).toBe(300) // cache 100 + extracted 200 ×1 — cache NOT dropped
+    const same = computeDiskPreflight({ pendingBytes: 100, freeBytes: 1e9, extractionOverhead: 2, sameDisk: true })
+    expect(same.requiredBytes).toBe(100 + 200 * 1.5) // cache 100 + extracted 200 × 1.5 headroom = 400
+  })
+  it('flags NO-GO when free < required (optimism no longer hides a shortfall)', () => {
+    const GB = 1024 ** 3
+    // 110 GB free would PASS the old 1.10×1.15≈126 estimate margin, but the honest
+    // 272.5 GB requirement correctly blocks it before any download starts.
+    const tight = computeDiskPreflight({ pendingBytes: 100 * GB, freeBytes: 110 * GB })
     expect(tight.ok).toBe(false)
-    expect(tight.marginBytes).toBeLessThan(0) // needs ~126 GB, only 110 free
-    const custom = computeDiskPreflight({
-      pendingBytes: 100,
-      freeBytes: 100,
-      extractionOverhead: 2,
-      safetyFactor: 1,
-    })
-    expect(custom.requiredBytes).toBe(200)
-    expect(custom.ok).toBe(false)
+    expect(tight.marginBytes).toBeLessThan(0)
   })
   it('pendingBytes sums only mods whose dest dir does NOT already exist', () => {
     const exists = (p: string) => p.replace(/\\/g, '/') === 'D:/SG/mods/2-Beta'
@@ -294,7 +297,7 @@ describe('massSync: PRECHECK-01 disk pre-flight', () => {
   })
 
   it('runMassSync BLOCKS before any download when space is insufficient (fail-closed)', async () => {
-    // pending = 300 B, required ≈ 380 B, free = 100 B → NO-GO
+    // pending = 300 B, required = 300 + 300×1.5×headroom B ≥ 818 B, free = 100 B → NO-GO
     const { deps, calls } = mkDeps({ freeSpace: vi.fn(async () => 100) })
     await expect(runMassSync(deps, cfg(MODS, { concurrency: 2 }))).rejects.toThrow(
       /Spazio su disco insufficiente/,

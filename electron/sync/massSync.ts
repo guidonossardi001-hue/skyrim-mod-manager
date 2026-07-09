@@ -146,7 +146,11 @@ export function modDestDir(modsDir: string, m: SyncMod): string {
 // ── Aggregate disk pre-flight (PRECHECK-01) ──────────────────────────────────
 
 /** Extracted output is estimated as pendingBytes × extractionOverhead. */
-export const SAME_DISK_EXTRACT_FACTOR = 1.5 // same-disk: room for archives + extracted×1.5
+// 1.5, not 1.10: texture-heavy BSA/BC7 archives expand far past their compressed size,
+// so an optimistic factor let the real peak overrun free space mid-install ("Disco pieno").
+export const DEFAULT_EXTRACTION_OVERHEAD = 1.5
+export const DEFAULT_SAFETY_FACTOR = 1.15 // cross-disk headroom on the extracted estimate
+export const SAME_DISK_EXTRACT_FACTOR = 1.5 // same-disk: heavier headroom (archives + extract contend)
 export const MIN_FREE_MARGIN_BYTES = 15 * 1024 ** 3 // hard NO-GO floor: keep ≥15 GB free after the run
 
 export interface DiskPreflight {
@@ -154,7 +158,7 @@ export interface DiskPreflight {
   extractionOverhead: number // extracted-vs-archive multiplier applied
   safetyFactor: number // headroom multiplier applied
   sameDisk: boolean // downloads cache and StockGame share one volume
-  requiredBytes: number // same-disk: pending + extracted×1.5 ; else extracted×safetyFactor
+  requiredBytes: number // pending(cache) + extracted × (sameDisk ? 1.5 : safetyFactor)
   freeBytes: number // free space on the StockGame volume
   minFreeMarginBytes: number // required residual free space AFTER the run (15 GB floor)
   marginBytes: number // freeBytes − requiredBytes (the projected residual)
@@ -167,11 +171,14 @@ export function pendingBytes(mods: SyncMod[], modsDir: string, exists: (p: strin
 }
 
 /**
- * Pure disk pre-flight: required = pending × extractionOverhead × safetyFactor.
- * extractionOverhead defaults to 1.10 (extracted output slightly larger than the
- * compressed archive); safetyFactor defaults to 1.15 (headroom). Both configurable.
- * NOTE: 1.10 is a LOWER-BOUND estimate — texture-heavy archives can expand far more,
- * and the download cache also retains the archives; raise the factors for big lists.
+ * Pure disk pre-flight (honest / bulletproof): required = pending(cache) + extracted × headroom.
+ *   • extracted = pending × extractionOverhead (default 1.5 — texture archives expand well
+ *     past their compressed size; 1.10 was a lower bound that under-counted the real peak).
+ *   • the download cache is ALWAYS counted: archives are retained (never deleted post-extract),
+ *     so the pending-archive bytes are added on BOTH paths, not only same-disk. Erring toward
+ *     over-estimation blocks up front instead of failing "Disco pieno" mid-install.
+ *   • headroom = SAME_DISK_EXTRACT_FACTOR (1.5) when downloads + StockGame share a volume and
+ *     contend, else safetyFactor (1.15). Both configurable.
  */
 export function computeDiskPreflight(p: {
   pendingBytes: number
@@ -180,17 +187,16 @@ export function computeDiskPreflight(p: {
   safetyFactor?: number
   sameDisk?: boolean
 }): DiskPreflight {
-  const extractionOverhead = p.extractionOverhead ?? 1.1
-  const safetyFactor = p.safetyFactor ?? 1.15
+  const extractionOverhead = p.extractionOverhead ?? DEFAULT_EXTRACTION_OVERHEAD
+  const safetyFactor = p.safetyFactor ?? DEFAULT_SAFETY_FACTOR
   const sameDisk = p.sameDisk ?? false
   const pending = Math.max(0, p.pendingBytes)
   const extractedBytes = pending * extractionOverhead
-  // Same disk ⇒ the downloaded archives AND the extracted output live on ONE volume,
-  // so both must fit: Fabbisogno = Archivi_Pending + (Estratto × 1.5). Cross-disk ⇒
-  // only the extracted output lands here, with the usual safety headroom.
-  const requiredBytes = Math.ceil(
-    sameDisk ? pending + extractedBytes * SAME_DISK_EXTRACT_FACTOR : extractedBytes * safetyFactor,
-  )
+  // Peak on the StockGame volume = retained archive cache (pending) + extracted output × headroom.
+  // The cache term is unconditional: archives survive extraction, so they occupy space during the
+  // whole run. Same-disk uses the heavier 1.5 headroom (archives + extract compete for one volume).
+  const headroom = sameDisk ? SAME_DISK_EXTRACT_FACTOR : safetyFactor
+  const requiredBytes = Math.ceil(pending + extractedBytes * headroom)
   const marginBytes = p.freeBytes - requiredBytes
   return {
     pendingBytes: p.pendingBytes,
@@ -249,9 +255,8 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     })
     const gb = (b: number) => (b / 1024 ** 3).toFixed(1)
     if (!pf.ok) {
-      const formula = pf.sameDisk
-        ? `stesso disco: archivi ${gb(pf.pendingBytes)} + estratto×${SAME_DISK_EXTRACT_FACTOR}`
-        : `${gb(pf.pendingBytes)} pending × ${pf.extractionOverhead} estrazione × ${pf.safetyFactor} sicurezza`
+      const headroom = pf.sameDisk ? SAME_DISK_EXTRACT_FACTOR : pf.safetyFactor
+      const formula = `cache archivi ${gb(pf.pendingBytes)} + estratto (×${pf.extractionOverhead}) ×${headroom} margine${pf.sameDisk ? ' stesso disco' : ''}`
       const msg = `Spazio su disco insufficiente per lo StockGame: richiesti ~${gb(pf.requiredBytes)} GB (${formula}), liberi ${gb(pf.freeBytes)} GB → residuo previsto ${gb(pf.marginBytes)} GB, sotto il minimo di ${gb(pf.minFreeMarginBytes)} GB. Libera spazio o sposta lo StockGame su un volume più capiente.`
       cfg.onLog?.(msg)
       throw new Error(msg)

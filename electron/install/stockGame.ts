@@ -1,5 +1,12 @@
-import { existsSync, mkdirSync, readdirSync, statSync, linkSync, copyFileSync } from 'fs'
-import { link as linkAsync, copyFile as copyFileAsync, mkdir as mkdirAsync } from 'fs/promises'
+import { existsSync, mkdirSync, readdirSync, statSync, linkSync, copyFileSync, renameSync, rmSync } from 'fs'
+import {
+  link as linkAsync,
+  copyFile as copyFileAsync,
+  mkdir as mkdirAsync,
+  rename as renameAsync,
+  rm as rmAsync,
+  stat as statAsync,
+} from 'fs/promises'
 import { join, dirname } from 'path'
 
 // ── StockGame builder (Wabbajack/Nolvus-style) ───────────────────────────────
@@ -238,8 +245,31 @@ export function defaultStockGameDir(userData: string): string {
   return join(userData, 'StockGame')
 }
 
-function placeFile(src: string, dest: string, preferLink: boolean): 'hardlinked' | 'copied' | 'present' {
-  if (existsSync(dest)) return 'present' // idempotent re-run
+function placeFile(
+  src: string,
+  dest: string,
+  bytes: number,
+  preferLink: boolean,
+): 'hardlinked' | 'copied' | 'present' {
+  if (existsSync(dest)) {
+    // Idempotent re-run — but only TRUST a dest that is byte-complete. A file left
+    // truncated by an earlier crash / ENOSPC / kill must be re-placed, otherwise it
+    // is accepted as "present" forever and the final verify passes on a broken file.
+    let ok = false
+    try {
+      ok = statSync(dest).size === bytes
+    } catch {
+      /* stat failed → treat as incomplete */
+    }
+    if (ok) return 'present'
+    // Drop the bad dest. rmSync on a hardlink removes only THIS name; the Steam
+    // source (a separate directory entry to the same inode) is untouched.
+    try {
+      rmSync(dest, { force: true })
+    } catch {
+      /* best effort; copy below will overwrite */
+    }
+  }
   mkdirSync(dirname(dest), { recursive: true })
   if (preferLink) {
     try {
@@ -253,7 +283,20 @@ function placeFile(src: string, dest: string, preferLink: boolean): 'hardlinked'
       }
     }
   }
-  copyFileSync(src, dest)
+  // Copy through a temp sibling + atomic rename: a crash mid-copy leaves an orphan
+  // .tmp (re-placed on the next run) and never a truncated file that looks complete.
+  const tmp = `${dest}.tmp`
+  try {
+    copyFileSync(src, tmp)
+    renameSync(tmp, dest)
+  } catch (e) {
+    try {
+      rmSync(tmp, { force: true })
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw e
+  }
   return 'copied'
 }
 
@@ -293,7 +336,12 @@ export function createStockGame(
   const filesTotal = plan.files.length
   for (let i = 0; i < filesTotal; i++) {
     const f = plan.files[i]
-    const placed = placeFile(f.src, join(targetDir, f.rel), preferLink && !requiresPhysicalCopy(f.rel))
+    const placed = placeFile(
+      f.src,
+      join(targetDir, f.rel),
+      f.bytes,
+      preferLink && !requiresPhysicalCopy(f.rel),
+    )
     if (placed === 'hardlinked') hardlinked++
     else if (placed === 'copied') copied++
     else alreadyPresent++
@@ -335,9 +383,24 @@ export function createStockGame(
 async function placeFileAsync(
   src: string,
   dest: string,
+  bytes: number,
   preferLink: boolean,
 ): Promise<'hardlinked' | 'copied' | 'present'> {
-  if (existsSync(dest)) return 'present'
+  if (existsSync(dest)) {
+    // See placeFile: accept a present dest only if it is byte-complete, else re-place.
+    let ok = false
+    try {
+      ok = (await statAsync(dest)).size === bytes
+    } catch {
+      /* stat failed → treat as incomplete */
+    }
+    if (ok) return 'present'
+    try {
+      await rmAsync(dest, { force: true })
+    } catch {
+      /* best effort */
+    }
+  }
   await mkdirAsync(dirname(dest), { recursive: true })
   if (preferLink) {
     try {
@@ -350,7 +413,20 @@ async function placeFileAsync(
       }
     }
   }
-  await copyFileAsync(src, dest)
+  // Atomic copy: temp sibling + rename, so a crash never leaves a complete-looking
+  // but truncated file.
+  const tmp = `${dest}.tmp`
+  try {
+    await copyFileAsync(src, tmp)
+    await renameAsync(tmp, dest)
+  } catch (e) {
+    try {
+      await rmAsync(tmp, { force: true })
+    } catch {
+      /* ignore cleanup failure */
+    }
+    throw e
+  }
   return 'copied'
 }
 
@@ -393,6 +469,7 @@ export async function createStockGameAsync(
     const placed = await placeFileAsync(
       f.src,
       join(targetDir, f.rel),
+      f.bytes,
       preferLink && !requiresPhysicalCopy(f.rel),
     )
     if (placed === 'hardlinked') hardlinked++

@@ -95,3 +95,55 @@ describe('extract: zip fallback safety', () => {
     ).rejects.toThrow(/\.rar non disponibile|nessun 7-Zip completo/i)
   })
 })
+
+describe('extract: atomic commit', () => {
+  // These lock the crash-safety guarantee: a mod dir must appear COMPLETE or not at all.
+  // Regression guard — a future refactor that unpacks straight into destDir breaks them.
+  const mkZip = (name: string) => {
+    const zip = new AdmZip()
+    zip.addFile('foo/bar.esp', Buffer.from('hi'))
+    const arc = join(dir, name)
+    zip.writeZip(arc)
+    return arc
+  }
+
+  it('leaves no .tmp sibling after a successful extract', async () => {
+    const arc = mkZip('ok.zip')
+    const out = join(dir, 'out')
+    await extractArchive(arc, out)
+    expect(existsSync(join(out, 'foo', 'bar.esp'))).toBe(true)
+    expect(existsSync(out + '.tmp')).toBe(false) // committed, staging gone
+  })
+
+  it('creates neither destDir nor .tmp when extraction fails', async () => {
+    const arc = mkZip('toobig.zip')
+    const out = join(dir, 'out')
+    await expect(extractArchive(arc, out, { admZipMaxBytes: 1 })).rejects.toThrow()
+    // failure must NOT leave a half-written mod dir a resumed run would trust as "done"
+    expect(existsSync(out)).toBe(false)
+    expect(existsSync(out + '.tmp')).toBe(false)
+  })
+
+  it('discards a stale .tmp from a prior crash before extracting', async () => {
+    const out = join(dir, 'out')
+    const tmp = out + '.tmp'
+    // simulate a crash mid-extract: leftover junk in the staging dir
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(tmp, { recursive: true })
+    writeFileSync(join(tmp, 'garbage.dat'), 'partial')
+    await extractArchive(mkZip('clean.zip'), out)
+    expect(existsSync(join(out, 'foo', 'bar.esp'))).toBe(true)
+    expect(existsSync(join(out, 'garbage.dat'))).toBe(false) // stale staging not merged
+    expect(existsSync(tmp)).toBe(false)
+  })
+
+  it('replaces a pre-existing destDir on commit (no merge of old files)', async () => {
+    const out = join(dir, 'out')
+    const { mkdirSync } = await import('node:fs')
+    mkdirSync(out, { recursive: true })
+    writeFileSync(join(out, 'old.esp'), 'previous version')
+    await extractArchive(mkZip('new.zip'), out)
+    expect(existsSync(join(out, 'foo', 'bar.esp'))).toBe(true)
+    expect(existsSync(join(out, 'old.esp'))).toBe(false) // clean replace, not overlay
+  })
+})

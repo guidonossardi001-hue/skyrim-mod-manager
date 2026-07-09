@@ -3,8 +3,10 @@ import {
   buildDownloadLinkRequest,
   parseDownloadLink,
   resolveDownloadLink,
+  DownloadLinkError,
   type HttpGetJson,
 } from './downloadLink'
+import { isRetryableError } from '../install/retryPolicy'
 
 describe('Nexus download_link request building', () => {
   it('uses the apikey header for a personal API key', () => {
@@ -94,5 +96,38 @@ describe('Nexus download_link resolution + error mapping', () => {
     }
     await expect(resolveDownloadLink(spy, { modId: 1, fileId: 2 })).rejects.toThrow(/credenziale/i)
     expect(called).toBe(false)
+  })
+
+  // HARDENING: the friendly message must NOT lose the HTTP status, or the retry policy
+  // misreads a transient 429/5xx as permanent and never retries link resolution.
+  it('preserves the HTTP status so transient resolve failures are retryable', async () => {
+    const grab = (status: number) =>
+      resolveDownloadLink(failStatus(status), { modId: 1, fileId: 2, apiKey: 'k' }).catch((e) => e)
+
+    const e429 = await grab(429)
+    expect(e429).toBeInstanceOf(DownloadLinkError)
+    expect(e429.status).toBe(429)
+    expect(isRetryableError(e429)).toBe(true)
+
+    const e503 = await grab(503) // Cloudflare/CDN hiccup
+    expect(e503.status).toBe(503)
+    expect(isRetryableError(e503)).toBe(true)
+
+    const e403 = await grab(403) // auth: must stay permanent
+    expect(e403.status).toBe(403)
+    expect(isRetryableError(e403)).toBe(false)
+
+    const e404 = await grab(404) // gone: permanent
+    expect(isRetryableError(e404)).toBe(false)
+  })
+
+  it('carries a transient socket error (no status) through as retryable via cause', async () => {
+    const netFail: HttpGetJson = async () => {
+      throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' })
+    }
+    const err = await resolveDownloadLink(netFail, { modId: 1, fileId: 2, apiKey: 'k' }).catch((e) => e)
+    expect(err).toBeInstanceOf(DownloadLinkError)
+    expect(err.status).toBeUndefined()
+    expect(isRetryableError(err)).toBe(true) // classified via cause.code = ECONNRESET
   })
 })

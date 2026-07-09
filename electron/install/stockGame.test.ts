@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   classifyRootEntry,
   classifyDataEntry,
+  requiresPhysicalCopy,
   planStockGame,
   createStockGame,
   createStockGameAsync,
@@ -173,8 +174,8 @@ describe('stockGame: create', () => {
     // tmp src and target share a volume here, so links should be used (or copy fallback on odd FS)
     expect(res.hardlinked + res.copied).toBe(res.filesTotal)
     if (res.mode === 'hardlink') {
-      // a hardlink shares the inode → same size, same content
-      expect(statSync(join(target, 'Data', 'Skyrim.esm')).size).toBe(1000)
+      // a hardlink shares the inode → same size, same content (bulk archives are linked)
+      expect(statSync(join(target, 'Data', 'Skyrim - Textures0.bsa')).size).toBe(2000)
     }
   })
 
@@ -184,6 +185,24 @@ describe('stockGame: create', () => {
     expect(() => createStockGame({ sourceGameDir: bogus, targetDir: join(dir, 'sg') })).toThrow(
       /Skyrim SE\/AE valida|non trovata/,
     )
+  })
+
+  it('re-places a truncated dest instead of trusting existsSync (crash/ENOSPC recovery)', () => {
+    const src = join(dir, 'game')
+    makeFakeGame(src)
+    const target = join(dir, 'StockGameTrunc')
+    createStockGame({ sourceGameDir: src, targetDir: target, mode: 'copy' })
+    // simulate a file left half-written by a mid-copy crash / disk-full
+    const victim = join(target, 'Data', 'Update.esm') // real vanilla size is 500
+    writeFileSync(victim, 'X'.repeat(3))
+    const res = createStockGame({ sourceGameDir: src, targetDir: target, mode: 'copy' })
+    // the truncated file is detected by size and re-copied to full length
+    expect(statSync(victim).size).toBe(500)
+    expect(readFileSync(victim, 'utf8')).toBe('X'.repeat(500))
+    expect(res.copied).toBeGreaterThan(0) // at least the repaired file
+    expect(res.alreadyPresent).toBeLessThan(res.filesTotal)
+    // no orphan temp left behind by the atomic copy
+    expect(existsSync(`${victim}.tmp`)).toBe(false)
   })
 
   it('async variant produces the same isolated vanilla result', async () => {
@@ -198,5 +217,41 @@ describe('stockGame: create', () => {
     await expect(
       createStockGameAsync({ sourceGameDir: join(dir, 'nope'), targetDir: target }),
     ).rejects.toThrow(/non trovata/)
+  })
+})
+
+describe('stockGame: hybrid isolation policy', () => {
+  it('requiresPhysicalCopy: executables + plugin/load-order files, never bulk archives', () => {
+    // mutable-critical (patchers / xEdit / CC load-order rewrite these in place)
+    expect(requiresPhysicalCopy('SkyrimSE.exe')).toBe(true)
+    expect(requiresPhysicalCopy('SkyrimSELauncher.exe')).toBe(true)
+    expect(requiresPhysicalCopy('Data/Skyrim.esm')).toBe(true)
+    expect(requiresPhysicalCopy('Data/ccBGSSSE001-Fish.esm')).toBe(true)
+    expect(requiresPhysicalCopy('Data/_ResourcePack.esl')).toBe(true)
+    expect(requiresPhysicalCopy('Data/Skyrim.ccc')).toBe(true)
+    // immutable bulk (safe to hardlink — carries the ~15 GB)
+    expect(requiresPhysicalCopy('Data/Skyrim - Textures0.bsa')).toBe(false)
+    expect(requiresPhysicalCopy('Data/Video/BGS_Logo.bik')).toBe(false)
+    expect(requiresPhysicalCopy('steam_api64.dll')).toBe(false)
+  })
+
+  it('copies mutable-critical files even in hardlink mode, hardlinks only bulk', () => {
+    const src = join(dir, 'game')
+    makeFakeGame(src)
+    const target = join(dir, 'StockGameHybrid')
+    const res = createStockGame({ sourceGameDir: src, targetDir: target, mode: 'hardlink' })
+    // only assert link semantics where the FS actually produced hardlinks
+    if (res.hardlinked > 0) {
+      // exe + esm master are PHYSICAL copies → independent inode (nlink 1): writing
+      // them in the StockGame can never reach back into the real Steam file
+      expect(statSync(join(target, 'SkyrimSE.exe')).nlink).toBe(1)
+      expect(statSync(join(target, 'Data', 'Skyrim.esm')).nlink).toBe(1)
+      // a bulk archive IS hardlinked → shared inode (nlink ≥ 2: source + StockGame)
+      expect(statSync(join(target, 'Data', 'Skyrim - Textures0.bsa')).nlink).toBeGreaterThanOrEqual(2)
+      expect(res.copied).toBeGreaterThan(0)
+      expect(res.hardlinked).toBeGreaterThan(0)
+    }
+    // content is correct regardless of link vs copy
+    expect(readFileSync(join(target, 'Data', 'Skyrim.esm'), 'utf8')).toBe('X'.repeat(1000))
   })
 })

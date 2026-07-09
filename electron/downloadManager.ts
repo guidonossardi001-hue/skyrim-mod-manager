@@ -173,21 +173,15 @@ export function initDownloadManager(
     const ac = new AbortController()
     activeDownloads.set(downloadId, { id: downloadId, abortController: ac })
 
-    let url: string
     try {
-      url = await resolveUrl(row)
+      // Link resolution is INSIDE the retry try: a transient 429/5xx or socket error
+      // from the Nexus download_link endpoint (now carrying its status via
+      // DownloadLinkError) is classified retryable and re-enqueued with backoff, instead
+      // of failing the download permanently. A 401/403/404 stays a definitive failure.
+      const url = await resolveUrl(row)
       if (ac.signal.aborted) throw new Error('annullato')
-    } catch (err) {
-      activeDownloads.delete(downloadId)
-      const msg = (err as Error).message
-      db.prepare("UPDATE downloads SET status='failed', error=? WHERE id=?").run(msg, downloadId)
-      win()?.webContents.send('download:error', { id: downloadId, error: msg })
-      return
-    }
+      db.prepare("UPDATE downloads SET status='downloading', error=NULL WHERE id=?").run(downloadId)
 
-    db.prepare("UPDATE downloads SET status='downloading', error=NULL WHERE id=?").run(downloadId)
-
-    try {
       // Stable archive name (mod name + file_id) so a resumed attempt targets the
       // SAME .part and different files of one mod never share a path.
       const ext = guessExtension(url)
@@ -209,6 +203,9 @@ export function initDownloadManager(
         destPath,
         http: axiosGet,
         signal: ac.signal,
+        // Idle guard: abort + retry a socket that connects then goes silent (no headers
+        // or no bytes) past this window, rather than wedging a queue slot forever.
+        stallTimeoutMs: Math.max(5_000, Number(store.get('downloadStallTimeoutMs')) || 120_000),
         onProgress: (downloaded, total) => {
           if (total > 0 && total !== knownTotal) {
             knownTotal = total

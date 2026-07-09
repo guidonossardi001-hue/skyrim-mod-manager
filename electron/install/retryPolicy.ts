@@ -33,6 +33,7 @@ const RETRYABLE_CODES = new Set([
   'UND_ERR_HEADERS_TIMEOUT',
   'UND_ERR_BODY_TIMEOUT',
   'ERR_STREAM_PREMATURE_CLOSE',
+  'ESTALLED', // our own: a socket that connected then went idle past the stall timeout
 ])
 
 export function httpStatusOf(e: unknown): number | undefined {
