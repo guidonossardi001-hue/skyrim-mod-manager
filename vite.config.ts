@@ -9,6 +9,12 @@ export default defineConfig({
     electron([
       {
         entry: 'electron/main.ts',
+        // Own the Electron lifecycle from the plugin: startup() launches exactly ONE
+        // instance (and restarts it when main.ts changes). Without this the plugin
+        // auto-started Electron AND the electron:dev script launched a second copy.
+        onstart(options) {
+          options.startup()
+        },
         vite: {
           build: {
             outDir: 'dist-electron',
