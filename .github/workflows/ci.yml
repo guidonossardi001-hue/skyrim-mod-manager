@@ -19,7 +19,13 @@ jobs:
           node-version-file: '.nvmrc' # unica fonte di verità: Node 24 = ambiente locale
           cache: 'npm'
       - name: Install dependencies
-        run: npm ci # riproducibile, rispetta il lockfile (a differenza di npm install)
+        # --ignore-scripts: il job test non avvia mai l'app né carica better-sqlite3
+        # (i test usano il built-in node:sqlite), quindi si salta la build nativa di
+        # better-sqlite3 e il download del binario Electron — gli install-script fragili
+        # che facevano fallire `npm ci` in CI fresh (step Install, exit 1). esbuild
+        # (binario da optional-dep) e 7-Zip (exe nel pacchetto) restano disponibili.
+        # Verificato in locale: suite 284/284 verde anche senza il binario better-sqlite3.
+        run: npm ci --ignore-scripts
       - name: Lint
         run: npm run lint
       - name: Typecheck
