@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
-import { join, resolve, dirname } from 'path'
+import { join, resolve, dirname, basename } from 'path'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { spawn } from 'child_process'
@@ -21,8 +21,19 @@ import { recoverOnStartup } from './delta/journal'
 import { parseNxmUrl, findNxmUrl, createNxmDownload } from './nexus/nxm'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
 import { detectSteamEnv } from './steam/detect'
-import { runPreflight, executeLaunch } from './launch/preflight'
+import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
 import { runCompatReport } from './launch/compat'
+import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
+import { resolveBootstrapper } from './launch/bootstrapper'
+import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
+import { checkForLauncherUpdate } from './launch/launcherUpdate'
+import {
+  readSmartStartup,
+  writeSmartStartup,
+  recordLaunch,
+  type KeyValueStore,
+  type SmartStartupConfig,
+} from './util/launcherConfig'
 import { detect7zPath, parse7zVersion, looksLike7z } from './install/sevenZip'
 import {
   planStockGame,
@@ -44,6 +55,7 @@ import { sanitizePathSegment } from './util/paths'
 import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
 import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
+import { launchGame, createDesktopShortcut, resolveLauncherIcon } from './launcher/launcherService'
 import { streamToFile } from './install/downloadStream'
 import { resolveDownloadLink } from './nexus/downloadLink'
 import { axiosGet, axiosJson } from './http/axiosAdapters'
@@ -275,15 +287,40 @@ function initDatabase(): boolean {
 function applySecurityPolicies() {
   // Content-Security-Policy: in dev we must allow Vite's inline/eval HMR + ws;
   // in production we lock down to self. Connections to the Nexus API are allowed.
+  // object-src/base-uri/form-action/frame-ancestors are locked down in BOTH modes:
+  // there is no plugin content, no <base> rewriting, no form posts, and the app must
+  // never be embeddable — these close injection vectors CSP omits by default.
+  const lockdown =
+    "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
   const csp = isDev
-    ? "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173 ws://localhost:5173; " +
+    ? lockdown +
+      "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173 ws://localhost:5173; " +
       "img-src 'self' data: https:; connect-src 'self' http://localhost:5173 ws://localhost:5173 https://api.nexusmods.com https://www.nexusmods.com https://raw.githubusercontent.com"
-    : "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
+    : lockdown +
+      "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; " +
       "font-src 'self' data:; connect-src 'self' https://api.nexusmods.com https://www.nexusmods.com https://raw.githubusercontent.com"
 
   session.defaultSession.webRequest.onHeadersReceived((details, cb) => {
     cb({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } })
   })
+
+  // The renderer needs NO powerful web permissions (camera, mic, geolocation,
+  // notifications, USB…). Deny every request and check fail-closed, so even a
+  // compromised renderer can't prompt for or silently gain them.
+  session.defaultSession.setPermissionRequestHandler((_wc, _permission, cb) => cb(false))
+  session.defaultSession.setPermissionCheckHandler(() => false)
+}
+
+// Fantasy/Dragon launcher icon, resolved for both packaged (extraResources under
+// process.resourcesPath) and unpacked/dev (__dirname-relative) layouts. Falls back
+// to the legacy placeholder .ico so the window/shortcut always has SOME icon.
+function resolveAppIcon(): string | null {
+  return resolveLauncherIcon([
+    join(process.resourcesPath || '', 'assets', 'dragon_launcher.ico'),
+    join(__dirname, '../assets/dragon_launcher.ico'),
+    join(process.resourcesPath || '', 'icons', 'icon.ico'),
+    join(__dirname, '../resources/icons/icon.ico'),
+  ])
 }
 
 // ─── Window ───────────────────────────────────────────────────────────────────
@@ -302,8 +339,12 @@ function createWindow() {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      // The preload uses only contextBridge + ipcRenderer (both sandbox-safe), so we
+      // run the renderer in the OS sandbox: a renderer compromise no longer has direct
+      // Node/OS reach, only the vetted IPC surface. Belt-and-suspenders with contextIsolation.
+      sandbox: true,
     },
-    icon: join(__dirname, '../resources/icons/icon.ico'),
+    icon: resolveAppIcon() ?? join(__dirname, '../resources/icons/icon.ico'),
     show: false,
   })
 
@@ -313,8 +354,12 @@ function createWindow() {
 
   // Never let the renderer navigate away from the app, and route any window.open
   // / target=_blank to the OS browser instead of spawning an in-app BrowserWindow.
+  // Only real web URLs (http/https) may be handed to the OS browser — a loose
+  // startsWith('http') also matched schemes like "httpx:"/"http-evil:"; the strict
+  // regex refuses anything that isn't genuinely http(s).
+  const isWebUrl = (u: string) => /^https?:\/\//i.test(u)
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http')) shell.openExternal(url)
+    if (isWebUrl(url)) shell.openExternal(url)
     return { action: 'deny' }
   })
   const devUrl = devServerUrl ?? (isDev ? 'http://localhost:5173' : null)
@@ -322,7 +367,7 @@ function createWindow() {
     const allowed = devUrl ? new URL(devUrl).origin : 'file://'
     if (!url.startsWith(allowed)) {
       e.preventDefault()
-      if (url.startsWith('http')) shell.openExternal(url)
+      if (isWebUrl(url)) shell.openExternal(url)
     }
   })
 
@@ -488,6 +533,167 @@ app.whenReady().then(() => {
   ipcMain.handle('steam:detect', () => detectSteamEnv())
   ipcMain.handle('launch:preflight', () => runPreflight(getRawDb(), store))
   ipcMain.handle('launch:run', () => executeLaunch(getRawDb(), store))
+
+  // ── Modded game launcher (Nolvus/MO2-style) ──────────────────────────────────
+  // Resolves the SAME target executeLaunch would run (MO2 if configured and valid,
+  // else skse64_loader.exe next to the detected/configured game install) — the
+  // renderer never supplies a path, it only asks to play or to pin a shortcut to
+  // whatever is currently configured. Mirrors buildLaunchEnv's launchTarget logic
+  // in electron/launch/preflight.ts (kept local here to avoid touching that
+  // tested, gated preflight path for an unrelated feature).
+  function resolveGameLaunchTarget(): { exe: string; cwd: string } | null {
+    const mo2Path = store.get('mo2Path') as string | undefined
+    if (mo2Path && existsSync(mo2Path) && /modorganizer\.exe$/i.test(mo2Path)) {
+      return { exe: mo2Path, cwd: dirname(mo2Path) }
+    }
+    const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+    if (gamePath) return { exe: join(gamePath, 'skse64_loader.exe'), cwd: gamePath }
+    return null
+  }
+
+  // Fantasy/Dragon icon, resolved for packaged + dev layouts (see resolveAppIcon).
+  const launcherIconPath = () => resolveAppIcon()
+
+  // Bootstrap context = the swappable launch layer's inputs. Sourced from the same
+  // detection buildLaunchEnv uses, so playGame and the active pipeline resolve the
+  // identical target through electron/launch/bootstrapper.ts (MO2 → SKSE → DragonLoader).
+  const bootstrapContext = () => ({
+    gamePath: detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null,
+    mo2Path: (store.get('mo2Path') as string | undefined) ?? null,
+  })
+
+  // Fire a resolved bootstrap target: detached exe (SKSE/MO2) or a Steam protocol
+  // (DragonLoader → steam://run). No-throw; always resolves to a Result.
+  async function fireBootstrap(): Promise<{ success: boolean; pid?: number; error?: string; via?: string }> {
+    const target = resolveBootstrapper(bootstrapContext())
+    if (!target) {
+      return { success: false, error: 'Nessun metodo di avvio disponibile: configura MO2 o installa SKSE64' }
+    }
+    if (target.mode === 'protocol' && target.uri) {
+      try {
+        await shell.openExternal(target.uri)
+        logger.info('launcher', `gioco avviato via ${target.bootstrapperName}: ${target.uri}`)
+        return { success: true, via: target.bootstrapperId }
+      } catch (e) {
+        const error = (e as Error).message
+        logger.warn('launcher', `avvio via ${target.bootstrapperName} fallito: ${error}`)
+        return { success: false, error, via: target.bootstrapperId }
+      }
+    }
+    const res = launchGame({ exePath: target.exe!, cwd: target.cwd!, args: target.args ?? [] })
+    if (res.success) logger.info('launcher', `gioco avviato via ${target.bootstrapperName}: ${target.exe} (pid ${res.pid})`)
+    else logger.warn('launcher', `avvio via ${target.bootstrapperName} fallito: ${res.error}`)
+    return { ...res, via: target.bootstrapperId }
+  }
+
+  // Play: resolve + fire the bootstrapper directly (no gate). The gated, staged,
+  // Steam-aware path is launch:active-run below; this is the quick "just play".
+  ipcMain.handle('launcher:playGame', () => fireBootstrap())
+
+  // ── One-Click Play: full ACTIVE launch pipeline ──────────────────────────────
+  // Streams per-stage progress to the invoking renderer over 'launch:progress' and
+  // returns the terminal ActiveLaunchResult. This is the launcher's primary entry:
+  //   update → config → deps → install → STEAM(start+wait+login) → modded env →
+  //   plugins → profile → integrity → BOOTSTRAP → game. Stops on the first critical
+  //   failure with an actionable message; Steam is auto-started and never bypassed.
+  ipcMain.handle('launch:active-run', async (e) => {
+    const kvStore = store as unknown as KeyValueStore
+    const deps: ActiveLaunchDeps = {
+      buildEnv: () => buildLaunchEnv(getRawDb(), store),
+      ensureSteam: (env) =>
+        ensureSteamReady(
+          {
+            probe: liveSteamProbe,
+            start: () =>
+              env.steam.path ? startSteam(env.steam.path) : { started: false, error: 'Steam non installato' },
+          },
+          { timeoutMs: 90000, intervalMs: 2000, requireLogin: true },
+        ),
+      checkUpdate: () => checkForLauncherUpdate(),
+      // Resolve from the env already built for this run (avoids a second Steam probe).
+      resolveTarget: (env) =>
+        resolveBootstrapper({
+          gamePath: env.skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null,
+          mo2Path: env.mo2.path,
+        }),
+      launchExe: (t) => launchGame({ exePath: t.exe, cwd: t.cwd, args: t.args }),
+      launchProtocol: async (uri) => {
+        try {
+          await shell.openExternal(uri)
+          return { success: true }
+        } catch (err) {
+          return { success: false, error: (err as Error).message }
+        }
+      },
+      onProgress: (ev) => {
+        try {
+          e.sender.send('launch:progress', ev)
+        } catch {
+          /* renderer gone mid-launch — the detached game keeps running */
+        }
+      },
+      recordSuccess: (target) => {
+        try {
+          const profileId = resolveActiveProfileId(getRawDb(), store)
+          recordLaunch(kvStore, { bootstrapperId: target.bootstrapperId, profileId }, new Date().toISOString())
+        } catch (err) {
+          logger.warn('launcher', `smart-startup non registrato: ${(err as Error).message}`)
+        }
+      },
+    }
+    const res = await runActiveLaunch(deps)
+    logger.info(
+      'launch',
+      `pipeline attiva: launched=${res.launched} bootstrapper=${res.bootstrapperId ?? '-'} blocking=${res.blockingStage ?? '-'}`,
+    )
+    return res
+  })
+
+  // Launcher self-update check (best-effort; no-op without a packaged build + feed).
+  ipcMain.handle('launcher:checkUpdate', () => checkForLauncherUpdate())
+
+  // Smart-startup config (One-Click memory): get + patch.
+  ipcMain.handle('launcher:smartConfig', () => readSmartStartup(store as unknown as KeyValueStore))
+  ipcMain.handle('launcher:smartConfig:set', (_e, patch: Partial<SmartStartupConfig> | undefined) =>
+    writeSmartStartup(store as unknown as KeyValueStore, patch ?? {}),
+  )
+
+  // Create a desktop .lnk pointing at the same resolved GAME target, so the user can
+  // start the modded game without opening the mod manager at all (legacy convenience;
+  // the installer already pins the launcher itself to the desktop).
+  ipcMain.handle('launcher:createShortcut', () => {
+    const target = resolveGameLaunchTarget()
+    if (!target) {
+      return { success: false, error: 'Nessun eseguibile risolvibile: configura MO2 o il percorso del gioco' }
+    }
+    const res = createDesktopShortcut({
+      targetExePath: target.exe,
+      shortcutName: 'Skyrim AE Mod Manager',
+      workingDir: target.cwd,
+      iconPath: launcherIconPath(),
+      desktopDir: app.getPath('desktop'),
+    })
+    if (res.success) logger.info('launcher', `collegamento desktop creato: ${res.shortcutPath}`)
+    else logger.warn('launcher', `creazione collegamento fallita: ${res.error}`)
+    return res
+  })
+
+  // Pin the LAUNCHER itself (this app) to the desktop with the dragon icon — the
+  // "unico punto di accesso". The NSIS installer does this on install; this handler
+  // is for unpacked/portable runs, and to re-create a deleted shortcut on demand.
+  ipcMain.handle('launcher:createAppShortcut', () => {
+    const res = createDesktopShortcut({
+      targetExePath: process.execPath,
+      shortcutName: 'Skyrim AE Fantasy Launcher',
+      workingDir: dirname(process.execPath),
+      iconPath: launcherIconPath(),
+      desktopDir: app.getPath('desktop'),
+    })
+    if (res.success) logger.info('launcher', `collegamento launcher creato: ${res.shortcutPath}`)
+    else logger.warn('launcher', `creazione collegamento launcher fallita: ${res.error}`)
+    return res
+  })
+
   // Compatibility report (runtime/SKSE version + active-profile plugins.txt).
   ipcMain.handle('compat:analyze', () => runCompatReport(getRawDb(), store))
 
@@ -936,6 +1142,13 @@ ipcMain.handle('settings:get', (_e, key: string) => {
   return store.get(key)
 })
 ipcMain.handle('settings:set', (_e, key: string, value: unknown) => {
+  // electron-store uses dot-prop: a dotted/crafted key ("a.b", "__proto__.x") would
+  // reach a NESTED path or a dangerous property. Every real setting is a flat
+  // identifier, so reject anything else up front (config-clobber / pollution guard).
+  if (typeof key !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(key)) {
+    logger.warn('security', `settings:set rifiutato (chiave non valida): ${String(key).slice(0, 80)}`)
+    return
+  }
   if (SECRET_KEYS.has(key)) {
     if (value === SECRET_MASK) return // masked echo from the renderer: not a new value
     if (db) setSecret(db as unknown as SqliteDb, key, typeof value === 'string' ? value : '', secretCrypto)
@@ -1121,7 +1334,15 @@ ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
 
 // ─── Downloads IPC ────────────────────────────────────────────────────────────
 ipcMain.handle('downloads:list', (_e, profileId: number) => {
-  return getRawDb().prepare('SELECT * FROM downloads WHERE profile_id = ? ORDER BY created_at DESC').all(profileId)
+  // Explicit column list (NOT SELECT *): the nxm_key / nxm_expires non-premium download
+  // token is a short-lived secret used only main-side and must never reach the renderer.
+  return getRawDb()
+    .prepare(
+      `SELECT id, mod_id, profile_id, nexus_id, file_id, name, url, file_path,
+              total_size, downloaded_size, status, error, created_at
+       FROM downloads WHERE profile_id = ? ORDER BY created_at DESC`,
+    )
+    .all(profileId)
 })
 
 ipcMain.handle('downloads:add', (_e, raw: Record<string, unknown>) => {
@@ -1158,6 +1379,9 @@ ipcMain.handle(
 // holds the real key (it only sees SECRET_MASK), so a compromised renderer cannot
 // exfiltrate it and the legacy `apiKey` parameter from old callers is ignored.
 ipcMain.handle('nexus:get-mod', async (_e, nexusId: number) => {
+  // nexusId is interpolated into the API URL and the request carries the API key, so
+  // reject anything that isn't a positive integer (no path/query injection into the URL).
+  if (!Number.isInteger(nexusId) || nexusId <= 0) return { success: false, error: 'nexusId non valido' }
   try {
     const res = await axios.get(
       `https://api.nexusmods.com/v1/games/skyrimspecialedition/mods/${nexusId}.json`,
@@ -1241,9 +1465,27 @@ ipcMain.handle('fs:open-external', (_e, url: string) => {
 // path is resolved main-side from the settings store (populated via the trusted
 // pickFile dialog / auto-detect). A compromised renderer cannot spawn arbitrary
 // binaries by passing a path over IPC.
+// Per-tool expected executable basename. Even though tool paths are set through the
+// trusted pickFile dialog, we RE-VALIDATE the basename here at the spawn sink: a
+// tampered/mis-set store value (or a future settings bug) then cannot turn a
+// "launch tool" action into launching an arbitrary binary. This is the concrete
+// enforcement of the "renderer picks WHICH tool, never WHAT exe" invariant.
+const TOOL_BINARIES: Record<string, RegExp> = {
+  mo2Path: /^modorganizer\.exe$/i,
+  lootPath: /^loot(\.exe)?$/i,
+  sseeditPath: /^(sseedit|sseedit64|xedit|xedit64)\.exe$/i,
+  dyndolodPath: /^dyndolod(x?64)?\.exe$/i,
+  pandoraPath: /^pandora.*\.exe$/i,
+}
 const toolPath = (key: string): string | null => {
   const p = store.get(key)
-  return typeof p === 'string' && p && existsSync(p) ? p : null
+  if (typeof p !== 'string' || !p || !existsSync(p)) return null
+  const expected = TOOL_BINARIES[key]
+  if (expected && !expected.test(basename(p))) {
+    logger.warn('security', `tool ${key} ignorato: basename inatteso "${basename(p)}"`)
+    return null
+  }
+  return p
 }
 const launchTool = (exe: string | null, args: string[] = [], opts: { cwd?: string } = {}) =>
   new Promise((resolve) => {
@@ -1278,6 +1520,13 @@ ipcMain.handle('tools:launch-pandora', () => launchTool(toolPath('pandoraPath'))
 ipcMain.handle('tools:validate-7z', (_e, configured?: string) => {
   const path = detect7zPath(existsSync, configured ?? (store.get('sevenZipPath') as string | undefined))
   if (!path) return { path: null, exists: false, valid: false, version: null }
+  // Identity gate BEFORE spawn: only a genuine 7-Zip binary basename may be launched.
+  // The banner/looksLike7z check runs only AFTER the child starts, so without this a
+  // renderer-supplied `configured` path would already have executed an arbitrary exe.
+  if (!/^(7z|7za|7zg|7zr)\.exe$/i.test(basename(path))) {
+    logger.warn('security', `tools:validate-7z: basename non-7-Zip rifiutato "${basename(path)}"`)
+    return { path, exists: true, valid: false, version: null }
+  }
   return new Promise((resolve) => {
     let out = ''
     let settled = false

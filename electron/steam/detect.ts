@@ -10,6 +10,13 @@ import { parseAddressLibVersion, parseSkseRuntimeVersion, gameVersionSupported }
 
 export const SKYRIM_SE_APPID = 489830
 
+// Absolute System32 paths: invoking reg/tasklist by BARE name lets a planted reg.exe /
+// tasklist.exe on PATH or in the current directory run instead of the real Windows tool
+// (binary-planting). Resolve them from %SystemRoot% once.
+const SYS32 = join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32')
+const REG_EXE = join(SYS32, 'reg.exe')
+const TASKLIST_EXE = join(SYS32, 'tasklist.exe')
+
 export interface SteamInfo {
   installed: boolean
   running: boolean
@@ -25,7 +32,7 @@ export interface SkyrimInfo {
 
 function regQuery(key: string, value: string): string | null {
   try {
-    const out = execFileSync('reg', ['query', key, '/v', value], {
+    const out = execFileSync(REG_EXE, ['query', key, '/v', value], {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 4000,
@@ -70,7 +77,7 @@ function parseVdfFile(path: string) {
 
 export function isSteamRunning(): boolean {
   try {
-    const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq steam.exe', '/NH'], {
+    const out = execFileSync(TASKLIST_EXE, ['/FI', 'IMAGENAME eq steam.exe', '/NH'], {
       encoding: 'utf8',
       windowsHide: true,
       timeout: 4000,

@@ -38,8 +38,15 @@ async function rotateIfNeeded(file: string): Promise<void> {
   }
 }
 
+// Neutralize control characters (newline/CR/tab/NUL…) in untrusted scope/message so a
+// crafted mod or catalog name can't inject or forge extra log lines; also cap length.
+const clean = (s: string): string =>
+  Array.from(String(s), (c) => (c.charCodeAt(0) < 32 ? ' ' : c))
+    .join('')
+    .slice(0, 4000)
+
 async function write(level: Level, scope: string, message: string) {
-  const line = `${new Date().toISOString()} [${level}] (${scope}) ${message}\n`
+  const line = `${new Date().toISOString()} [${level}] (${clean(scope)}) ${clean(message)}\n`
   if (level === 'ERROR') console.error(line.trimEnd())
   else console.log(line.trimEnd())
   try {

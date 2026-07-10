@@ -28,6 +28,9 @@ interface AppStore {
   loadingMessage: string
   sidebarCollapsed: boolean
   activePage: string
+  // Launcher-first entry: when true the full-screen Fantasy Launcher (One-Click
+  // Play) is shown instead of the mod-manager UI. Reset to true on every app start.
+  launcherActive: boolean
   modListFilter: string // category preselected when navigating from the sidebar
 
   // Actions - profiles
@@ -71,6 +74,7 @@ interface AppStore {
   setLoading: (loading: boolean, message?: string) => void
   setSidebarCollapsed: (v: boolean) => void
   setActivePage: (page: string) => void
+  setLauncherActive: (v: boolean) => void
   openCategory: (category: string) => void
 
   // Conflict detection
@@ -134,6 +138,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   loadingMessage: '',
   sidebarCollapsed: false,
   activePage: 'dashboard',
+  launcherActive: true,
   modListFilter: '',
 
   loadProfiles: async () => {
@@ -404,6 +409,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setLoading: (isLoading, loadingMessage = '') => set({ isLoading, loadingMessage }),
   setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
   setActivePage: (activePage) => set({ activePage, modListFilter: '' }),
+  setLauncherActive: (launcherActive) => set({ launcherActive }),
   openCategory: (category) => set({ activePage: 'modlist', modListFilter: category }),
 
   detectConflicts: () => {

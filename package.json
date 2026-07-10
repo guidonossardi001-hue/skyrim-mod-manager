@@ -1,7 +1,8 @@
 {
   "name": "skyrim-ae-mod-manager",
   "version": "1.0.0",
-  "description": "Skyrim AE Mod Manager - Anime Fantasy Edition",
+  "description": "Skyrim AE Fantasy Launcher - avvio One-Click della versione moddata",
+  "author": "Skyrim AE Fantasy Launcher",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite --config vite.browser.config.ts",
@@ -29,6 +30,7 @@
     "clsx": "^2.1.0",
     "date-fns": "^3.3.0",
     "electron-store": "^8.1.0",
+    "electron-updater": "^6.3.9",
     "lucide-react": "^0.344.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
@@ -64,6 +66,7 @@
   "build": {
     "appId": "com.skyrim.ae-mod-manager",
     "productName": "Skyrim AE Mod Manager",
+    "copyright": "Copyright © 2026 Skyrim AE Fantasy Launcher",
     "asar": true,
     "protocols": [
       {
@@ -89,16 +92,47 @@
       {
         "from": "resources/7zip-full",
         "to": "7zip-full"
+      },
+      {
+        "from": "assets",
+        "to": "assets",
+        "filter": [
+          "**/*.ico"
+        ]
+      }
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "guidonossardi001-hue",
+        "repo": "skyrim-mod-manager"
       }
     ],
     "win": {
-      "target": "nsis",
-      "icon": "resources/icons/icon.ico",
-      "signAndEditExecutable": false
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/dragon_launcher.ico",
+      "signAndEditExecutable": false,
+      "artifactName": "Skyrim-AE-Fantasy-Launcher-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Skyrim AE Fantasy Launcher",
+      "installerIcon": "assets/dragon_launcher.ico",
+      "uninstallerIcon": "assets/dragon_launcher.ico",
+      "installerHeaderIcon": "assets/dragon_launcher.ico",
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": true
     }
   }
 }

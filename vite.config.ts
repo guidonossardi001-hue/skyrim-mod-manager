@@ -22,7 +22,9 @@ export default defineConfig({
             // accumulava bundle hashati stale (decine di file spediti nell'app).
             emptyOutDir: true,
             rollupOptions: {
-              external: ['better-sqlite3', 'electron-store', '7zip-bin']
+              // electron-updater is loaded at runtime via createRequire (optional dep);
+              // keep it external so the bundler never tries to resolve it at build time.
+              external: ['better-sqlite3', 'electron-store', '7zip-bin', 'electron-updater']
             }
           }
         }

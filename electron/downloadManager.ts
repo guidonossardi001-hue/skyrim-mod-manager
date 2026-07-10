@@ -55,6 +55,36 @@ function guessExtension(url: string): string {
   return ['.7z', '.zip', '.rar', '.exe'].includes(ext) ? ext : '.7z' // Nexus archives default to .7z
 }
 
+// Direct-download guard. A pre-stored `url` (from a signed delta manifest, or from the
+// renderer via downloads:add) is fetched by the MAIN process, so it must be constrained:
+//   • https only — a plaintext http:// download is MITM-able and would defeat the whole
+//     signed-archive story,
+//   • no internal/loopback/link-local host — otherwise a renderer-supplied URL turns the
+//     main process into an SSRF proxy that can reach localhost / the LAN.
+// Nexus-resolved links (mod_id+file_id) don't pass through here; they're already trusted.
+export function assertSafeDirectUrl(raw: string): string {
+  let u: URL
+  try {
+    u = new URL(raw)
+  } catch {
+    throw new Error('URL di download non valido')
+  }
+  if (u.protocol !== 'https:') throw new Error('Download diretto non-HTTPS rifiutato')
+  const host = u.hostname.toLowerCase()
+  const internal =
+    host === 'localhost' ||
+    host === '::1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local') ||
+    /^127\./.test(host) ||
+    /^10\./.test(host) ||
+    /^192\.168\./.test(host) ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(host) ||
+    /^169\.254\./.test(host)
+  if (internal) throw new Error(`host di download non consentito (interno): ${host}`)
+  return u.toString()
+}
+
 export function initDownloadManager(
   db: Database.Database,
   win: () => BrowserWindow | null,
@@ -84,7 +114,7 @@ export function initDownloadManager(
   async function resolveUrl(row: DownloadRow, signal?: AbortSignal): Promise<string> {
     // A direct CDN/file URL (not a mod PAGE) is used as-is.
     const isModPage = !!row.url && /nexusmods\.com\/.*\/mods\/\d+\/?$/i.test(row.url)
-    if (row.url && !isModPage && /^https?:\/\//i.test(row.url)) return row.url
+    if (row.url && !isModPage && /^https?:\/\//i.test(row.url)) return assertSafeDirectUrl(row.url)
 
     // Otherwise resolve through the Nexus download_link endpoint (auth headers +
     // error mapping live in the resolver). The nxm key/expires (non-premium) are

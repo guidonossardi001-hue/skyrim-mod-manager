@@ -19,6 +19,7 @@ import {
   FileCode,
   ArrowUpCircle,
   ShieldCheck,
+  Play,
 } from 'lucide-react'
 import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '@/store/appStore'
@@ -73,6 +74,7 @@ export default function Sidebar() {
     openCategory,
     sidebarCollapsed,
     setSidebarCollapsed,
+    setLauncherActive,
     conflicts,
     downloads,
     modUpdates,
@@ -83,6 +85,7 @@ export default function Sidebar() {
       openCategory: s.openCategory,
       sidebarCollapsed: s.sidebarCollapsed,
       setSidebarCollapsed: s.setSidebarCollapsed,
+      setLauncherActive: s.setLauncherActive,
       conflicts: s.conflicts,
       downloads: s.downloads,
       modUpdates: s.modUpdates,
@@ -119,6 +122,26 @@ export default function Sidebar() {
       >
         {sidebarCollapsed ? <ChevronRight size={12} /> : <ChevronLeft size={12} />}
       </button>
+
+      {/* Return to the Fantasy Launcher (One-Click Play) */}
+      <div className="px-3 pt-3">
+        <button
+          onClick={() => setLauncherActive(true)}
+          title="Torna al Launcher (GIOCA)"
+          className={clsx(
+            'w-full flex items-center gap-2 rounded-lg font-semibold text-white transition-all hover:scale-[1.02]',
+            sidebarCollapsed ? 'justify-center py-2.5' : 'justify-center py-2.5 px-3',
+          )}
+          style={{
+            background: 'linear-gradient(135deg, #ff4500, #ff6a2e)',
+            boxShadow: '0 0 20px rgba(255,69,0,0.28)',
+            fontFamily: 'Cinzel, serif',
+          }}
+        >
+          <Play size={16} fill="currentColor" />
+          {!sidebarCollapsed && 'GIOCA'}
+        </button>
+      </div>
 
       {/* Nav groups */}
       <div className="flex-1 overflow-y-auto py-3 space-y-1">

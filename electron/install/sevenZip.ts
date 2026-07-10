@@ -1,6 +1,6 @@
 import { path7za } from '7zip-bin'
 import { existsSync } from 'fs'
-import { join } from 'path'
+import { join, basename } from 'path'
 
 // 7-Zip discovery + identity helpers.
 //   • The app BUNDLES a prebuilt standalone 7za (via 7zip-bin) so .7z/.zip/tar/gz/bz2
@@ -58,7 +58,11 @@ export const COMMON_7Z_PATHS = [
 
 /** Pick a usable 7z path: the configured one if it exists, else a known install location. */
 export function detect7zPath(exists: (p: string) => boolean, configured?: string | null): string | null {
-  if (configured && exists(configured)) return configured
+  // Only accept a configured path whose basename is actually a 7-Zip binary: this path is
+  // later SPAWNED (extraction / .rar), so a tampered sevenZipPath must not be able to
+  // launch an arbitrary executable through the extractor.
+  if (configured && exists(configured) && /^(7z|7za|7zg|7zr)(\.exe)?$/i.test(basename(configured)))
+    return configured
   for (const p of COMMON_7Z_PATHS) if (exists(p)) return p
   return null
 }

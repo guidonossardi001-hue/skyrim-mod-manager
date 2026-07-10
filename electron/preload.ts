@@ -15,6 +15,7 @@ const EVENT_CHANNELS = new Set([
   'sync:progress',
   'stockgame:progress',
   'deploy:progress',
+  'launch:progress',
   'nxm:queued',
 ])
 
@@ -129,6 +130,25 @@ contextBridge.exposeInMainWorld('api', {
   launch: {
     preflight: () => invoke('launch:preflight'),
     run: () => invoke('launch:run'),
+    // One-Click Play: full active pipeline (Steam auto-start + login + bootstrap).
+    activeRun: () => invoke('launch:active-run'),
+    // Subscribe to streamed stage progress. Returns an unsubscribe function.
+    onProgress: (callback: (p: unknown) => void) => {
+      const listener = (_e: IpcRendererEvent, p: unknown) => callback(p)
+      ipcRenderer.on('launch:progress', listener)
+      return () => ipcRenderer.removeListener('launch:progress', listener)
+    },
+  },
+  // Modded game launcher (Nolvus/MO2-style): direct play + desktop shortcut +
+  // smart-startup memory + self-update. No path travels over this bridge — the
+  // main process resolves the bootstrap target from the settings store.
+  launcher: {
+    playGame: () => invoke('launcher:playGame'),
+    createShortcut: () => invoke('launcher:createShortcut'),
+    createAppShortcut: () => invoke('launcher:createAppShortcut'),
+    checkUpdate: () => invoke('launcher:checkUpdate'),
+    smartConfig: () => invoke('launcher:smartConfig'),
+    setSmartConfig: (patch: Record<string, unknown>) => invoke('launcher:smartConfig:set', patch),
   },
   compat: {
     analyze: () => invoke('compat:analyze'),

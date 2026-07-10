@@ -7,7 +7,11 @@
 
 import type { Mod, Profile, Download, CatalogMod, DeltaChangeRow } from '@/types'
 import { MODLIST_CATALOG } from '@/data/modlistCatalog'
-import { runLaunchWorkflow, type LaunchEnv } from '@/lib/launchWorkflow'
+import { runLaunchWorkflow, type LaunchEnv, SKYRIM_SE_APPID } from '@/lib/launchWorkflow'
+// runActiveLaunch is browser-safe: it only imports runLaunchWorkflow at runtime
+// (all bootstrapper/steam/updater imports are type-only and erased).
+import { runActiveLaunch, type LaunchProgress } from '../electron/launch/activeLaunch'
+import type { BootstrapTarget } from '../electron/launch/bootstrapper'
 import { analyzeModlist, type CompatMod, type CompatAnalysis } from '@/lib/compatibility'
 import { derivePluginsFromMods } from '@/lib/plugins'
 import { resolveInstallPlan } from '@/lib/dependencies'
@@ -392,6 +396,53 @@ function buildMockLaunchEnv(): LaunchEnv {
     backups: { count: state.backups.length, lastValid: state.backups.length > 0 },
     launchTarget: s.mo2Path ? 'mo2' : hasSkse ? 'skse' : null,
   }
+}
+
+// ── One-Click Play simulation (browser preview) ──────────────────────────────
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+const launchListeners = new Set<(p: LaunchProgress) => void>()
+const emitLaunchProgress = (ev: LaunchProgress) => launchListeners.forEach((cb) => cb(ev))
+
+let mockSmart = {
+  autoLaunch: false,
+  lastBootstrapperId: null as string | null,
+  lastProfileId: null as number | null,
+  lastLaunchAt: null as string | null,
+  launchCount: 0,
+}
+
+// Mirror the real bootstrapper priority (MO2 → SKSE → DragonLoader) without
+// pulling the fs-bound electron module into the browser bundle.
+function mockResolveTarget(env: LaunchEnv): BootstrapTarget | null {
+  if (env.mo2.path)
+    return {
+      bootstrapperId: 'mo2',
+      bootstrapperName: 'Mod Organizer 2',
+      mode: 'exe',
+      exe: env.mo2.path,
+      cwd: env.mo2.path,
+      args: [],
+      description: 'Avvio tramite Mod Organizer 2',
+    }
+  if (env.skse.present && env.skyrim.path)
+    return {
+      bootstrapperId: 'skse',
+      bootstrapperName: 'SKSE64',
+      mode: 'exe',
+      exe: `${env.skyrim.path}/skse64_loader.exe`,
+      cwd: env.skyrim.path,
+      args: [],
+      description: 'Avvio tramite Skyrim Script Extender',
+    }
+  if (env.skyrim.path)
+    return {
+      bootstrapperId: 'dragonloader',
+      bootstrapperName: 'DragonLoader',
+      mode: 'protocol',
+      uri: `steam://run/${SKYRIM_SE_APPID}`,
+      description: 'Avvio tramite meccanismo Steam legittimo (steam://run)',
+    }
+  return null
 }
 
 // ─── Simulazione motore delta (preview browser) ──────────────────────────────
@@ -789,6 +840,59 @@ export const mockApi = {
     run: async () => {
       const report = runLaunchWorkflow(buildMockLaunchEnv())
       return { launched: report.canLaunch, report }
+    },
+    // One-Click Play — drives the REAL active pipeline with simulated IO so the
+    // browser preview streams the same staged progress the packaged app does.
+    activeRun: async () =>
+      runActiveLaunch({
+        buildEnv: () => buildMockLaunchEnv(),
+        ensureSteam: async (env) => {
+          await sleep(800) // visible "starting Steam / waiting for login" pause
+          if (!env.steam.installed)
+            return { ok: false, loggedIn: false, started: false, timedOut: false, message: 'Steam non installato (simulazione)' }
+          return {
+            ok: true,
+            loggedIn: true,
+            started: !env.steam.running,
+            timedOut: false,
+            message: env.steam.running ? 'Steam già pronto' : 'Steam avviato e pronto',
+          }
+        },
+        checkUpdate: async () => {
+          await sleep(350)
+          return { available: false, currentVersion: '1.0.0', latestVersion: null, error: null, checked: false }
+        },
+        resolveTarget: (env) => mockResolveTarget(env),
+        launchExe: () => ({ success: true, pid: 4242 }),
+        launchProtocol: async () => {
+          await sleep(350)
+          return { success: true }
+        },
+        onProgress: (ev) => emitLaunchProgress(ev),
+        recordSuccess: (t) => {
+          mockSmart = {
+            ...mockSmart,
+            lastBootstrapperId: t.bootstrapperId,
+            lastLaunchAt: nowIso(),
+            launchCount: mockSmart.launchCount + 1,
+          }
+        },
+      }),
+    onProgress: (cb: (p: unknown) => void) => {
+      const listener = (p: LaunchProgress) => cb(p)
+      launchListeners.add(listener)
+      return () => launchListeners.delete(listener)
+    },
+  },
+  launcher: {
+    playGame: async () => ({ success: true, via: mockResolveTarget(buildMockLaunchEnv())?.bootstrapperId ?? null }),
+    createShortcut: async () => ({ success: true, shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Mod Manager.lnk' }),
+    createAppShortcut: async () => ({ success: true, shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Fantasy Launcher.lnk' }),
+    checkUpdate: async () => ({ available: false, currentVersion: '1.0.0', latestVersion: null, error: null, checked: false }),
+    smartConfig: async () => ({ ...mockSmart }),
+    setSmartConfig: async (patch: Record<string, unknown>) => {
+      mockSmart = { ...mockSmart, ...patch }
+      return { ...mockSmart }
     },
   },
 

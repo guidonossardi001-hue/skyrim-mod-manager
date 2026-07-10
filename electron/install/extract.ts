@@ -170,6 +170,17 @@ async function extractZipSafely(
     entries.map((e) => e.entryName),
     destDir,
   )
+  // Decompression-bomb guard for the in-memory fallback: adm-zip buffers output, so a
+  // small archive that inflates to many GB would OOM the main process. Reject when the
+  // declared TOTAL uncompressed size exceeds a generous cap (7-Zip, which streams, is the
+  // path for genuinely-large archives and is not bound by this limit).
+  const MAX_UNCOMPRESSED = 4 * 1024 * 1024 * 1024 // 4 GiB
+  const totalUncompressed = entries.reduce((sum, e) => sum + (e.header.size || 0), 0)
+  if (totalUncompressed > MAX_UNCOMPRESSED) {
+    throw new Error(
+      `Archivio .zip: dimensione non compressa dichiarata troppo grande (${totalUncompressed} byte) per l'estrattore integrato: configura 7-Zip`,
+    )
+  }
   // adm-zip is the small-file fallback and does not handle Windows \\?\ paths, so use
   // the plain destDir here (deep trees are 7-Zip's job, which does support long paths).
   let done = 0

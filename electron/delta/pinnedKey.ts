@@ -9,6 +9,15 @@ export const EMBEDDED_PUBLIC_KEY_PEM =
   '-----END PUBLIC KEY-----\n'
 
 export function pinnedPublicKey(): string {
-  const env = typeof process !== 'undefined' ? process.env?.NOLVUS_MANIFEST_PUBKEY : undefined
-  return env && env.includes('BEGIN PUBLIC KEY') ? env : EMBEDDED_PUBLIC_KEY_PEM
+  const proc = typeof process !== 'undefined' ? process.env : undefined
+  const env = proc?.NOLVUS_MANIFEST_PUBKEY
+  // The env override is a dev/CI/test convenience for key rotation. A user-writable
+  // env var must NOT be able to replace the trust anchor in a SHIPPED build — that
+  // would let a local attacker set NOLVUS_MANIFEST_PUBKEY to their own key and have
+  // every forged manifest verify. So honor the override only outside production;
+  // packaged builds always pin the embedded key. Production key rotation must ship a
+  // new build (or a future signed key-rotation manifest), not rely on an env var.
+  const mode = proc?.NODE_ENV
+  const overrideAllowed = mode === 'development' || mode === 'test' || mode === 'ci'
+  return overrideAllowed && env && env.includes('BEGIN PUBLIC KEY') ? env : EMBEDDED_PUBLIC_KEY_PEM
 }

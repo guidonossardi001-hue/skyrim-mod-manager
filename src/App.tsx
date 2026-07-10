@@ -3,6 +3,7 @@ import { useShallow } from 'zustand/react/shallow'
 import TitleBar from '@/components/layout/TitleBar'
 import Sidebar from '@/components/layout/Sidebar'
 import { useAppStore } from '@/store/appStore'
+import { LauncherShell } from '@/components/ui/LauncherShell'
 import { ToastContainer } from '@/components/ui/Toast'
 import { toast } from '@/lib/toast'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
@@ -101,6 +102,7 @@ export default function App() {
   // store (incluse le righe di log) ri-renderizzava l'intero albero.
   const {
     activePage,
+    launcherActive,
     loadProfiles,
     loadSettings,
     loadMods,
@@ -111,6 +113,7 @@ export default function App() {
   } = useAppStore(
     useShallow((s) => ({
       activePage: s.activePage,
+      launcherActive: s.launcherActive,
       loadProfiles: s.loadProfiles,
       loadSettings: s.loadSettings,
       loadMods: s.loadMods,
@@ -213,18 +216,27 @@ export default function App() {
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden">
-        <Sidebar />
-        <main className="flex-1 flex flex-col overflow-hidden">
-          {/* Key by page so a crash on one page resets when navigating elsewhere,
-              instead of leaving the whole content area stuck on the error screen. */}
-          <ErrorBoundary key={activePage}>
-            <Suspense fallback={<PageLoader />}>
-              <Page id={activePage} />
-            </Suspense>
-          </ErrorBoundary>
-        </main>
-      </div>
+      {/* Launcher-first entry: the Fantasy Launcher (One-Click Play) is the default
+          screen. "Gestione Mod" flips launcherActive off to reveal the full manager;
+          the manager's Play button flips it back on. */}
+      {launcherActive ? (
+        <ErrorBoundary key="launcher">
+          <LauncherShell />
+        </ErrorBoundary>
+      ) : (
+        <div className="flex flex-1 overflow-hidden">
+          <Sidebar />
+          <main className="flex-1 flex flex-col overflow-hidden">
+            {/* Key by page so a crash on one page resets when navigating elsewhere,
+                instead of leaving the whole content area stuck on the error screen. */}
+            <ErrorBoundary key={activePage}>
+              <Suspense fallback={<PageLoader />}>
+                <Page id={activePage} />
+              </Suspense>
+            </ErrorBoundary>
+          </main>
+        </div>
+      )}
 
       <ToastContainer />
     </div>
