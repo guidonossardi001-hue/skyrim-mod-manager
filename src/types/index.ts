@@ -173,6 +173,50 @@ declare global {
       catalog: {
         list(filter?: { category?: string; search?: string }): Promise<CatalogMod[]>
         seed(mods: Partial<CatalogMod>[]): Promise<{ inserted: number }>
+        // Fetch + verify + atomically replace the reference catalog from the
+        // signed remote source. url is optional (main process falls back to its
+        // configured default). Never rejects — inspect success/errorKind.
+        update(url?: string): Promise<{
+          success: boolean
+          version?: number
+          inserted?: number
+          reused?: boolean
+          error?: string
+          errorKind?: 'parse' | 'schema' | 'integrity' | 'signature' | 'downgrade' | 'db' | 'network'
+        }>
+        // Dependency-first install plan for the given targets. Never rejects —
+        // inspect success/errorKind. Mirrors electron/catalog/dependencies.ts
+        // InstallPlanResult (kept in sync by hand: the two tsconfigs are separate
+        // projects, so the renderer never imports from electron/).
+        resolvePlan(
+          targetIds: number[],
+          installedIds: number[],
+        ): Promise<{
+          success: boolean
+          plan?: Array<{
+            nexus_id: number
+            name: string
+            priority_order: number
+            reason: 'target' | 'dependency'
+          }>
+          errorKind?: 'missing' | 'cycle' | 'conflict' | 'db'
+          errors?: string[]
+          cyclePath?: number[]
+          conflicts?: Array<{
+            mod: number
+            modName: string
+            conflictsWith: number
+            offender: 'installed' | 'planned'
+          }>
+          // File-override collisions the system auto-resolved (category/weight/
+          // priority rules) — informational, never a blocker. See ResolvedConflict
+          // in electron/deploy/plan.ts.
+          resolvedConflicts?: Array<{
+            file: string
+            winner: string
+            loser: string
+          }>
+        }>
       }
       downloads: {
         list(profileId: number): Promise<Download[]>
@@ -182,7 +226,6 @@ declare global {
       nexus: {
         // The API key lives ONLY in the main process (encrypted secret store);
         // validateKey may pass a just-typed candidate not yet saved.
-        search(query: string): Promise<{ success: boolean; data?: unknown; error?: string }>
         getMod(nexusId: number): Promise<{ success: boolean; data?: unknown; error?: string }>
         validateKey(apiKey?: string): Promise<{ success: boolean; data?: unknown }>
       }
@@ -221,6 +264,62 @@ declare global {
       app: {
         getVersion(): Promise<string>
         getUserData(): Promise<string>
+      }
+      // Install pipeline (verify → staged extract → recipe map → atomic commit).
+      // Never rejects — inspect success/errorKind. Mirrors the InstallResult in
+      // electron/install/installer.ts (kept in sync by hand: separate tsconfigs,
+      // so the renderer never imports from electron/).
+      install: {
+        run(downloadId: number): Promise<{
+          success: boolean
+          nexusId: number
+          modPath?: string
+          strategy?: 'root' | 'recipe'
+          recipeSource?: 'exact' | 'nexus' | 'default'
+          filesDeployed?: number
+          method?: '7z' | '7za' | 'zip'
+          recipeSchema?: number
+          errorKind?:
+            | 'not-found'
+            | 'hash'
+            | 'disk-space'
+            | 'extract'
+            | 'recipe'
+            | 'recipe-slip'
+            | 'commit'
+            | 'cancelled'
+            | 'db'
+          error?: string
+        }>
+      }
+      // Deploy/virtualization: link a profile's enabled mods into its instance Data
+      // folder. Never rejects — inspect success/errorKind. Mirrors DeployResult in
+      // electron/deploy/deployer.ts (kept in sync by hand: separate tsconfigs, so
+      // the renderer never imports from electron/).
+      deploy: {
+        run(profileId: number): Promise<{
+          success: boolean
+          instanceDataDir?: string
+          modsLinked?: number
+          filesHardlinked?: number
+          junctionsCreated?: number
+          pluginsWritten?: number
+          pluginsPath?: string
+          errorKind?: 'no-mods' | 'cross-volume' | 'source-missing' | 'cleanup' | 'link' | 'db'
+          error?: string
+        }>
+        // Streamed progress. Mirrors DeployProgress in electron/deploy/deployer.ts.
+        // Returns an unsubscribe function — call it on unmount to detach the listener.
+        onProgress(
+          callback: (p: {
+            stage: 'scanning' | 'cleaning' | 'linking' | 'plugins' | 'done'
+            currentMod?: string
+            currentFile?: string
+            processedItems?: number
+            totalItems?: number
+            percent?: number
+          }) => void,
+        ): () => void
       }
       // Incremental (delta) update engine — signed-manifest ingest + gated apply.
       delta: {

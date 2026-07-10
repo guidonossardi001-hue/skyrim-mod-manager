@@ -10,6 +10,7 @@ import { MODLIST_CATALOG } from '@/data/modlistCatalog'
 import { runLaunchWorkflow, type LaunchEnv } from '@/lib/launchWorkflow'
 import { analyzeModlist, type CompatMod, type CompatAnalysis } from '@/lib/compatibility'
 import { derivePluginsFromMods } from '@/lib/plugins'
+import { resolveInstallPlan } from '@/lib/dependencies'
 
 const STORAGE_KEY = 'skyrim-mm-state-v2'
 
@@ -619,6 +620,46 @@ export const mockApi = {
       return result
     },
     seed: async () => ({ inserted: catalog.length }),
+    // Mirrors the backend InstallPlanResult shape. Resolves `requires` by name
+    // (the seed catalog's legacy format) so dependency chains produce a real
+    // forced order for the preview demo; cycle/conflict branches share the shape.
+    resolvePlan: async (targetIds: number[], installedIds: number[]) => {
+      const installed = new Set<number>(installedIds)
+      const byNexus = new Map(catalog.map((m) => [m.nexus_id, m]))
+      const planned = new Map<number, { mod: CatalogMod; reason: 'target' | 'dependency' }>()
+      const missing: string[] = []
+      for (const id of targetIds) {
+        const mod = byNexus.get(id)
+        if (!mod) {
+          missing.push(`target ${id} assente dal catalogo`)
+          continue
+        }
+        for (const item of resolveInstallPlan(mod, catalog, installed)) {
+          const prev = planned.get(item.mod.nexus_id)
+          if (!prev || item.reason === 'target') planned.set(item.mod.nexus_id, item)
+        }
+      }
+      if (missing.length) return { success: false, errorKind: 'missing' as const, errors: missing }
+      const plan = [...planned.values()]
+        .sort((a, b) => a.mod.priority_order - b.mod.priority_order)
+        .map((it) => ({
+          nexus_id: it.mod.nexus_id,
+          name: it.mod.name,
+          priority_order: it.mod.priority_order,
+          reason: it.reason,
+        }))
+      // Demo data for the "Conflitti Auto-risolti" panel: with ≥2 mods planned we
+      // fake a couple of file-override collisions the deploy engine would auto-resolve
+      // (real values come from computeDeployPlan.resolvedConflicts at deploy time).
+      const resolvedConflicts =
+        plan.length >= 2
+          ? [
+              { file: 'textures/armor/steel/steelarmor.dds', winner: plan[1].name, loser: plan[0].name },
+              { file: 'meshes/actors/character/character assets/skeleton.nif', winner: plan[0].name, loser: plan[1].name },
+            ]
+          : []
+      return { success: true as const, plan, resolvedConflicts }
+    },
   },
 
   downloads: {
@@ -657,14 +698,6 @@ export const mockApi = {
   },
 
   nexus: {
-    search: async (query: string) => {
-      const s = query.toLowerCase()
-      const data = catalog
-        .filter((m) => m.name.toLowerCase().includes(s))
-        .slice(0, 20)
-        .map((m) => ({ mod_id: m.nexus_id, name: m.name, summary: m.description, author: m.author }))
-      return { success: true, data }
-    },
     getMod: async (nexusId: number) => {
       const mod = state.mods.find((m) => m.nexus_id === nexusId)
       const current = mod?.version ?? '1.0.0'

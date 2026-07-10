@@ -14,8 +14,10 @@ import { applyPragmas, integrityCheck, type SqliteDb } from './db/sqlite'
 import { runMigrations } from './db/migrations'
 import { setSecret, getSecret, hasSecret, type SecretCrypto } from './db/secrets'
 import { initDeltaEngine, onDeltaDownloadComplete, onDeltaDownloadFailed } from './delta/engine'
+import { initCatalogEngine } from './catalog/engine'
+import { initInstallEngine } from './install/engine'
+import { initDeployEngine } from './deploy/engine'
 import { recoverOnStartup } from './delta/journal'
-import { createNexusProvider } from './nexus'
 import { parseNxmUrl, findNxmUrl, createNxmDownload } from './nexus/nxm'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
 import { detectSteamEnv } from './steam/detect'
@@ -38,17 +40,23 @@ import {
   type SyncProgress,
 } from './sync/massSync'
 import { getFreeSpace } from './install/diskSpace'
+import { sanitizePathSegment } from './util/paths'
+import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
 import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
-import { streamToFile, type HttpGet } from './install/downloadStream'
-import { resolveDownloadLink, type HttpGetJson } from './nexus/downloadLink'
+import { streamToFile } from './install/downloadStream'
+import { resolveDownloadLink } from './nexus/downloadLink'
+import { axiosGet, axiosJson } from './http/axiosAdapters'
 import { extractArchive } from './install/extract'
 import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash } from 'crypto'
 import { createReadStream } from 'fs'
 import { logger } from './logger'
 
-const isDev = process.env.NODE_ENV === 'development'
+// Dev is signalled either by NODE_ENV or, when launched by vite-plugin-electron,
+// by the injected VITE_DEV_SERVER_URL — the live renderer dev server to load.
+const devServerUrl = process.env.VITE_DEV_SERVER_URL
+const isDev = process.env.NODE_ENV === 'development' || !!devServerUrl
 const store = new Store()
 
 // Last-resort diagnostics: an uncaught error in the main process must never die
@@ -66,6 +74,19 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow: BrowserWindow | null = null
 let db: Database.Database | null = null
 let downloadQueue: { enqueue: (id: number) => void; processPending: () => { queued: number } } | null = null
+
+// Fail-fast DB accessors. Every handler/service reaches the database through these:
+// if a query is attempted before initDatabase() has run (or after a corrupt-DB abort
+// left db=null), we throw a CLEAR, descriptive error instead of an opaque
+// "Cannot read properties of null" — no undefined behaviour in the app lifecycle.
+function getRawDb(): Database.Database {
+  if (!db) throw new Error('DB non inizializzato: operazione richiesta prima del boot del database (o dopo un abort per DB corrotto)')
+  return db
+}
+/** Same guarantee, exposed as the engine-agnostic SqliteDb surface used by the subsystems. */
+function requireDb(): SqliteDb {
+  return getRawDb() as unknown as SqliteDb
+}
 
 // ─── Column whitelists ──────────────────────────────────────────────────────
 // Mods/profiles/downloads writes build SQL from object keys. We never interpolate
@@ -118,7 +139,7 @@ function pickColumns(data: Record<string, unknown>, allowed: Set<string>): Recor
 }
 
 // ─── Database init ────────────────────────────────────────────────────────────
-function initDatabase() {
+function initDatabase(): boolean {
   const userDataPath = app.getPath('userData')
   const dbPath = join(userDataPath, 'skyrim-manager.db')
   db = new Database(dbPath)
@@ -126,10 +147,28 @@ function initDatabase() {
   // Durability/integrity/concurrency pragmas BEFORE any write (A3/A4).
   applyPragmas(db as unknown as SqliteDb)
 
-  // Detect a corrupt database up front (C2). If corrupt, the most recent
-  // pre-delta VACUUM INTO snapshot is the recovery point (see docs/DELTA-UPDATES-v2).
+  // Detect a corrupt database up front (C2) and FAIL CLOSED: writing CREATE/seed/
+  // migrations against a corrupt file only compounds the damage and yields a
+  // confusing later crash. Stop before any write, tell the user, and point at the
+  // pre-delta VACUUM INTO recovery snapshot (see docs/DELTA-UPDATES-v2).
   if (!integrityCheck(db as unknown as SqliteDb)) {
-    logger.error('db', 'integrity_check FALLITO — database potenzialmente corrotto')
+    logger.error('db', 'integrity_check FALLITO — avvio interrotto prima di ogni scrittura')
+    try {
+      db.close()
+    } catch {
+      /* ignore */
+    }
+    db = null
+    dialog.showErrorBox(
+      'Database corrotto',
+      'Il database del mod manager risulta corrotto (integrity_check fallito).\n\n' +
+        "Per proteggere i dati l'avvio è stato interrotto PRIMA di qualsiasi scrittura.\n\n" +
+        "Ripristina l'ultimo snapshot di backup (VACUUM INTO, vedi docs/DELTA-UPDATES-v2) " +
+        'oppure rimuovi/sposta il file per ricrearne uno vuoto:\n' +
+        dbPath,
+    )
+    app.quit()
+    return false
   }
 
   db.exec(`
@@ -229,6 +268,7 @@ function initDatabase() {
 
   // Move any pre-existing electron-store API key into the encrypted DB table.
   migrateLegacySecrets()
+  return true
 }
 
 // ─── Security hardening ─────────────────────────────────────────────────────
@@ -277,16 +317,17 @@ function createWindow() {
     if (url.startsWith('http')) shell.openExternal(url)
     return { action: 'deny' }
   })
+  const devUrl = devServerUrl ?? (isDev ? 'http://localhost:5173' : null)
   mainWindow.webContents.on('will-navigate', (e, url) => {
-    const allowed = isDev ? 'http://localhost:5173' : 'file://'
+    const allowed = devUrl ? new URL(devUrl).origin : 'file://'
     if (!url.startsWith(allowed)) {
       e.preventDefault()
       if (url.startsWith('http')) shell.openExternal(url)
     }
   })
 
-  if (isDev) {
-    mainWindow.loadURL('http://localhost:5173')
+  if (devUrl) {
+    mainWindow.loadURL(devUrl)
     mainWindow.webContents.openDevTools()
   } else {
     mainWindow.loadFile(join(__dirname, '../dist/index.html'))
@@ -325,13 +366,7 @@ function handleNxmUrl(raw: string) {
     mainWindow.focus()
   }
   try {
-    const profileId =
-      (store.get('activeProfileId') as number | undefined) ??
-      (
-        db.prepare('SELECT id FROM profiles ORDER BY created_at ASC LIMIT 1').get() as
-          { id: number } | undefined
-      )?.id ??
-      1
+    const profileId = resolveActiveProfileId(db, store)
     const id = createNxmDownload(db as unknown as SqliteDb, link, { profileId })
     downloadQueue.enqueue(id)
     logger.info(
@@ -373,24 +408,38 @@ if (!app.requestSingleInstanceLock()) {
 
 app.whenReady().then(() => {
   applySecurityPolicies()
-  initDatabase()
+  // Fail closed on a corrupt DB: initDatabase has already shown the error and quit.
+  if (!initDatabase()) return
   // Crash recovery (A5): reset any update left mid-flight to a re-runnable state.
   // Never advances installed_snapshot — only the gated finalize can do that.
-  const rec = recoverOnStartup(db! as unknown as SqliteDb)
+  const rec = recoverOnStartup(requireDb())
   if (rec.resetRows || rec.resetDownloads) {
     logger.info(
       'delta',
       `recovery avvio: ${rec.resetRows} righe changeset, ${rec.resetDownloads} download ripristinati`,
     )
   }
+  // Nexus credential preflight: log-only warning if no key; features degrade cleanly.
+  nexusKeyPreflight()
   createWindow()
+  // Single mods-folder resolver, shared by the installer engine and its deps.
+  const modsRoot = () => (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods')
+  // Install engine: builds the InstallerService and sweeps any .staging dirs left
+  // orphaned by a crash mid-install in a previous session (alongside the delta
+  // recovery above).
+  const installer = initInstallEngine({
+    db: requireDb(),
+    modsRoot,
+    sevenZipPath: () => store.get('sevenZipPath') as string | undefined,
+    log: (level, msg) => (level === 'warn' ? logger.warn('install', msg) : logger.info('install', msg)),
+  })
   // Init subsystems. The install pipeline is wired into the download manager so
   // a completed download automatically extracts and deploys into the mods folder.
-  const installManager = initInstallManager(db!, () => mainWindow, store, {
-    onComplete: (id) => onDeltaDownloadComplete(db! as unknown as SqliteDb, id),
-    onError: (id, err) => onDeltaDownloadFailed(db! as unknown as SqliteDb, id, err),
+  const installManager = initInstallManager(getRawDb(), () => mainWindow, installer, {
+    onComplete: (id) => onDeltaDownloadComplete(requireDb(), id),
+    onError: (id, err) => onDeltaDownloadFailed(requireDb(), id, err),
   })
-  downloadQueue = initDownloadManager(db!, () => mainWindow, {
+  downloadQueue = initDownloadManager(getRawDb(), () => mainWindow, {
     store,
     // Real Nexus requests read the manually-entered key from the encrypted DB store.
     getApiKey: () => readSecret('nexusApiKey') || undefined,
@@ -401,36 +450,46 @@ app.whenReady().then(() => {
   // Now that the DB + queue exist, process any nxm:// link that launched us (cold
   // start) or arrived via a second instance during startup.
   flushPendingNxm()
-  initBackupManager(db!)
-  initWabbajack(db!)
+  initBackupManager(getRawDb())
+  initWabbajack(getRawDb())
   // Delta/incremental-update engine (signed-manifest ingest, diff, gated apply).
-  initDeltaEngine(db! as unknown as SqliteDb, { enqueueDownload: (id) => downloadQueue?.enqueue(id) })
+  initDeltaEngine(requireDb(), { enqueueDownload: (id) => downloadQueue?.enqueue(id) })
+  // Reference mod catalog engine (signed catalog fetch + verify + atomic replace).
+  initCatalogEngine(requireDb())
+  // StockGame source/target resolvers — used both by the deploy engine's Creation
+  // Club source and by the stockgame:* handlers below. Plain store reads, so there is
+  // no init-order dependency and they can live here, ahead of their first use.
+  const resolveGameSource = (): string | null =>
+    (store.get('stockGameSource') as string | undefined) || detectSteamEnv().skyrim.path
+  const resolveStockTarget = (): string =>
+    (store.get('stockGamePath') as string | undefined) || defaultStockGameDir(app.getPath('userData'))
 
-  // Nexus provider — deferred activation. Mock until enabled + a real key; enabled
-  // either via the in-app toggle (`nexusEnabled` setting) OR the NEXUS_ENABLED env
-  // var. Re-resolved per-call so toggling the flag/key needs no restart.
-  const nexusEnabled = (): boolean =>
-    process.env.NEXUS_ENABLED === 'true' || store.get('nexusEnabled') === true
-  const nexus = () =>
-    createNexusProvider(db! as unknown as SqliteDb, {
-      enabled: nexusEnabled(),
-      apiKey: readSecret('nexusApiKey') || undefined,
-    })
-  ipcMain.handle('nexus:status', () => {
-    const p = nexus()
-    return { kind: p.kind, enabled: p.enabled }
+  // Deploy/virtualization engine: links the enabled mods of a profile into its
+  // instance Data folder (hardlinks + junctions). The instance root lives on the
+  // SAME volume as modsRoot (default under userData) so hardlinks are valid.
+  initDeployEngine({
+    db: requireDb(),
+    resolveInstanceDataDir: (profileId) => {
+      const prof = getRawDb().prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
+        | { name: string }
+        | undefined
+      if (!prof) return null
+      const instanceRoot =
+        (store.get('instancePath') as string | undefined) || join(app.getPath('userData'), 'instances')
+      const safe = sanitizePathSegment(prof.name, 'profile')
+      return join(instanceRoot, safe, 'Data')
+    },
+    // Creation Club "System DLC" source: the isolated StockGame's Data folder.
+    resolveStockGameDataDir: () => join(resolveStockTarget(), 'Data'),
+    log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
-  ipcMain.handle('nexus:meta', (_e, modId: number) => nexus().getMod(modId))
-  ipcMain.handle('nexus:check-update', (_e, modId: number, version: string | null) =>
-    nexus().checkUpdate(modId, version),
-  )
 
   // Steam detection + launch pre-flight (companion mode: read-only, gated launch).
   ipcMain.handle('steam:detect', () => detectSteamEnv())
-  ipcMain.handle('launch:preflight', () => runPreflight(db!, store))
-  ipcMain.handle('launch:run', () => executeLaunch(db!, store))
+  ipcMain.handle('launch:preflight', () => runPreflight(getRawDb(), store))
+  ipcMain.handle('launch:run', () => executeLaunch(getRawDb(), store))
   // Compatibility report (runtime/SKSE version + active-profile plugins.txt).
-  ipcMain.handle('compat:analyze', () => runCompatReport(db!, store))
+  ipcMain.handle('compat:analyze', () => runCompatReport(getRawDb(), store))
 
   // Pandora detection (PANDORA-REGISTER-01): locate the engine exe, persist its path,
   // and report presence. READ-ONLY — never spawns Pandora, never generates output.
@@ -445,11 +504,7 @@ app.whenReady().then(() => {
   // Creates an ISOLATED vanilla copy of Skyrim SE/AE so the modded setup never
   // touches the real Steam install. READ-ONLY on the source; writes only to the
   // target. Source is auto-detected from Steam but can be overridden in Settings.
-  const resolveGameSource = (): string | null =>
-    (store.get('stockGameSource') as string | undefined) || detectSteamEnv().skyrim.path
-  const resolveStockTarget = (): string =>
-    (store.get('stockGamePath') as string | undefined) || defaultStockGameDir(app.getPath('userData'))
-
+  // (resolveGameSource / resolveStockTarget are declared above, next to the deploy engine.)
   ipcMain.handle('stockgame:detect', () => {
     const source = resolveGameSource()
     const target = resolveStockTarget()
@@ -495,8 +550,6 @@ app.whenReady().then(() => {
   // Drives the whole modlist (backup → 4.568 mod) through the tested primitives,
   // writing ONLY inside the isolated StockGame (download cache + StockGame/mods).
   // Gated: runs only on explicit sync:start; Nexus must be enabled with a real key.
-  const axiosGet: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
-  const axiosJson: HttpGetJson = (url, cfg) => axios.get(url, cfg as never) as never
   const md5File = (path: string): Promise<string> =>
     new Promise((res, rej) => {
       const h = createHash('md5')
@@ -835,6 +888,37 @@ function readSecret(key: string): string {
   return typeof legacy === 'string' ? legacy : ''
 }
 
+/** True when the Nexus provider is enabled (in-app toggle or NEXUS_ENABLED env). */
+function nexusEnabled(): boolean {
+  return process.env.NEXUS_ENABLED === 'true' || store.get('nexusEnabled') === true
+}
+
+/**
+ * Boot preflight for the Nexus credential. NEVER throws — it only logs the state so a
+ * headless / first run makes a missing key obvious. The existing gates (sync:start,
+ * nxm dispatch, the deferred mock provider) already keep Nexus features cleanly
+ * DISABLED until a key is configured, so this is graceful degradation, not a hard stop.
+ * The key lives ONLY in the encrypted app_secrets store — never on disk in clear text,
+ * and never in .env for the app (that env var is a convenience for the dev scripts).
+ */
+function nexusKeyPreflight(): void {
+  const hasKey = !!(readSecret('nexusApiKey') || '').trim()
+  if (hasKey) {
+    logger.info(
+      'nexus',
+      `API key presente (provider ${nexusEnabled() ? 'attivo' : 'in attesa: abilita Nexus in Impostazioni'})`,
+    )
+    return
+  }
+  const envKeyOnly = !!(process.env.NEXUS_API_KEY || '').trim()
+  logger.warn(
+    'nexus',
+    envKeyOnly
+      ? "Nessuna API key Nexus nel secret store cifrato (NEXUS_API_KEY è nell'ambiente ma serve solo agli script). Configura la chiave in Impostazioni per abilitare download/aggiornamenti in-app."
+      : 'Nessuna API key Nexus configurata: funzionalità Nexus (download, aggiornamenti, risoluzione file) DISABILITATE (degradazione controllata). Impostala in Impostazioni o esporta NEXUS_API_KEY.',
+  )
+}
+
 /** One-time move of any legacy electron-store secret into the encrypted DB table. */
 function migrateLegacySecrets() {
   if (!db) return
@@ -898,43 +982,43 @@ ipcMain.handle('settings:auto-detect', () => {
 
 // ─── Profile IPC ──────────────────────────────────────────────────────────────
 ipcMain.handle('profiles:list', () => {
-  return db!.prepare('SELECT * FROM profiles ORDER BY created_at ASC').all()
+  return getRawDb().prepare('SELECT * FROM profiles ORDER BY created_at ASC').all()
 })
 
 ipcMain.handle('profiles:create', (_e, data: { name: string; description?: string }) => {
-  const result = db!
+  const result = getRawDb()
     .prepare('INSERT INTO profiles (name, description) VALUES (?, ?)')
     .run(data.name, data.description ?? '')
-  return db!.prepare('SELECT * FROM profiles WHERE id = ?').get(result.lastInsertRowid)
+  return getRawDb().prepare('SELECT * FROM profiles WHERE id = ?').get(result.lastInsertRowid)
 })
 
 ipcMain.handle('profiles:update', (_e, id: number, raw: Record<string, unknown>) => {
   const data = pickColumns(raw, PROFILE_COLUMNS)
-  if (Object.keys(data).length === 0) return db!.prepare('SELECT * FROM profiles WHERE id = ?').get(id)
+  if (Object.keys(data).length === 0) return getRawDb().prepare('SELECT * FROM profiles WHERE id = ?').get(id)
   const fields = Object.keys(data)
     .map((k) => `${k} = ?`)
     .join(', ')
-  db!
+  getRawDb()
     .prepare(`UPDATE profiles SET ${fields}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
     .run(...Object.values(data), id)
-  return db!.prepare('SELECT * FROM profiles WHERE id = ?').get(id)
+  return getRawDb().prepare('SELECT * FROM profiles WHERE id = ?').get(id)
 })
 
 ipcMain.handle('profiles:delete', (_e, id: number) => {
   // FK-safe order (foreign_keys=ON): remove children without ON DELETE CASCADE
   // first (downloads → mods), then the profile (installed_snapshot / delta_changeset
   // cascade automatically).
-  const tx = db!.transaction((profileId: number) => {
-    db!.prepare('DELETE FROM downloads WHERE profile_id = ?').run(profileId)
-    db!.prepare('DELETE FROM mods WHERE profile_id = ?').run(profileId)
-    db!.prepare('DELETE FROM profiles WHERE id = ?').run(profileId)
+  const tx = getRawDb().transaction((profileId: number) => {
+    getRawDb().prepare('DELETE FROM downloads WHERE profile_id = ?').run(profileId)
+    getRawDb().prepare('DELETE FROM mods WHERE profile_id = ?').run(profileId)
+    getRawDb().prepare('DELETE FROM profiles WHERE id = ?').run(profileId)
   })
   tx(id)
 })
 
 // ─── Mods IPC ─────────────────────────────────────────────────────────────────
 ipcMain.handle('mods:list', (_e, profileId: number) => {
-  return db!
+  return getRawDb()
     .prepare(
       `
     SELECT * FROM mods WHERE profile_id = ? ORDER BY priority ASC, load_order ASC
@@ -950,10 +1034,10 @@ ipcMain.handle('mods:add', (_e, raw: Record<string, unknown>) => {
   const placeholders = Object.keys(data)
     .map(() => '?')
     .join(', ')
-  const result = db!
+  const result = getRawDb()
     .prepare(`INSERT INTO mods (${cols}) VALUES (${placeholders})`)
     .run(...Object.values(data))
-  return db!.prepare('SELECT * FROM mods WHERE id = ?').get(result.lastInsertRowid)
+  return getRawDb().prepare('SELECT * FROM mods WHERE id = ?').get(result.lastInsertRowid)
 })
 
 // Bulk insert in UNA transazione: l'import di un modlist.txt da migliaia di righe
@@ -961,13 +1045,13 @@ ipcMain.handle('mods:add', (_e, raw: Record<string, unknown>) => {
 ipcMain.handle('mods:add-many', (_e, rawRows: Record<string, unknown>[]) => {
   const rows = rawRows.map((r) => pickColumns(r, MOD_COLUMNS)).filter((r) => r.name)
   if (!rows.length) return { inserted: 0 }
-  const tx = db!.transaction((items: Record<string, unknown>[]) => {
+  const tx = getRawDb().transaction((items: Record<string, unknown>[]) => {
     for (const data of items) {
       const cols = Object.keys(data).join(', ')
       const placeholders = Object.keys(data)
         .map(() => '?')
         .join(', ')
-      db!.prepare(`INSERT INTO mods (${cols}) VALUES (${placeholders})`).run(...Object.values(data))
+      getRawDb().prepare(`INSERT INTO mods (${cols}) VALUES (${placeholders})`).run(...Object.values(data))
     }
   })
   tx(rows)
@@ -976,28 +1060,28 @@ ipcMain.handle('mods:add-many', (_e, rawRows: Record<string, unknown>[]) => {
 
 ipcMain.handle('mods:update', (_e, id: number, raw: Record<string, unknown>) => {
   const data = pickColumns(raw, MOD_COLUMNS)
-  if (Object.keys(data).length === 0) return db!.prepare('SELECT * FROM mods WHERE id = ?').get(id)
+  if (Object.keys(data).length === 0) return getRawDb().prepare('SELECT * FROM mods WHERE id = ?').get(id)
   const fields = Object.keys(data)
     .map((k) => `${k} = ?`)
     .join(', ')
-  db!
+  getRawDb()
     .prepare(`UPDATE mods SET ${fields}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
     .run(...Object.values(data), id)
-  return db!.prepare('SELECT * FROM mods WHERE id = ?').get(id)
+  return getRawDb().prepare('SELECT * FROM mods WHERE id = ?').get(id)
 })
 
 ipcMain.handle('mods:delete', (_e, id: number) => {
   // FK-safe: downloads reference mods(id) without cascade — remove them first.
-  const tx = db!.transaction((modId: number) => {
-    db!.prepare('DELETE FROM downloads WHERE mod_id = ?').run(modId)
-    db!.prepare('DELETE FROM mods WHERE id = ?').run(modId)
+  const tx = getRawDb().transaction((modId: number) => {
+    getRawDb().prepare('DELETE FROM downloads WHERE mod_id = ?').run(modId)
+    getRawDb().prepare('DELETE FROM mods WHERE id = ?').run(modId)
   })
   tx(id)
 })
 
 ipcMain.handle('mods:reorder', (_e, profileId: number, orderedIds: number[]) => {
-  const update = db!.prepare('UPDATE mods SET priority = ? WHERE id = ? AND profile_id = ?')
-  const transaction = db!.transaction((ids: number[]) => {
+  const update = getRawDb().prepare('UPDATE mods SET priority = ? WHERE id = ? AND profile_id = ?')
+  const transaction = getRawDb().transaction((ids: number[]) => {
     ids.forEach((id, idx) => update.run(idx, id, profileId))
   })
   transaction(orderedIds)
@@ -1019,16 +1103,16 @@ ipcMain.handle('catalog:list', (_e, filter?: { category?: string; search?: strin
   }
   if (conditions.length) query += ' WHERE ' + conditions.join(' AND ')
   query += ' ORDER BY priority_order ASC, name ASC'
-  return db!.prepare(query).all(...params)
+  return getRawDb().prepare(query).all(...params)
 })
 
 ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
-  const insert = db!.prepare(`
+  const insert = getRawDb().prepare(`
     INSERT OR REPLACE INTO modlist_catalog
     (nexus_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
     VALUES (@nexus_id, @name, @category, @subcategory, @priority_order, @required, @description, @author, @tags, @size_mb, @has_it_translation, @notes, @conflicts_with, @requires)
   `)
-  const insertMany = db!.transaction((rows: unknown[]) => {
+  const insertMany = getRawDb().transaction((rows: unknown[]) => {
     for (const row of rows) insert.run(row as Record<string, unknown>)
   })
   insertMany(mods)
@@ -1037,7 +1121,7 @@ ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
 
 // ─── Downloads IPC ────────────────────────────────────────────────────────────
 ipcMain.handle('downloads:list', (_e, profileId: number) => {
-  return db!.prepare('SELECT * FROM downloads WHERE profile_id = ? ORDER BY created_at DESC').all(profileId)
+  return getRawDb().prepare('SELECT * FROM downloads WHERE profile_id = ? ORDER BY created_at DESC').all(profileId)
 })
 
 ipcMain.handle('downloads:add', (_e, raw: Record<string, unknown>) => {
@@ -1047,7 +1131,7 @@ ipcMain.handle('downloads:add', (_e, raw: Record<string, unknown>) => {
   const placeholders = Object.keys(data)
     .map(() => '?')
     .join(', ')
-  const result = db!
+  const result = getRawDb()
     .prepare(`INSERT INTO downloads (${cols}) VALUES (${placeholders})`)
     .run(...Object.values(data))
   const id = Number(result.lastInsertRowid)
@@ -1062,9 +1146,9 @@ ipcMain.handle(
     const extra = rawExtra ? pickColumns(rawExtra, DOWNLOAD_COLUMNS) : undefined
     if (extra && Object.keys(extra).length > 0) {
       const fields = ['status', ...Object.keys(extra)].map((k) => `${k} = ?`).join(', ')
-      db!.prepare(`UPDATE downloads SET ${fields} WHERE id = ?`).run(status, ...Object.values(extra), id)
+      getRawDb().prepare(`UPDATE downloads SET ${fields} WHERE id = ?`).run(status, ...Object.values(extra), id)
     } else {
-      db!.prepare('UPDATE downloads SET status = ? WHERE id = ?').run(status, id)
+      getRawDb().prepare('UPDATE downloads SET status = ? WHERE id = ?').run(status, id)
     }
   },
 )
@@ -1073,18 +1157,6 @@ ipcMain.handle(
 // The API key is ALWAYS read from the main-side secret store: the renderer never
 // holds the real key (it only sees SECRET_MASK), so a compromised renderer cannot
 // exfiltrate it and the legacy `apiKey` parameter from old callers is ignored.
-ipcMain.handle('nexus:search', async (_e, query: string) => {
-  try {
-    const res = await axios.get('https://www.nexusmods.com/Core/Libs/Common/Widgets/ModList', {
-      params: { game_id: 1704, terms: query, from: 0 },
-      headers: { apikey: readSecret('nexusApiKey'), 'User-Agent': 'SkyrimAEModManager/1.0' },
-    })
-    return { success: true, data: res.data }
-  } catch (err: unknown) {
-    return { success: false, error: (err as Error).message }
-  }
-})
-
 ipcMain.handle('nexus:get-mod', async (_e, nexusId: number) => {
   try {
     const res = await axios.get(

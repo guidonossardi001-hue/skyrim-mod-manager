@@ -1,12 +1,23 @@
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback, memo } from 'react'
 import { Virtuoso } from 'react-virtuoso'
-import { Search, Plus, Package, Star, Download, ExternalLink, CheckCircle, Loader } from 'lucide-react'
+import {
+  Search,
+  Package,
+  Download,
+  ExternalLink,
+  CheckCircle,
+  Loader,
+  CheckSquare,
+  Square,
+  Boxes,
+  X,
+} from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import type { CatalogMod } from '@/types'
 import { clsx } from 'clsx'
 import { MODLIST_CATALOG } from '@/data/modlistCatalog'
-import { toast } from '@/components/ui/Toast'
-import { resolveInstallPlan } from '@/lib/dependencies'
+import { toast } from '@/lib/toast'
+import DependencyResolver from '@/components/ui/DependencyResolver'
 
 const CATEGORY_LABELS: Record<string, string> = {
   framework: 'Framework',
@@ -30,13 +41,17 @@ const CATEGORY_LABELS: Record<string, string> = {
 }
 
 export default function Catalog() {
-  const { catalog, loadCatalog, mods, activeProfileId, settings } = useAppStore()
+  const { catalog, loadCatalog, mods, activeProfileId } = useAppStore()
   const [search, setSearch] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [showRequired, setShowRequired] = useState(false)
   const [showItalian, setShowItalian] = useState(false)
   const [installing, setInstalling] = useState<Set<number>>(new Set())
   const [checkingAll, setCheckingAll] = useState(false)
+  // Multi-select for the dependency resolver. Kept as a stable Set reference across
+  // renders (updated only on toggle) so the resolver drawer never resets spuriously.
+  const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
+  const [resolverOpen, setResolverOpen] = useState(false)
 
   useEffect(() => {
     if (catalog.length === 0) {
@@ -47,7 +62,13 @@ export default function Catalog() {
     }
   }, [catalog.length])
 
-  const installedIds = useMemo(() => new Set(mods.map((m) => m.nexus_id).filter(Boolean)), [mods])
+  // Everything already in the profile (installed OR queued) counts as "satisfied"
+  // for the resolver so it neither re-adds nor re-plans it.
+  const installedSet = useMemo(
+    () => new Set(mods.map((m) => m.nexus_id).filter((x): x is number => typeof x === 'number')),
+    [mods],
+  )
+  const catalogByNexus = useMemo(() => new Map(catalog.map((m) => [m.nexus_id, m])), [catalog])
 
   const filtered = useMemo(() => {
     let result = [...catalog]
@@ -68,7 +89,8 @@ export default function Catalog() {
 
   // Add one catalog mod: create the mod record (linked to its download), using the
   // catalog priority_order so the load order is meaningful instead of a flat 999.
-  const addCatalogMod = async (m: CatalogMod) => {
+  const addCatalogMod = useCallback(
+    async (m: CatalogMod) => {
     if (!activeProfileId) return
     const created = await window.api.mods.add({
       profile_id: activeProfileId,
@@ -98,22 +120,39 @@ export default function Catalog() {
       downloaded_size: 0,
       status: 'pending',
     })
-  }
+    },
+    [activeProfileId],
+  )
 
   // Esegue il piano di installazione (target + prerequisiti mancanti) SENZA
   // ricaricare la lista mod: il refresh è responsabilità del chiamante, così
   // l'installazione di massa lo paga una volta sola.
-  const installPlanOf = async (mod: CatalogMod, installed: Set<number>) => {
-    const plan = resolveInstallPlan(mod, catalog, installed)
-    for (const item of plan) await addCatalogMod(item.mod)
-    return plan
-  }
+  //
+  // Il grafo delle dipendenze è risolto in modo AUTORITATIVO dal backend
+  // (`catalog:resolvePlan`): ordinamento topologico per nexus_id numerici sul
+  // catalogo firmato. Il client non fa mai congetture sui `requires` (che nel
+  // catalogo reale sono JSON numerici tipo "[123]", non nomi).
+  const installPlanOf = useCallback(
+    async (mod: CatalogMod, installed: Set<number>) => {
+      const res = await window.api.catalog.resolvePlan([mod.nexus_id], Array.from(installed))
+      if (!res.success || !res.plan) {
+        throw new Error(res.errors?.join('; ') ?? 'Risoluzione dipendenze fallita')
+      }
+      for (const item of res.plan) {
+        const full = catalogByNexus.get(item.nexus_id)
+        if (full) await addCatalogMod(full)
+      }
+      return res.plan
+    },
+    [catalogByNexus, addCatalogMod],
+  )
 
-  const installMod = async (mod: CatalogMod) => {
+  const installMod = useCallback(
+    async (mod: CatalogMod) => {
     if (!activeProfileId) return
     setInstalling((prev) => new Set(prev).add(mod.nexus_id))
     try {
-      const plan = await installPlanOf(mod, installedIds as Set<number>)
+      const plan = await installPlanOf(mod, installedSet)
       await useAppStore.getState().loadMods()
       const deps = plan.length - 1
       toast.success(
@@ -131,10 +170,44 @@ export default function Catalog() {
         return s
       })
     }
-  }
+    },
+    [activeProfileId, installedSet, installPlanOf],
+  )
+
+  const toggleSelect = useCallback((nexusId: number) => {
+    setSelectedNexusIds((prev) => {
+      const s = new Set(prev)
+      if (s.has(nexusId)) s.delete(nexusId)
+      else s.add(nexusId)
+      return s
+    })
+  }, [])
+
+  const clearSelection = useCallback(() => setSelectedNexusIds(new Set()), [])
+
+  // onProceed: enqueue the resolved plan in ORDER (deps first), then clear + close.
+  // Each addCatalogMod inserts a pending download → the InstallManager queue drains it.
+  const handleProceed = useCallback(
+    async (plan: { nexus_id: number }[]) => {
+      if (!activeProfileId) return
+      let added = 0
+      for (const item of plan) {
+        const m = catalogByNexus.get(item.nexus_id)
+        if (m) {
+          await addCatalogMod(m)
+          added++
+        }
+      }
+      await useAppStore.getState().loadMods()
+      setSelectedNexusIds(new Set())
+      setResolverOpen(false)
+      toast.success('Coda aggiornata', `${added} mod aggiunte alla coda di installazione`)
+    },
+    [activeProfileId, catalogByNexus, addCatalogMod],
+  )
 
   const installAllFiltered = async () => {
-    const missing = filtered.filter((m) => !installedIds.has(m.nexus_id))
+    const missing = filtered.filter((m) => !installedSet.has(m.nexus_id))
     if (missing.length === 0) {
       toast.info('Tutto installato', 'Nessuna mod mancante nel filtro corrente')
       return
@@ -146,11 +219,11 @@ export default function Catalog() {
       // Un solo loadMods/detectConflicts alla fine invece di uno per mod: prima
       // l'installazione di N mod costava N ricarichi completi (O(n²) alla scala
       // del catalogo). Il Set locale evita di ri-aggiungere le dipendenze comuni.
-      const installed = new Set<number>(installedIds as Set<number>)
+      const installed = new Set<number>(installedSet)
       for (const mod of missing) {
         try {
           const plan = await installPlanOf(mod, installed)
-          plan.forEach((item) => installed.add(item.mod.nexus_id))
+          plan.forEach((item) => installed.add(item.nexus_id))
           ok++
         } catch {
           failed++
@@ -176,6 +249,15 @@ export default function Catalog() {
             <span className="text-xs text-dark-400">
               {filtered.length} / {catalog.length} mod
             </span>
+            {selectedNexusIds.size > 0 && (
+              <button
+                onClick={() => setResolverOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all"
+                title="Analizza le dipendenze delle mod selezionate"
+              >
+                <Boxes size={12} /> Risolvi dipendenze ({selectedNexusIds.size})
+              </button>
+            )}
             <button
               onClick={installAllFiltered}
               disabled={checkingAll}
@@ -257,36 +339,100 @@ export default function Catalog() {
               <div className="px-4 pt-2 last:pb-4">
                 <CatalogCard
                   mod={mod}
-                  installed={installedIds.has(mod.nexus_id)}
+                  installed={installedSet.has(mod.nexus_id)}
                   isInstalling={installing.has(mod.nexus_id)}
-                  onInstall={() => installMod(mod)}
+                  selected={selectedNexusIds.has(mod.nexus_id)}
+                  onInstall={installMod}
+                  onToggleSelect={toggleSelect}
                 />
               </div>
             )}
           />
         </div>
       )}
+
+      {/* Dependency Resolver drawer (right-side panel; keeps catalog context) */}
+      {resolverOpen && (
+        <div className="fixed inset-0 z-40 flex">
+          <div className="flex-1 bg-black/50 backdrop-blur-sm" onClick={() => setResolverOpen(false)} />
+          <aside className="w-[440px] max-w-full h-full bg-dark-900 border-l border-dark-800 shadow-2xl flex flex-col animate-[slideIn_.2s_ease-out]">
+            <div className="flex items-center justify-between p-4 border-b border-dark-800 flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <Boxes size={16} className="text-void-400" />
+                <h2 className="text-sm font-semibold text-white/90">Risoluzione Dipendenze</h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={clearSelection}
+                  className="text-xs text-dark-400 hover:text-white transition-colors"
+                >
+                  Deseleziona
+                </button>
+                <button
+                  onClick={() => setResolverOpen(false)}
+                  className="w-7 h-7 rounded flex items-center justify-center text-dark-400 hover:text-white hover:bg-dark-800 transition-all"
+                >
+                  <X size={15} />
+                </button>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4">
+              <DependencyResolver
+                selected={selectedNexusIds}
+                installed={installedSet}
+                onProceed={handleProceed}
+              />
+            </div>
+          </aside>
+        </div>
+      )}
     </div>
   )
 }
 
-function CatalogCard({
+// Memoized so a selection toggle re-renders ONLY the toggled card (its `selected`
+// prop flips) instead of the whole virtualized list. All callbacks passed in are
+// stable (useCallback), and every other prop is a primitive, so the shallow compare
+// holds for the untouched rows.
+const CatalogCard = memo(function CatalogCard({
   mod,
   installed,
   isInstalling,
+  selected,
   onInstall,
+  onToggleSelect,
 }: {
   mod: CatalogMod
   installed: boolean
   isInstalling: boolean
-  onInstall: () => void
+  selected: boolean
+  onInstall: (mod: CatalogMod) => void
+  onToggleSelect: (nexusId: number) => void
 }) {
   const sizeMB = mod.size_mb
   const nexusUrl = `https://www.nexusmods.com/skyrimspecialedition/mods/${mod.nexus_id}`
   const tags = JSON.parse(mod.tags || '[]') as string[]
 
   return (
-    <div className={clsx('card-hover p-3 flex items-start gap-3', installed && 'border-green-900/40')}>
+    <div
+      className={clsx(
+        'card-hover p-3 flex items-start gap-3',
+        selected && 'border-void-500/60 bg-void-900/10',
+        installed && !selected && 'border-green-900/40',
+      )}
+    >
+      {/* Selection checkbox */}
+      <button
+        onClick={() => onToggleSelect(mod.nexus_id)}
+        className={clsx(
+          'flex-shrink-0 mt-0.5 transition-colors',
+          selected ? 'text-void-400' : 'text-dark-500 hover:text-dark-300',
+        )}
+        title={selected ? 'Deseleziona' : 'Seleziona per la risoluzione dipendenze'}
+      >
+        {selected ? <CheckSquare size={18} /> : <Square size={18} />}
+      </button>
+
       {/* Icon placeholder */}
       <div
         className="w-12 h-12 rounded-lg flex-shrink-0 flex items-center justify-center"
@@ -356,7 +502,7 @@ function CatalogCard({
           </div>
         ) : (
           <button
-            onClick={onInstall}
+            onClick={() => onInstall(mod)}
             className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs bg-void-900/40 text-void-300 hover:bg-void-800/60 hover:text-white transition-all"
             title="Installa mod"
           >
@@ -367,4 +513,4 @@ function CatalogCard({
       </div>
     </div>
   )
-}
+})

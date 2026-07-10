@@ -1,0 +1,166 @@
+import { describe, it, expect } from 'vitest'
+import { computeDeployPlan, buildPluginsTxt, BASE_MASTERS, type DeployMod } from './plan'
+
+const mod = (
+  name: string,
+  priority: number,
+  files: string[],
+  extra: Partial<DeployMod> = {},
+): DeployMod => ({
+  name,
+  priority,
+  rootDir: `/mods/${name}`,
+  files,
+  ...extra,
+})
+
+const junctionDirs = (p: ReturnType<typeof computeDeployPlan>) => p.junctions.map((j) => j.dir).sort()
+const hardlinkRels = (p: ReturnType<typeof computeDeployPlan>) => p.hardlinks.map((h) => h.rel).sort()
+
+describe('computeDeployPlan — override', () => {
+  it('higher priority overrides the same destination path (last writer wins)', () => {
+    const plan = computeDeployPlan([
+      mod('Low', 1, ['data.txt']),
+      mod('High', 2, ['data.txt']),
+    ])
+    const link = plan.hardlinks.find((h) => h.rel === 'data.txt')
+    expect(link?.mod).toBe('High')
+    expect(link?.src).toBe('/mods/High/data.txt')
+  })
+
+  it('is deterministic regardless of input order (priority decides, name tie-breaks)', () => {
+    const a = computeDeployPlan([mod('High', 2, ['x.txt']), mod('Low', 1, ['x.txt'])])
+    const b = computeDeployPlan([mod('Low', 1, ['x.txt']), mod('High', 2, ['x.txt'])])
+    expect(a.hardlinks).toEqual(b.hardlinks)
+    expect(a.hardlinks[0].mod).toBe('High')
+  })
+})
+
+describe('computeDeployPlan — junction vs hardlink', () => {
+  it('junctions a single-provider top-level directory whole', () => {
+    const plan = computeDeployPlan([mod('A', 1, ['textures/a.dds', 'textures/sub/b.dds', 'root.esp'])])
+    expect(junctionDirs(plan)).toEqual(['textures']) // whole textures owned by A
+    // files under the junction are NOT also hardlinked; the root plugin is
+    expect(hardlinkRels(plan)).toEqual(['root.esp'])
+  })
+
+  it('splits a shared top dir into per-mod subdir junctions, hardlinks true conflicts', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['textures/onlyA/x.dds', 'textures/shared/c.dds']),
+      mod('B', 2, ['textures/onlyB/y.dds', 'textures/shared/c.dds']), // overrides shared/c.dds
+    ])
+    // 'textures' is mixed → descend; each single-provider subdir junctions.
+    expect(junctionDirs(plan)).toEqual(['textures/onlyA', 'textures/onlyB', 'textures/shared'])
+    const shared = plan.junctions.find((j) => j.dir === 'textures/shared')
+    expect(shared?.mod).toBe('B') // higher priority owns the shared subtree after override
+    expect(plan.hardlinks).toHaveLength(0)
+  })
+
+  it('hardlinks individual files when two mods interleave files in the same directory', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['meshes/a.nif']),
+      mod('B', 2, ['meshes/b.nif']), // same dir, different files → dir is multi-provider
+    ])
+    expect(plan.junctions).toHaveLength(0)
+    expect(hardlinkRels(plan)).toEqual(['meshes/a.nif', 'meshes/b.nif'])
+  })
+})
+
+describe('computeDeployPlan — automatic conflict resolution', () => {
+  it('two textures on the same file: higher resolutionWeight (4K) wins over 2K, no throw', () => {
+    // Note: the 4K mod has the LOWER priority (2 < 5) yet still wins — Rule 2
+    // (weight) outranks Rule 3 (priority) for same-class collisions.
+    const build = () =>
+      computeDeployPlan([
+        mod('Tex2K', 5, ['textures/armor/steel.dds', 'textures/armor/only2k.dds'], {
+          category: 'texture',
+          resolutionWeight: 2000,
+        }),
+        mod('Tex4K', 2, ['textures/armor/steel.dds', 'textures/armor/only4k.dds'], {
+          category: 'texture',
+          resolutionWeight: 4000,
+        }),
+      ])
+    expect(build).not.toThrow()
+    const plan = build()
+    const steel = plan.hardlinks.find((h) => h.rel === 'textures/armor/steel.dds')
+    expect(steel?.mod).toBe('Tex4K')
+    expect(steel?.src).toBe('/mods/Tex4K/textures/armor/steel.dds')
+    expect(plan.resolvedConflicts).toContainEqual({
+      file: 'textures/armor/steel.dds',
+      winner: 'Tex4K',
+      loser: 'Tex2K',
+    })
+  })
+
+  it('a patch always beats a texture (Rule 1), even with lower weight and priority', () => {
+    const plan = computeDeployPlan([
+      mod('HDTexture', 9, ['textures/w.dds', 'textures/hd.dds'], {
+        category: 'texture',
+        resolutionWeight: 8000,
+      }),
+      mod('CompatPatch', 1, ['textures/w.dds', 'textures/patch.dds'], { category: 'patch' }),
+    ])
+    const w = plan.hardlinks.find((h) => h.rel === 'textures/w.dds')
+    expect(w?.mod).toBe('CompatPatch') // patch rank beats texture rank outright
+    expect(plan.resolvedConflicts).toContainEqual({
+      file: 'textures/w.dds',
+      winner: 'CompatPatch',
+      loser: 'HDTexture',
+    })
+  })
+
+  it('falls back to priority_order when category and weight are equal (Rule 3)', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['textures/x.dds', 'textures/a.dds'], { category: 'texture', resolutionWeight: 2000 }),
+      mod('B', 2, ['textures/x.dds', 'textures/b.dds'], { category: 'texture', resolutionWeight: 2000 }),
+    ])
+    const x = plan.hardlinks.find((h) => h.rel === 'textures/x.dds')
+    expect(x?.mod).toBe('B') // higher priority wins the tie
+    expect(plan.resolvedConflicts).toContainEqual({ file: 'textures/x.dds', winner: 'B', loser: 'A' })
+  })
+
+  it('records nothing when no two mods write the same file', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['textures/a.dds']),
+      mod('B', 2, ['meshes/b.nif']),
+    ])
+    expect(plan.resolvedConflicts).toEqual([])
+  })
+
+  it('the resolved-conflict log is deterministic regardless of input order', () => {
+    const a = computeDeployPlan([
+      mod('Tex2K', 5, ['t/s.dds', 't/o2.dds'], { category: 'texture', resolutionWeight: 2000 }),
+      mod('Tex4K', 2, ['t/s.dds', 't/o4.dds'], { category: 'texture', resolutionWeight: 4000 }),
+    ])
+    const b = computeDeployPlan([
+      mod('Tex4K', 2, ['t/s.dds', 't/o4.dds'], { category: 'texture', resolutionWeight: 4000 }),
+      mod('Tex2K', 5, ['t/s.dds', 't/o2.dds'], { category: 'texture', resolutionWeight: 2000 }),
+    ])
+    expect(a.resolvedConflicts).toEqual(b.resolvedConflicts)
+  })
+})
+
+describe('buildPluginsTxt', () => {
+  it('orders masters first (ESM → ESL → ESP), then by mod priority, with * on mod plugins', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['Alpha.esp', 'Light.esl']),
+      mod('B', 2, ['Big.esm']),
+    ])
+    const txt = buildPluginsTxt(plan.plugins)
+    const lines = txt.trim().split('\n')
+    expect(lines[0]).toMatch(/^#/) // header comment
+    // base masters block, unprefixed
+    for (const m of BASE_MASTERS) expect(lines).toContain(m)
+    const modLines = lines.filter((l) => l.startsWith('*'))
+    expect(modLines).toEqual(['*Big.esm', '*Light.esl', '*Alpha.esp']) // ESM, ESL, ESP
+  })
+
+  it('does not duplicate a base master a mod also ships', () => {
+    const plan = computeDeployPlan([mod('A', 1, ['Update.esm', 'Custom.esp'])])
+    const txt = buildPluginsTxt(plan.plugins)
+    const updates = txt.split('\n').filter((l) => /update\.esm/i.test(l))
+    expect(updates).toHaveLength(1) // only the base-master line, not a duplicate '*Update.esm'
+    expect(updates[0]).toBe('Update.esm')
+  })
+})
