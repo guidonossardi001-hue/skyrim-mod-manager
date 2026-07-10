@@ -1,18 +1,14 @@
 import { app, BrowserWindow, ipcMain } from 'electron'
 import { existsSync, mkdirSync, statSync, unlinkSync } from 'fs'
 import { join, extname } from 'path'
-import axios from 'axios'
 import Database from 'better-sqlite3'
 import type Store from 'electron-store'
 import { logger } from './logger'
-import { streamToFile, type HttpGet } from './install/downloadStream'
-import { resolveDownloadLink, type HttpGetJson } from './nexus/downloadLink'
+import { streamToFile } from './install/downloadStream'
+import { resolveDownloadLink } from './nexus/downloadLink'
 import { classifyDownloadFailure, backoffWithJitter, CircuitBreaker } from './install/retryPolicy'
-
-// Adapt axios to the injectable HttpGet shape used by the resumable stream core.
-const axiosGet: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
-// JSON variant for the Nexus download_link resolver (auth headers handled there).
-const axiosJson: HttpGetJson = (url, cfg) => axios.get(url, cfg as never) as never
+import { sanitizePathSegment } from './util/paths'
+import { axiosGet, axiosJson } from './http/axiosAdapters'
 
 interface DownloadRow {
   id: number
@@ -44,15 +40,7 @@ interface DownloadManagerOptions {
 const activeDownloads = new Map<number, DownloadTask>()
 const queue: number[] = []
 
-function sanitizeFilename(name: string): string {
-  return (
-    name
-      .replace(/[<>:"/\\|?*]+/g, '_')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 120) || 'download'
-  )
-}
+const sanitizeFilename = (name: string): string => sanitizePathSegment(name, 'download')
 
 // Stable per-download base name. The Nexus file_id (when known) is part of the
 // name: two different files of the SAME mod (main + update, or two versions) no
@@ -62,10 +50,8 @@ function archiveBaseName(row: Pick<DownloadRow, 'name' | 'file_id'>): string {
   return row.file_id ? `${base}-f${row.file_id}` : base
 }
 
-function guessExtension(url: string, contentDisposition?: string): string {
-  const fromCd = contentDisposition?.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)/i)?.[1]
-  const candidate = fromCd ?? url.split('?')[0]
-  const ext = extname(candidate).toLowerCase()
+function guessExtension(url: string): string {
+  const ext = extname(url.split('?')[0]).toLowerCase()
   return ['.7z', '.zip', '.rar', '.exe'].includes(ext) ? ext : '.7z' // Nexus archives default to .7z
 }
 

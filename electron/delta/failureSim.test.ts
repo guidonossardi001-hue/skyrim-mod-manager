@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, copyFileSync, openSync, writeSync, closeSync } from 'fs'
+import { mkdtempSync, rmSync, copyFileSync, openSync, writeSync, closeSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { type SqliteDb, applyPragmas, integrityCheck, withTransaction } from '../db/sqlite'

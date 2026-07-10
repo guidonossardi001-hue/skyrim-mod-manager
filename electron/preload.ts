@@ -14,6 +14,7 @@ const EVENT_CHANNELS = new Set([
   'install:error',
   'sync:progress',
   'stockgame:progress',
+  'deploy:progress',
   'nxm:queued',
 ])
 
@@ -62,6 +63,14 @@ contextBridge.exposeInMainWorld('api', {
   catalog: {
     list: (filter?: { category?: string; search?: string }) => invoke('catalog:list', filter),
     seed: (mods: unknown[]) => invoke('catalog:seed', mods),
+    // Fetch the signed reference catalog (URL optional — falls back to the
+    // main-process NOLVUS_MOD_CATALOG_URL config) and ingest it. Always resolves
+    // to a CatalogIngestResult, never rejects (no-throw boundary end to end).
+    update: (url?: string) => invoke('catalog:update', url),
+    // Compute a dependency-first install plan for the given targets. Always
+    // resolves to an InstallPlanResult (success + plan, or errorKind + details).
+    resolvePlan: (targetIds: number[], installedIds: number[]) =>
+      invoke('catalog:resolve-plan', targetIds, installedIds),
   },
 
   // Downloads
@@ -75,13 +84,8 @@ contextBridge.exposeInMainWorld('api', {
   // Nexus — the API key never travels over this bridge: the main process reads it
   // from its encrypted secret store. validateKey may pass a just-typed candidate.
   nexus: {
-    search: (query: string) => invoke('nexus:search', query),
     getMod: (nexusId: number) => invoke('nexus:get-mod', nexusId),
     validateKey: (apiKey?: string) => invoke('nexus:validate-key', apiKey),
-    // Provider-backed (deferred activation: mock until NEXUS_ENABLED + key)
-    status: () => invoke('nexus:status'),
-    meta: (modId: number) => invoke('nexus:meta', modId),
-    checkUpdate: (modId: number, version: string | null) => invoke('nexus:check-update', modId, version),
   },
 
   // File system
@@ -144,6 +148,19 @@ contextBridge.exposeInMainWorld('api', {
   // Install pipeline (extraction + deploy into the mods folder)
   install: {
     run: (downloadId: number) => invoke('install:run', downloadId),
+  },
+
+  // Deploy/virtualization: link a profile's enabled mods into its instance Data
+  // folder (hardlinks + junctions). Always resolves to a DeployResult, never rejects.
+  deploy: {
+    run: (profileId: number) => invoke('deploy:run', profileId),
+    // Subscribe to streamed progress. Returns an unsubscribe function so the
+    // renderer can detach the listener (avoids leaks across re-renders/unmounts).
+    onProgress: (callback: (p: unknown) => void) => {
+      const listener = (_e: IpcRendererEvent, p: unknown) => callback(p)
+      ipcRenderer.on('deploy:progress', listener)
+      return () => ipcRenderer.removeListener('deploy:progress', listener)
+    },
   },
 
   // StockGame builder (isolated vanilla copy; companion-safe, read-only on source)

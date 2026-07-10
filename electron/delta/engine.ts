@@ -14,9 +14,6 @@ function manifestHosts(): string[] {
 }
 
 let service: DeltaService | null = null
-export function getDeltaService(): DeltaService | null {
-  return service
-}
 
 export function initDeltaEngine(db: SqliteDb, deps: { enqueueDownload: (downloadId: number) => void }) {
   service = new DeltaService(db, {

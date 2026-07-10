@@ -1,7 +1,6 @@
 import { ipcMain } from 'electron'
 import { existsSync } from 'fs'
-import { readFile, writeFile } from 'fs/promises'
-import { join } from 'path'
+import { writeFile } from 'fs/promises'
 import axios from 'axios'
 import Database from 'better-sqlite3'
 
@@ -53,7 +52,7 @@ export function initWabbajack(db: Database.Database) {
       `)
 
       const tx = db.transaction((archives: WabbajackArchive[]) => {
-        archives.forEach((a, i) => {
+        archives.forEach((a) => {
           const nexusId = a.State?.ID ?? null
           insertMod.run(profileId, nexusId, a.Name.replace(/\.[^/.]+$/, ''), a.Size)
         })

@@ -1,7 +1,7 @@
-import { createReadStream, existsSync, mkdirSync, statSync, rmSync, renameSync } from 'fs'
+import { createReadStream, existsSync, mkdirSync, statSync, rmSync, renameSync, readdirSync } from 'fs'
 import { createHash } from 'crypto'
 import { spawn } from 'child_process'
-import { resolve, relative, isAbsolute, extname } from 'path'
+import { resolve, relative, isAbsolute, extname, join } from 'path'
 
 // Safe, streaming archive handling for real (multi-GB) mod archives.
 //   • sha256 is computed by STREAMING the file (never buffering GBs in memory),
@@ -14,6 +14,27 @@ import { resolve, relative, isAbsolute, extname } from 'path'
 
 export function toLongPath(p: string): string {
   return process.platform === 'win32' && !p.startsWith('\\\\?\\') ? '\\\\?\\' + resolve(p) : p
+}
+
+/** Recursive listing of `root`, returning POSIX paths relative to it (files only). */
+export function listFilesRel(root: string): string[] {
+  const out: string[] = []
+  const walk = (absDir: string, relDir: string) => {
+    let entries: import('fs').Dirent[]
+    try {
+      entries = readdirSync(toLongPath(absDir), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const abs = join(absDir, e.name)
+      const rel = relDir ? `${relDir}/${e.name}` : e.name
+      if (e.isDirectory()) walk(abs, rel)
+      else out.push(rel)
+    }
+  }
+  walk(root, '')
+  return out
 }
 
 /** Streaming sha256 — constant memory regardless of archive size. */
@@ -65,6 +86,7 @@ export interface ExtractOptions {
   onProgress?: (percent: number) => void
   admZipMaxBytes?: number // OOM guard for the in-memory zip fallback (default 256 MB)
   signal?: AbortSignal // abort: kills the 7-Zip child / stops the zip loop
+  includeFilters?: string[] // recipe optimization: 7z -ir! patterns (POSIX); extract only these subtrees
 }
 
 function run7z(
@@ -73,13 +95,24 @@ function run7z(
   destDir: string,
   onProgress?: (p: number) => void,
   signal?: AbortSignal,
+  includeFilters?: string[],
 ): Promise<void> {
   return new Promise((res, rej) => {
     if (signal?.aborted) return rej(new Error('annullato'))
-    // x=extract w/ paths, -y=assume yes, -bsp1=progress to stdout, -aoa=overwrite all.
-    const proc = spawn(sevenZip, ['x', archivePath, `-o${destDir}`, '-y', '-bsp1', '-aoa'], {
-      windowsHide: true,
+    // Recipe optimization: for each include pattern, both the entry itself and its
+    // subtree (`\*`) so a prefix like "00 Core" pulls its whole tree but the unwanted
+    // 4K/8K variant folders are never unpacked. Over-inclusion is harmless — planRecipe
+    // still filters — so this can only ever be a superset of what we keep.
+    const filterArgs = (includeFilters ?? []).flatMap((p) => {
+      const win = p.replace(/\//g, '\\')
+      return [`-ir!${win}`, `-ir!${win}\\*`]
     })
+    // x=extract w/ paths, -y=assume yes, -bsp1=progress to stdout, -aoa=overwrite all.
+    const proc = spawn(
+      sevenZip,
+      ['x', archivePath, `-o${destDir}`, '-y', '-bsp1', '-aoa', ...filterArgs],
+      { windowsHide: true },
+    )
     let stderr = ''
     // Abort: kill the child process tree so a multi-GB extraction stops promptly.
     const onAbort = () => {
@@ -193,14 +226,14 @@ export async function extractArchive(
           'Estrazione .rar non disponibile: nessun 7-Zip completo trovato. Installa 7-Zip da 7-zip.org (verrà rilevato automaticamente).',
         )
       }
-      await run7z(full7z, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal)
+      await run7z(full7z, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal, opts.includeFilters)
       method = '7z'
     } else {
       // .7z/.zip/…: the bundled standalone 7za is the default (cross-platform, no config);
       // a full 7-Zip works too and serves as a fallback.
       const engine = bundled ?? full7z
       if (engine) {
-        await run7z(engine, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal)
+        await run7z(engine, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal, opts.includeFilters)
         method = engine === bundled ? '7za' : '7z'
       } else if (ext === '.zip') {
         await extractZipSafely(

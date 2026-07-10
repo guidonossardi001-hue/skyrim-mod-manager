@@ -1,12 +1,12 @@
 // Real-runtime smoke test — run UNDER electron.exe (not ELECTRON_RUN_AS_NODE) so
 // better-sqlite3's Electron-ABI native build loads. Exercises the actual main-process
-// data path: open DB → pragmas → base schema → migrations to v3 → integrity → and a
+// data path: open DB → pragmas → base schema → latest migrations → integrity → and a
 // signed-manifest delta INGEST/VERIFY with the real pinned key. Exits 0 on PASS.
 import Database from 'better-sqlite3'
 import { readFileSync } from 'fs'
 import { join } from 'path'
 import { applyPragmas, integrityCheck, getUserVersion, type SqliteDb } from '../electron/db/sqlite'
-import { runMigrations } from '../electron/db/migrations'
+import { runMigrations, LATEST_SCHEMA_VERSION } from '../electron/db/migrations'
 import { DeltaService } from '../electron/delta/service'
 import { pinnedPublicKey } from '../electron/delta/pinnedKey'
 
@@ -35,7 +35,10 @@ try {
   `)
 
   const mig = runMigrations(db)
-  check(getUserVersion(db) === 5, `migrazioni → user_version 5 (applicate: ${mig.applied.join(',')})`)
+  check(
+    getUserVersion(db) === LATEST_SCHEMA_VERSION,
+    `migrazioni → user_version ${LATEST_SCHEMA_VERSION} (applicate: ${mig.applied.join(',')})`,
+  )
   check(integrityCheck(db), 'PRAGMA integrity_check = ok')
   for (const t of [
     'catalog_release',

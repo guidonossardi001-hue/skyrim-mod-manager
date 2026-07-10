@@ -7,6 +7,7 @@ import type Store from 'electron-store'
 import { detectSteamEnv, detectSkse } from '../steam/detect'
 import { resolveMo2Plugins } from '../steam/mo2'
 import { runLaunchWorkflow, type LaunchEnv, type LaunchReport } from '../../src/lib/launchWorkflow'
+import { resolveActiveProfileId } from '../util/activeProfile'
 
 // Assembles the serializable launch environment from local sources (Steam probe,
 // DB, settings, filesystem) and runs the pure workflow. COMPANION MODE: read-only;
@@ -41,13 +42,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   const mo2Plugins = resolveMo2Plugins(mo2Path)
 
   // Mods / modlist completeness from the DB (active profile).
-  const profileId =
-    (store.get('activeProfileId') as number | undefined) ??
-    (
-      db.prepare('SELECT id FROM profiles ORDER BY created_at ASC LIMIT 1').get() as
-        { id: number } | undefined
-    )?.id ??
-    1
+  const profileId = resolveActiveProfileId(db, store)
   const mods = db
     .prepare('SELECT name, is_enabled, is_installed FROM mods WHERE profile_id=?')
     .all(profileId) as { name: string; is_enabled: number; is_installed: number }[]

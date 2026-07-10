@@ -6,6 +6,8 @@
 // `key`+`expires` pair handed out by an nxm:// link (manual download), forwarded here
 // as query params. Pure + http-injected so it is fully unit-testable.
 
+import { httpStatusOf } from '../install/retryPolicy'
+
 export interface JsonResponse {
   status?: number
   data: unknown
@@ -57,11 +59,6 @@ export function parseDownloadLink(data: unknown): string {
   return hit.URI
 }
 
-function httpStatus(e: unknown): number | undefined {
-  const x = e as { status?: number; response?: { status?: number } }
-  return x?.status ?? x?.response?.status
-}
-
 /**
  * A resolve failure that PRESERVES the HTTP status (and the original error as `cause`)
  * so the shared retry policy can classify it: without this the friendly Italian message
@@ -88,7 +85,7 @@ export async function resolveDownloadLink(http: HttpGetJson, p: DownloadLinkPara
     const res = await http(url, { headers, signal: p.signal })
     return parseDownloadLink(res.data)
   } catch (e) {
-    const status = httpStatus(e)
+    const status = httpStatusOf(e)
     // Friendly, actionable message — but keep `status` + `cause` on the error so
     // withRetry/isRetryableError see a 429/5xx (retryable) or the underlying socket code.
     if (status === 401 || status === 403) {

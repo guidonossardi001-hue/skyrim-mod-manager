@@ -10,7 +10,7 @@ import {
   appendFileSync,
   renameSync,
 } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { createHash } from 'crypto'
 import { spawnSync } from 'child_process'
 import { Readable } from 'stream'
@@ -31,8 +31,7 @@ const DL = join(ROOT, 'data', 'boot_cache', 'downloads')
 const SG = join(ROOT, 'data', 'StockGame', 'mods')
 const LOG = join(ROOT, 'data', 'boot_cache', 'boot.log')
 const GAME = 'skyrimspecialedition',
-  UA = 'SkyrimAEModManager/1.0',
-  MB = 1048576
+  UA = 'SkyrimAEModManager/1.0'
 mkdirSync(DL, { recursive: true })
 mkdirSync(SG, { recursive: true })
 try {

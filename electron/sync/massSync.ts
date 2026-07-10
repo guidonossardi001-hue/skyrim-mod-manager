@@ -2,6 +2,7 @@ import { join } from 'path'
 import { isPathInside } from './../install/extract'
 import { sameVolume } from './../install/stockGame'
 import { CircuitBreaker, withRetry } from './../install/retryPolicy'
+import { sanitizePathSegment } from './../util/paths'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mass-sync orchestrator (hardened) — production version of scripts/e2e_batch.mjs.
@@ -88,8 +89,8 @@ export interface MassSyncConfig {
   errorThreshold?: number // consecutive mod failures that trip the breaker (default 50)
   baseMs?: number // backoff base (default 500; 0 for instant retries in tests)
   capMs?: number // backoff cap (default 8000)
-  extractionOverhead?: number // extracted-vs-archive size factor (default 1.10)
-  safetyFactor?: number // headroom on top of the estimate (default 1.15)
+  extractionOverhead?: number // extracted-vs-archive size factor (default 1.5)
+  safetyFactor?: number // cross-disk headroom on the estimate (default 1.15; same-disk uses SAME_DISK_EXTRACT_FACTOR)
   skipDiskCheck?: boolean // bypass the aggregate disk pre-flight (tests / explicit override)
   onProgress?: (s: SyncProgress) => void
   onLog?: (m: string) => void
@@ -118,16 +119,7 @@ export function assertIsolated(stockGameDir: string, steamGamePath: string | nul
 }
 
 export function sanitize(name: string): string {
-  return (
-    name
-      .replace(/[<>:"/\\|?*]+/g, '_')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 120) || 'mod'
-  )
-}
-function stripExt(name: string): string {
-  return name.replace(/\.[^.]+$/, '')
+  return sanitizePathSegment(name)
 }
 export function filenameFromUrl(url: string, fallback: string): string {
   try {

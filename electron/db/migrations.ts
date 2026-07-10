@@ -113,9 +113,6 @@ export const MIGRATIONS: Migration[] = [
       if (!columnExists(db, 'mods', 'nexus_file_id'))
         db.exec('ALTER TABLE mods ADD COLUMN nexus_file_id INTEGER')
       if (!columnExists(db, 'mods', 'file_hash')) db.exec('ALTER TABLE mods ADD COLUMN file_hash TEXT')
-
-      // Backfill canonical installed_version source from the legacy display field.
-      db.exec('UPDATE mods SET nexus_file_id = nexus_file_id') // no-op touch; columns are nullable
     },
   },
   {
@@ -210,6 +207,56 @@ export const MIGRATIONS: Migration[] = [
       index('downloads', 'status', 'idx_downloads_status')
       index('downloads', 'mod_id', 'idx_downloads_mod')
       index('delta_changeset', 'download_id', 'idx_delta_download')
+    },
+  },
+  {
+    version: 7,
+    name: 'install-recipes',
+    up: (db) => {
+      // Deterministic FOMOD-replacement: per-mod file-mapping "recipes" that decide
+      // exactly which archive paths land in the game (see electron/install/recipe.ts).
+      // Populated from the SIGNED catalog on ingest (CatalogService.replaceAll), so
+      // the recipe — which controls file placement — inherits the Ed25519 trust
+      // boundary. Keyed per ARCHIVE version (file_id) because folder layouts reshuffle
+      // between releases; a NULL file_id is the nexus-wide default recipe.
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mod_install_recipe (
+          id             INTEGER PRIMARY KEY AUTOINCREMENT,
+          nexus_id       INTEGER NOT NULL,
+          file_id        INTEGER,           -- NULL ⇒ default recipe for the mod
+          file_hash      TEXT,              -- binds a file-specific recipe to its exact archive
+          schema_version INTEGER NOT NULL DEFAULT 1,
+          strategy       TEXT NOT NULL DEFAULT 'root',
+          instructions   TEXT NOT NULL,     -- InstallInstructions JSON
+          created_at     TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_recipe_nexus_file ON mod_install_recipe(nexus_id, file_id);
+        CREATE INDEX IF NOT EXISTS idx_recipe_nexus ON mod_install_recipe(nexus_id);
+      `)
+    },
+  },
+  {
+    version: 8,
+    name: 'deploy-conflict-metadata',
+    up: (db) => {
+      // Auto-resolution metadata for the deploy planner (computeDeployPlan): the
+      // asset class that drives the category rule (a 'patch' overrides a 'texture')
+      // and the weight that breaks same-class ties (4K=4000 beats 2K=2000).
+      //
+      // Two homes, both additive & guarded (SQLite has no ADD COLUMN IF NOT EXISTS):
+      //   • mods            — the INSTALLED record the deployer reads at deploy time.
+      //   • modlist_catalog — the signed-catalog source the values are ingested from.
+      if (!columnExists(db, 'mods', 'deploy_category'))
+        db.exec('ALTER TABLE mods ADD COLUMN deploy_category TEXT')
+      if (!columnExists(db, 'mods', 'resolution_weight'))
+        db.exec('ALTER TABLE mods ADD COLUMN resolution_weight INTEGER')
+
+      if (tableExists(db, 'modlist_catalog')) {
+        if (!columnExists(db, 'modlist_catalog', 'deploy_category'))
+          db.exec('ALTER TABLE modlist_catalog ADD COLUMN deploy_category TEXT')
+        if (!columnExists(db, 'modlist_catalog', 'resolution_weight'))
+          db.exec('ALTER TABLE modlist_catalog ADD COLUMN resolution_weight INTEGER')
+      }
     },
   },
 ]

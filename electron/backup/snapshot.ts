@@ -1,6 +1,4 @@
-import { createHash } from 'crypto'
 import {
-  createReadStream,
   writeFileSync,
   renameSync,
   openSync,
@@ -11,15 +9,16 @@ import {
   unlinkSync,
 } from 'fs'
 import type { SqliteDb } from '../db/sqlite'
+import { sha256File } from '../install/extract'
 
 // Hardened backup primitives.
 //  - snapshotDatabase: a CONSISTENT, whole-database copy via VACUUM INTO — captures
 //    every table (incl. installed_snapshot / delta_changeset / catalog_release), not
 //    just the mods JSON (fixes C2). The right rollback point for a delta.
 //  - atomicWriteFile + checksum sidecar: power-loss-safe writes; a half-written
-//    restore point is detectable and refused instead of silently trusted (M2).
-//  - sha256File / verifyFileHash: streaming archive hashing for pre-extraction
-//    integrity (fixes C3) — large archives are hashed without loading into memory.
+//    restore point is detectable and refused instead of silently trusted (M2). The
+//    sidecar digest uses the shared streaming sha256File (electron/install/extract),
+//    so large files are hashed in constant memory.
 
 /** Consistent whole-DB snapshot. Overwrites destPath if present. */
 export function snapshotDatabase(db: SqliteDb, destPath: string): void {
@@ -41,16 +40,6 @@ export function atomicWriteFile(destPath: string, data: string | Buffer): void {
   renameSync(tmp, destPath)
 }
 
-export function sha256File(path: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = createHash('sha256')
-    const stream = createReadStream(path)
-    stream.on('error', reject)
-    stream.on('data', (chunk) => hash.update(chunk))
-    stream.on('end', () => resolve(hash.digest('hex')))
-  })
-}
-
 /** Write a `<file>.sha256` sidecar; returns the digest. */
 export async function writeChecksumSidecar(filePath: string): Promise<string> {
   const digest = await sha256File(filePath)
@@ -65,11 +54,4 @@ export async function verifyChecksum(filePath: string): Promise<boolean> {
   const expected = readFileSync(sidecar, 'utf8').trim()
   const actual = await sha256File(filePath)
   return expected.length > 0 && expected === actual
-}
-
-/** Pre-extraction archive integrity gate (C3). Streaming, memory-safe. */
-export async function verifyFileHash(archivePath: string, expectedSha256: string): Promise<boolean> {
-  if (!expectedSha256 || !existsSync(archivePath)) return false
-  const actual = await sha256File(archivePath)
-  return actual.toLowerCase() === expectedSha256.toLowerCase()
 }

@@ -9,7 +9,6 @@ import {
   atomicWriteFile,
   writeChecksumSidecar,
   verifyChecksum,
-  verifyFileHash,
 } from './snapshot'
 
 const dirs: string[] = []
@@ -90,17 +89,5 @@ describe('atomic write + checksum (M2)', () => {
     const f = join(tmp(), 'nochk.json')
     atomicWriteFile(f, 'data')
     expect(await verifyChecksum(f)).toBe(false)
-  })
-})
-
-describe('verifyFileHash (pre-extraction gate, C3)', () => {
-  it('accepts a matching archive hash and rejects a mismatch', async () => {
-    const f = join(tmp(), 'archive.7z')
-    atomicWriteFile(f, Buffer.from('mod archive bytes'))
-    const { createHash } = await import('crypto')
-    const good = createHash('sha256').update('mod archive bytes').digest('hex')
-    expect(await verifyFileHash(f, good)).toBe(true)
-    expect(await verifyFileHash(f, 'deadbeef')).toBe(false)
-    expect(await verifyFileHash(f, '')).toBe(false)
   })
 })

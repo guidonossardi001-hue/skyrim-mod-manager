@@ -1,5 +1,5 @@
-import { createPublicKey, verify, createHash } from 'crypto'
 import { canonicalJSON } from './canonicalJson'
+import { verifyEd25519Signed } from './signature'
 
 // ── Trust boundary on the remote manifest (fixes C1 RCE + M3 replay). ─────────
 // The manifest is UNTRUSTED input. Before any of its data is used we require:
@@ -58,24 +58,13 @@ export function verifyManifest(signed: SignedManifest, opts: VerifyOptions): Ver
 
     const payload = Buffer.from(canonicalJSON(signed.manifest), 'utf8')
 
-    // (1) integrity
-    const digest = createHash('sha256').update(payload).digest('hex')
-    if (digest !== signed.sha256) return fail('hash manifest non coerente con il contenuto')
-
-    // (2) authenticity — pinned Ed25519 key
-    let pub
-    try {
-      pub = createPublicKey(opts.publicKeyPem)
-    } catch {
-      return fail('chiave pubblica non valida')
+    // (1) integrity + (2) authenticity — shared sha256 + pinned Ed25519 primitive.
+    const sig = verifyEd25519Signed(payload, signed.sha256, signed.sig_ed25519, opts.publicKeyPem)
+    if (!sig.ok) {
+      if (sig.stage === 'integrity') return fail('hash manifest non coerente con il contenuto')
+      if (sig.stage === 'key') return fail('chiave pubblica non valida')
+      return fail('firma Ed25519 non valida (manifest non attendibile)')
     }
-    let good = false
-    try {
-      good = verify(null, payload, pub, Buffer.from(signed.sig_ed25519, 'hex'))
-    } catch {
-      good = false
-    }
-    if (!good) return fail('firma Ed25519 non valida (manifest non attendibile)')
 
     // (3) anti-replay / anti-downgrade
     const counter = signed.manifest.release_counter

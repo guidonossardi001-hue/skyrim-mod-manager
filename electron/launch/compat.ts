@@ -3,6 +3,7 @@ import type Store from 'electron-store'
 import { detectSteamEnv, detectSkse } from '../steam/detect'
 import { resolveMo2Plugins } from '../steam/mo2'
 import { analyzeModlist, type CompatMod, type CompatAnalysis } from '../../src/lib/compatibility'
+import { resolveActiveProfileId } from '../util/activeProfile'
 
 // Compatibility engine (companion mode, read-only). Assembles the modlist report
 // from local sources: the real game/SKSE runtime version (T5) and the active MO2
@@ -13,13 +14,7 @@ export function runCompatReport(db: Database.Database, store: Store): CompatAnal
   const gamePath = skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
   const skse = detectSkse(gamePath)
 
-  const profileId =
-    (store.get('activeProfileId') as number | undefined) ??
-    (
-      db.prepare('SELECT id FROM profiles ORDER BY created_at ASC LIMIT 1').get() as
-        { id: number } | undefined
-    )?.id ??
-    1
+  const profileId = resolveActiveProfileId(db, store)
 
   const rows = db
     .prepare('SELECT name, version, requires, is_enabled, category, nexus_id FROM mods WHERE profile_id=?')
