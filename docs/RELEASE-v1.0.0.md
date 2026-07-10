@@ -5,10 +5,10 @@
 2. `latest.yml` — feed auto-update (electron-updater lo legge per rilevare nuove versioni)
 3. `Skyrim-AE-Fantasy-Launcher-Setup-1.0.0.exe.blockmap` — update differenziali
 
-> ⚠️ Vanno caricati **tutti e tre** e con **questi nomi esatti**: electron-updater cerca `latest.yml`, che punta all'installer e al blockmap per nome. SHA512 installer: `EFX0m8ItRGfrpVujkoSTSwUaOjLzuYopz145Ls/wkLGaGsm09JEUlTm7cTavBk9zPKw2f5qtZyivwMddfw8KsQ==`
+> ⚠️ Vanno caricati **tutti e tre** e con **questi nomi esatti**: electron-updater legge `latest.yml`, che al suo interno referenzia installer e blockmap per nome + `sha512` + `size`. **Non copiare lo `sha512` altrove**: cambia ad ogni `npm run electron:build`. Fonte di verità = `release/latest.yml`; carica i 3 file **rigenerati insieme** dallo stesso build (devono essere coerenti fra loro).
 
 ## Passi (manuali, richiedono il tuo login GitHub)
-1. Committa lo stato attuale e crea il tag: `git add -A && git commit -m "release: v1.0.0 launcher" && git tag v1.0.0 && git push origin main --tags`
+1. Codice e tag **già pubblicati**: commit `dc5d5d2` su `main`, tag `v1.0.0` già su `origin`, CI verde. Nessuna azione git necessaria.
 2. Su GitHub → repo `guidonossardi001-hue/skyrim-mod-manager` → **Releases** → **Draft a new release**.
 3. **Tag:** `v1.0.0` (deve combaciare con `version` in package.json — electron-updater richiede il prefisso `v`).
 4. **Title:** `Skyrim AE Fantasy Launcher v1.0.0`
