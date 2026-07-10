@@ -28,7 +28,7 @@ import {
   appendFileSync,
   renameSync,
 } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { createHash } from 'crypto'
 import { spawnSync } from 'child_process'
 import { Readable, Transform } from 'stream'
@@ -65,13 +65,9 @@ const fail = (m) => {
 }
 
 function readApiKey() {
-  if (process.env.NEXUS_API_KEY?.trim()) return process.env.NEXUS_API_KEY.trim()
-  const f = join(ROOT, 'secrets', 'nexus.key')
-  if (existsSync(f)) {
-    const k = readFileSync(f, 'utf8').trim()
-    if (k) return k
-  }
-  return null
+  // La chiave arriva SOLO dall'ambiente ($NEXUS_API_KEY / .env). Nessun fallback su
+  // file in chiaro: secrets/nexus.key è dismesso.
+  return process.env.NEXUS_API_KEY?.trim() || null
 }
 
 // ── Nexus API ────────────────────────────────────────────────────────────────

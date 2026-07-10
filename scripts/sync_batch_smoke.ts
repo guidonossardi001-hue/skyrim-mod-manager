@@ -12,7 +12,7 @@ import { resolveDownloadLink, type HttpGetJson } from '../electron/nexus/downloa
 import { extractArchive } from '../electron/install/extract'
 import axios from 'axios'
 import { createHash } from 'crypto'
-import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, readdirSync, statSync } from 'fs'
+import { createReadStream, existsSync, mkdirSync, readFileSync, rmSync, readdirSync } from 'fs'
 import { join } from 'path'
 
 const ROOT = 'C:/ai/skyrim-mod-manager'
@@ -25,13 +25,10 @@ const FULL_7Z = join(ROOT, 'resources', '7zip-full', '7z.exe')
 const COUNT = Number(process.argv[2] || 10)
 const CONCURRENCY = Number(process.argv[3] || 3)
 
-const apiKey =
-  process.env.NEXUS_API_KEY?.trim() ||
-  (existsSync(join(ROOT, 'secrets', 'nexus.key'))
-    ? readFileSync(join(ROOT, 'secrets', 'nexus.key'), 'utf8').trim()
-    : '')
+// Chiave SOLO dall'ambiente ($NEXUS_API_KEY / .env). Nessun fallback su file in chiaro.
+const apiKey = process.env.NEXUS_API_KEY?.trim() || ''
 if (!apiKey) {
-  console.error('NEXUS_API_KEY non impostata (il file secrets/nexus.key è stato dismesso)')
+  console.error('NEXUS_API_KEY non impostata: esporta la variabile d\'ambiente o usa un .env')
   process.exit(1)
 }
 

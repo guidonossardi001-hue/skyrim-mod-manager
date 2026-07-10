@@ -21,13 +21,10 @@ const STEAM = 'C:/librearia steam/steamapps/common/Skyrim Special Edition' // re
 const BUNDLED_7ZA = join(ROOT, 'node_modules', '7zip-bin', 'win', 'x64', '7za.exe')
 const FULL_7Z = join(ROOT, 'resources', '7zip-full', '7z.exe')
 
-const apiKey =
-  process.env.NEXUS_API_KEY?.trim() ||
-  (existsSync(join(ROOT, 'secrets', 'nexus.key'))
-    ? readFileSync(join(ROOT, 'secrets', 'nexus.key'), 'utf8').trim()
-    : '')
+// Chiave SOLO dall'ambiente ($NEXUS_API_KEY / .env). Nessun fallback su file in chiaro.
+const apiKey = process.env.NEXUS_API_KEY?.trim() || ''
 if (!apiKey) {
-  console.error('NEXUS_API_KEY non impostata (il file secrets/nexus.key è stato dismesso)')
+  console.error('NEXUS_API_KEY non impostata: esporta la variabile d\'ambiente o usa un .env')
   process.exit(1)
 }
 
