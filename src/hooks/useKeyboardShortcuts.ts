@@ -14,7 +14,10 @@ const PAGE_SHORTCUTS: Record<string, string> = {
 }
 
 export function useKeyboardShortcuts() {
-  const { setActivePage, detectConflicts } = useAppStore()
+  // Per-action selectors (stable refs): a bare useAppStore() would subscribe this
+  // always-mounted hook to the WHOLE store, re-rendering App on every set().
+  const setActivePage = useAppStore((s) => s.setActivePage)
+  const detectConflicts = useAppStore((s) => s.detectConflicts)
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {

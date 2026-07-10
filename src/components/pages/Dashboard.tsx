@@ -19,7 +19,7 @@ import {
   Trash2,
 } from 'lucide-react'
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import { runPreflight, preflightSummary } from '@/lib/preflight'
 import { LaunchPreflight } from '@/components/ui/LaunchPreflight'
 import { StockGamePanel } from '@/components/ui/StockGamePanel'

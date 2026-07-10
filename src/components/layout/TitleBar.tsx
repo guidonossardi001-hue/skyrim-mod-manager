@@ -4,7 +4,6 @@ import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '@/store/appStore'
 
 export default function TitleBar() {
-  const [isMaximized, setIsMaximized] = useState(false)
   const [profileMenuOpen, setProfileMenuOpen] = useState(false)
   // Sempre montata: selettore shallow per non ri-renderizzare a ogni set() dello store.
   const { profiles, activeProfileId, setActiveProfile } = useAppStore(
@@ -16,10 +15,6 @@ export default function TitleBar() {
   )
   const activeProfile = profiles.find((p) => p.id === activeProfileId)
 
-  useEffect(() => {
-    window.api.window.isMaximized().then(setIsMaximized)
-  }, [])
-
   // Close the profile menu on any outside click.
   useEffect(() => {
     if (!profileMenuOpen) return
@@ -28,11 +23,7 @@ export default function TitleBar() {
     return () => window.removeEventListener('click', close)
   }, [profileMenuOpen])
 
-  const handleMaximize = async () => {
-    await window.api.window.maximize()
-    const m = await window.api.window.isMaximized()
-    setIsMaximized(m)
-  }
+  const handleMaximize = () => window.api.window.maximize()
 
   return (
     <div

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   CheckCircle,
   AlertTriangle,
@@ -12,7 +12,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { clsx } from 'clsx'
-import { toast } from './Toast'
+import { toast } from '@/lib/toast'
 
 interface Check {
   stage: string
@@ -42,9 +42,15 @@ export function LaunchPreflight({ onClose }: { onClose: () => void }) {
   const [loading, setLoading] = useState(true)
   const [launching, setLaunching] = useState(false)
 
-  const api = window.api as unknown as {
-    launch: { preflight: () => Promise<Report>; run: () => Promise<{ launched: boolean; report: Report }> }
-  }
+  // Stable reference to the (never-changing) preload bridge so the callbacks below
+  // don't re-create every render and can list it as a dependency honestly.
+  const api = useMemo(
+    () =>
+      window.api as unknown as {
+        launch: { preflight: () => Promise<Report>; run: () => Promise<{ launched: boolean; report: Report }> }
+      },
+    [],
+  )
 
   const run = useCallback(async () => {
     setLoading(true)
@@ -53,7 +59,7 @@ export function LaunchPreflight({ onClose }: { onClose: () => void }) {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [api])
   useEffect(() => {
     run()
   }, [run])

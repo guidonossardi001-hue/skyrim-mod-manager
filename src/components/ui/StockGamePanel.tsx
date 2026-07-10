@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { HardDrive, Copy, Link2, ShieldCheck, AlertTriangle, Loader2, FolderGit2 } from 'lucide-react'
 import type { StockGameDetect, StockGameProgress, StockGameResult } from '@/types'
 

@@ -1,4 +1,5 @@
 import type { CatalogMod } from '@/types'
+import { parseRequires } from './modUtils'
 
 // Dependency resolution, the way large modlists (Nolvus/Wabbajack) build an
 // install order: given a target mod, walk its `requires` transitively, pull in
@@ -8,14 +9,6 @@ import type { CatalogMod } from '@/types'
 export interface InstallPlanItem {
   mod: CatalogMod
   reason: 'target' | 'dependency'
-}
-
-function parseRequires(s: string | null | undefined): string[] {
-  try {
-    return JSON.parse(s || '[]') as string[]
-  } catch {
-    return []
-  }
 }
 
 /** Find the catalog entry that satisfies a `requires` token (fuzzy name match). */

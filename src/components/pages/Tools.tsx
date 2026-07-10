@@ -19,7 +19,7 @@ import {
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { clsx } from 'clsx'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import type { VortexScanResult } from '@/types'
 
 const MOCK_ENB_PRESETS = [

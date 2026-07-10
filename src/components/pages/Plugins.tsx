@@ -12,7 +12,7 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import { derivePluginsFromMods, type Plugin } from '@/lib/plugins'
 
 const TYPE_COLORS = {

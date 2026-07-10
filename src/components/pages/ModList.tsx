@@ -27,7 +27,7 @@ import {
 } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import { ModDetailPanel } from '@/components/ui/ModDetailPanel'
 
 const CATEGORY_LABELS: Record<ModCategory, string> = {

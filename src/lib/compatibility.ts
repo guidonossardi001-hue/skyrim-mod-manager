@@ -3,6 +3,8 @@
 // classification + load-order limit, SKSE / Address Library / DynDOLOD presence,
 // and xEdit-cleaning advisories. No DOM, no DB, no Electron — fully unit-testable.
 
+import { parseRequires, LOAD_ORDER_LIMIT, LOAD_ORDER_WARN } from './modUtils'
+
 export type Severity = 'error' | 'warning' | 'info'
 export type PluginType = 'ESM' | 'ESP' | 'ESL' | 'unknown'
 
@@ -80,14 +82,6 @@ export function parseLoadOrderTxt(content: string): string[] {
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('#'))
-}
-
-function parseRequires(s: string): string[] {
-  try {
-    return JSON.parse(s || '[]') as string[]
-  } catch {
-    return []
-  }
 }
 
 function numTuple(v: string | null): number[] {
@@ -179,19 +173,19 @@ export function analyzeModlist(input: CompatInput): CompatReport {
   }
   // ESL files are light and don't consume a standard load-order slot.
   const fullSlots = counts.esm + counts.esp
-  if (fullSlots > 254) {
+  if (fullSlots > LOAD_ORDER_LIMIT) {
     findings.push({
       id: 'loadorder-limit',
       severity: 'error',
       label: 'Limite load order superato',
-      detail: `${fullSlots} plugin ESP/ESM attivi (max 254). Converti alcuni in ESL.`,
+      detail: `${fullSlots} plugin ESP/ESM attivi (max ${LOAD_ORDER_LIMIT}). Converti alcuni in ESL.`,
     })
-  } else if (fullSlots > 220) {
+  } else if (fullSlots > LOAD_ORDER_WARN) {
     findings.push({
       id: 'loadorder-near',
       severity: 'warning',
       label: 'Vicino al limite load order',
-      detail: `${fullSlots}/254 slot ESP/ESM usati`,
+      detail: `${fullSlots}/${LOAD_ORDER_LIMIT} slot ESP/ESM usati`,
     })
   }
 

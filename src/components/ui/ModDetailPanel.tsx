@@ -14,8 +14,9 @@ import {
   ArrowUpCircle,
 } from 'lucide-react'
 import { clsx } from 'clsx'
+import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '@/store/appStore'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import type { Mod, ModCategory } from '@/types'
 
 const CATEGORY_LABELS: Record<ModCategory, string> = {
@@ -45,14 +46,25 @@ interface Props {
 }
 
 export function ModDetailPanel({ mod, onClose }: Props) {
-  const { conflicts, modUpdates, settings, updateMod, checkForUpdates } = useAppStore()
+  const { conflicts, modUpdates, settings, updateMod, checkForUpdates } = useAppStore(
+    useShallow((s) => ({
+      conflicts: s.conflicts,
+      modUpdates: s.modUpdates,
+      settings: s.settings,
+      updateMod: s.updateMod,
+      checkForUpdates: s.checkForUpdates,
+    })),
+  )
   const [notes, setNotes] = useState(mod?.description ?? '')
   const [checkingUpdate, setCheckingUpdate] = useState(false)
 
   // The panel instance is reused across different mods (it stays mounted and just
   // receives a new `mod`), so the notes field must resync when the mod changes.
+  // Intentionally keyed on mod.id ONLY: re-syncing on mod.description would clobber
+  // the user's unsaved edits whenever the store row refreshes.
   useEffect(() => {
     setNotes(mod?.description ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mod?.id])
 
   if (!mod) return null

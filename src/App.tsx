@@ -3,7 +3,8 @@ import { useShallow } from 'zustand/react/shallow'
 import TitleBar from '@/components/layout/TitleBar'
 import Sidebar from '@/components/layout/Sidebar'
 import { useAppStore } from '@/store/appStore'
-import { ToastContainer, toast } from '@/components/ui/Toast'
+import { ToastContainer } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: string | null }> {
@@ -140,6 +141,9 @@ export default function App() {
       }
     }
     init()
+    // Mount-once bootstrap: the store action refs are stable (selected via useShallow),
+    // so an empty dep array runs this exactly once — listing them changes nothing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // React to backend download/install events (Electron) so the mod list and

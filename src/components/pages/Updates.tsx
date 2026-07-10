@@ -13,7 +13,7 @@ import {
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { useAppStore } from '@/store/appStore'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import type { DeltaChangeRow } from '@/types'
 // Catalogo di release reale firmato Ed25519 (file_id/file_hash/version per mod,
 // prodotto da scripts/build_remote_catalog.mjs). In Electron viene verificato dal

@@ -3,6 +3,8 @@
 // decides whether launch is allowed. COMPANION MODE: this never mutates Steam or
 // the game — it only reads, verifies, and blocks with actionable fix messages.
 
+import { LOAD_ORDER_LIMIT, LOAD_ORDER_WARN } from './modUtils'
+
 export const SKYRIM_SE_APPID = 489830
 
 export type CheckStatus = 'ok' | 'warning' | 'fail' | 'skipped'
@@ -177,27 +179,27 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
     )
   else c.push(ok('VerifyModlist', 'Modlist completa', `${env.mods.installed}/${env.mods.total} installate`))
 
-  // 7. VerifyLoadOrder (254 ESP/ESM hard limit)
+  // 7. VerifyLoadOrder (ESP/ESM hard limit)
   const slots = countFullSlots(env.plugins)
-  if (slots > 254)
+  if (slots > LOAD_ORDER_LIMIT)
     c.push(
       fail(
         'VerifyLoadOrder',
         'Limite load order superato',
-        `${slots} plugin ESP/ESM attivi (max 254)`,
+        `${slots} plugin ESP/ESM attivi (max ${LOAD_ORDER_LIMIT})`,
         'Disattiva o converti in ESL alcuni plugin',
       ),
     )
-  else if (slots > 220)
+  else if (slots > LOAD_ORDER_WARN)
     c.push(
       warn(
         'VerifyLoadOrder',
         'Load order vicino al limite',
-        `${slots}/254 slot usati`,
+        `${slots}/${LOAD_ORDER_LIMIT} slot usati`,
         'Valuta la conversione di alcuni plugin in ESL',
       ),
     )
-  else c.push(ok('VerifyLoadOrder', 'Load order ok', `${slots}/254 slot`))
+  else c.push(ok('VerifyLoadOrder', 'Load order ok', `${slots}/${LOAD_ORDER_LIMIT} slot`))
 
   // 8. VerifyManifest (delta integrity — skipped if delta not in use)
   if (!env.manifest.used)

@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAppStore } from '@/store/appStore'
-import { Archive, RotateCcw, Trash2, Plus, Clock, FolderOpen, Upload, Download } from 'lucide-react'
+import { Archive, RotateCcw, Trash2, Clock, FolderOpen, Upload, Download } from 'lucide-react'
 import { format } from 'date-fns'
 import { it } from 'date-fns/locale'
 

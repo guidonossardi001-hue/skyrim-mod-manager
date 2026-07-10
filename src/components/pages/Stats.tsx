@@ -43,7 +43,7 @@ const CATEGORY_COLORS: Record<string, string> = {
 }
 
 export default function Stats() {
-  const { mods, downloads, profiles, activeProfileId } = useAppStore()
+  const { mods, downloads, profiles } = useAppStore()
 
   const stats = useMemo(() => {
     const enabled = mods.filter((m) => m.is_enabled)

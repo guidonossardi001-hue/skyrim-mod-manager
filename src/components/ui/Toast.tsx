@@ -1,29 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, Info, X } from 'lucide-react'
 import { clsx } from 'clsx'
-
-export type ToastType = 'success' | 'error' | 'warning' | 'info'
-
-export interface Toast {
-  id: string
-  type: ToastType
-  title: string
-  message?: string
-  duration?: number
-}
-
-type Listener = (toast: Toast) => void
-const listeners: Listener[] = []
-
-export function toast(type: ToastType, title: string, message?: string, duration = 3500) {
-  const t: Toast = { id: Math.random().toString(36).slice(2), type, title, message, duration }
-  listeners.forEach((l) => l(t))
-}
-
-toast.success = (title: string, msg?: string) => toast('success', title, msg)
-toast.error = (title: string, msg?: string) => toast('error', title, msg, 5000)
-toast.warning = (title: string, msg?: string) => toast('warning', title, msg)
-toast.info = (title: string, msg?: string) => toast('info', title, msg)
+import { subscribeToast, type Toast } from '@/lib/toast'
 
 const ICONS = {
   success: CheckCircle,
@@ -87,13 +65,7 @@ export function ToastContainer() {
   const add = useCallback((t: Toast) => setToasts((prev) => [...prev, t]), [])
   const remove = useCallback((id: string) => setToasts((prev) => prev.filter((t) => t.id !== id)), [])
 
-  useEffect(() => {
-    listeners.push(add)
-    return () => {
-      const i = listeners.indexOf(add)
-      if (i >= 0) listeners.splice(i, 1)
-    }
-  }, [add])
+  useEffect(() => subscribeToast(add), [add])
 
   if (toasts.length === 0) return null
 

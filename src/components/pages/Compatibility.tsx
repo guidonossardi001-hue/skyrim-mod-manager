@@ -15,6 +15,7 @@ import {
 import { clsx } from 'clsx'
 import { useAppStore } from '@/store/appStore'
 import type { CompatAnalysis, CompatFinding, Severity } from '@/lib/compatibility'
+import { LOAD_ORDER_LIMIT, LOAD_ORDER_WARN } from '@/lib/modUtils'
 
 const SEV: Record<Severity, { icon: React.ElementType; color: string; chip: string; label: string }> = {
   error: { icon: AlertCircle, color: 'text-red-400', chip: 'bg-red-900/40 text-red-300', label: 'Errori' },
@@ -195,7 +196,8 @@ export default function Compatibility() {
                 installate.
               </p>
               <p className="text-dark-400">
-                Limite load order: 254 slot ESP/ESM. Gli ESL sono "light" e non consumano slot standard.
+                Limite load order: {LOAD_ORDER_LIMIT} slot ESP/ESM. Gli ESL sono "light" e non consumano slot
+                standard.
               </p>
             </div>
           </div>
@@ -274,9 +276,9 @@ function TypeChip({ label, value, cls }: { label: string; value: number; cls: st
 
 function LoadOrderBar({ esm, esp }: { esm: number; esp: number }) {
   const used = esm + esp
-  const pct = Math.min(100, (used / 254) * 100)
-  const danger = used > 254,
-    near = used > 220
+  const pct = Math.min(100, (used / LOAD_ORDER_LIMIT) * 100)
+  const danger = used > LOAD_ORDER_LIMIT,
+    near = used > LOAD_ORDER_WARN
   return (
     <div className="mt-4">
       <div className="flex items-center justify-between text-xs mb-1">
@@ -287,7 +289,7 @@ function LoadOrderBar({ esm, esp }: { esm: number; esp: number }) {
             danger ? 'text-red-400' : near ? 'text-orange-400' : 'text-white/70',
           )}
         >
-          {used} / 254
+          {used} / {LOAD_ORDER_LIMIT}
         </span>
       </div>
       <div className="h-2 rounded-full bg-dark-800 overflow-hidden">

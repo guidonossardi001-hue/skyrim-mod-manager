@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { BookOpen, ChevronRight, ChevronDown, ExternalLink } from 'lucide-react'
+import { ChevronRight, ChevronDown, ExternalLink } from 'lucide-react'
 
 interface DocSection {
   id: string

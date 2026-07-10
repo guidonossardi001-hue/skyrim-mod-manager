@@ -10,7 +10,7 @@ import {
   PowerOff,
 } from 'lucide-react'
 import { clsx } from 'clsx'
-import { toast } from '@/components/ui/Toast'
+import { toast } from '@/lib/toast'
 import type { ConflictInfo } from '@/types'
 
 export default function Conflicts() {
