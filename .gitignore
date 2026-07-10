@@ -35,7 +35,10 @@ coverage/
 # ══════════════════════════════════════════════════════════════════════════════
 # Dati locali pesanti (download cache, StockGame, log)
 # ══════════════════════════════════════════════════════════════════════════════
-data/
+# NB: ancorato al root con lo slash iniziale. Senza, `data/` ignorava ANCHE il
+# sorgente `src/data/` (modlistCatalog, licenses) → build CI rotta ("Cannot find
+# module '@/data/...'") mentre in locale i file c'erano.
+/data/
 logs/
 *.log
 
