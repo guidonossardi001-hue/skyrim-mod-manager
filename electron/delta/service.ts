@@ -3,6 +3,8 @@ import type { SqliteDb } from '../db/sqlite'
 import { withTransaction } from '../db/sqlite'
 import { canonicalJSON } from './canonicalJson'
 import { verifyManifest, DEFAULT_ALLOWED_HOSTS, type SignedManifest, type ManifestBody } from './manifest'
+import { effectiveBaseline } from '../net/freshness'
+import { pinnedManifestFloor } from './pinnedKey'
 import { computeChangeset, summarizeChangeset, type SnapshotRow, type ReleaseRow } from './diff'
 import {
   recordChangeset,
@@ -74,6 +76,14 @@ export class DeltaService {
     ).c
   }
 
+  /** published_at of the highest-counter release already accepted (anti-rollback axis 2). */
+  private lastPublishedAt(): string | null {
+    const row = this.db
+      .prepare('SELECT published_at AS p FROM catalog_release ORDER BY release_counter DESC LIMIT 1')
+      .get() as { p: string | null } | undefined
+    return row?.p ?? null
+  }
+
   /** ingest = verify (trust boundary) → store release atomically. */
   ingest(signed: SignedManifest): IngestResult {
     // Idempotent re-ingest: a manifest we already accepted (same content hash) is a
@@ -93,13 +103,22 @@ export class DeltaService {
       if (known) return { success: true, releaseId: known.id, reused: true }
     }
 
+    // Fold the build-time floor into the DB baseline so even a fresh install cannot be
+    // rolled back below the shipped release (TOFU defense).
+    const baseline = effectiveBaseline(
+      { lastCounter: this.lastCounter(), lastPublishedAt: this.lastPublishedAt() },
+      pinnedManifestFloor(),
+    )
     const res = verifyManifest(signed, {
       publicKeyPem: this.opts.publicKeyPem,
-      lastCounter: this.lastCounter(),
+      lastCounter: baseline.lastCounter,
+      lastPublishedAt: baseline.lastPublishedAt,
       allowedHosts: this.allowedHosts,
+      now: Date.now(),
     })
     if (!res.ok || !res.manifest) {
-      this.log('warn', `manifest rifiutato: ${res.error}`)
+      if (res.freshness) this.log('warn', `Update rejected: freshness violation — ${res.error}`)
+      else this.log('warn', `manifest rifiutato: ${res.error}`)
       return { success: false, error: res.error }
     }
     const m: ManifestBody = res.manifest

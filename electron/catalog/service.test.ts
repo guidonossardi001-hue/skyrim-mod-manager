@@ -123,11 +123,20 @@ describe('CatalogService.ingest', () => {
 
   it('rejects replay/downgrade (catalog_version not strictly greater than last accepted)', () => {
     expect(svc.ingest(signCatalog(baseCatalog, keys.privateKey)).success).toBe(true) // version 1 accepted
-    const stale: ModCatalog = { ...baseCatalog, generated_at: 'later' } // still version 1
+    const stale: ModCatalog = { ...baseCatalog, generated_at: '2026-07-11T00:00:00Z' } // still version 1
     const res = svc.ingest(signCatalog(stale, keys.privateKey))
     expect(res.success).toBe(false)
     expect(res.errorKind).toBe('downgrade')
     expect(catalogRows(db)).toHaveLength(2) // untouched: still the first accepted catalog
+  })
+
+  it('rejects a newer catalog_version carrying an OLDER generated_at (freshness axis 2)', () => {
+    expect(svc.ingest(signCatalog(baseCatalog, keys.privateKey)).success).toBe(true) // v1 @ 2026-07-10
+    const stale: ModCatalog = { ...baseCatalog, catalog_version: 2, generated_at: '2026-07-01T00:00:00Z' }
+    const res = svc.ingest(signCatalog(stale, keys.privateKey))
+    expect(res.success).toBe(false)
+    expect(res.errorKind).toBe('downgrade')
+    expect(res.error).toMatch(/published_at/)
   })
 
   it('rejects a schema violation (duplicate nexus_id) and leaves the DB intact', () => {
@@ -191,7 +200,7 @@ describe('CatalogService.ingest', () => {
     `)
     const poisoned: ModCatalog = {
       catalog_version: 2,
-      generated_at: 'later',
+      generated_at: '2026-07-10T00:00:00Z',
       source: 'test',
       mods: [{ nexus_id: 666, name: 'Poison', category: 'x' }],
     }
@@ -244,7 +253,7 @@ describe('CatalogService.ingest — deploy conflict metadata (v8)', () => {
   it('rejects an invalid deployCategory at the trust boundary', () => {
     const cat = {
       catalog_version: 1,
-      generated_at: 'x',
+      generated_at: '2026-07-10T00:00:00Z',
       source: 'test',
       mods: [{ nexus_id: 1, name: 'Bad', category: 'x', deployCategory: 'ultra4k' }],
     } as unknown as ModCatalog
@@ -259,7 +268,7 @@ describe('CatalogService.ingest — deploy conflict metadata (v8)', () => {
     const svc2 = new CatalogService(bare, { publicKeyPem: keys.publicKeyPem })
     const cat: ModCatalog = {
       catalog_version: 1,
-      generated_at: 'x',
+      generated_at: '2026-07-10T00:00:00Z',
       source: 'test',
       mods: [{ nexus_id: 1, name: 'A', category: 'x', deployCategory: 'mesh', resolutionWeight: 1 }],
     }

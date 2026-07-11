@@ -108,6 +108,21 @@ describe('verifyManifest', () => {
     const r = verifyManifest(signed, { publicKeyPem, lastCounter: 5, allowedHosts: DEFAULT_ALLOWED_HOSTS })
     expect(r.ok).toBe(false)
     expect(r.error).toMatch(/replay|downgrade/i)
+    expect(r.freshness).toBe(true)
+  })
+  it('rejects a newer counter carrying an OLDER published_at (freshness axis 2)', () => {
+    const { publicKeyPem, privateKey } = makeKeys()
+    const stale: ManifestBody = { ...baseManifest, release_counter: 6, published_at: '2026-06-20T00:00:00Z' }
+    const signed = signManifest(stale, privateKey)
+    const r = verifyManifest(signed, {
+      publicKeyPem,
+      lastCounter: 5,
+      lastPublishedAt: '2026-06-22T00:00:00Z',
+      allowedHosts: DEFAULT_ALLOWED_HOSTS,
+    })
+    expect(r.ok).toBe(false)
+    expect(r.freshness).toBe(true)
+    expect(r.error).toMatch(/published_at/)
   })
   it('rejects a download_url on a non-allowlisted host', () => {
     const { publicKeyPem, privateKey } = makeKeys()

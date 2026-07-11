@@ -4,6 +4,8 @@ import { withTransaction, tableExists, columnExists } from '../db/sqlite'
 import { canonicalJSON } from '../delta/canonicalJson'
 import { verifyCatalog } from './verify'
 import { validateCatalog } from './validate'
+import { effectiveBaseline } from '../net/freshness'
+import { pinnedCatalogFloor } from '../delta/pinnedKey'
 import type { ModCatalog, SignedCatalog, CatalogIngestResult } from './types'
 
 // Reference mod catalog ingestor (profile-independent metadata, distinct from
@@ -19,6 +21,7 @@ export interface CatalogServiceOptions {
 
 const SETTINGS_VERSION_KEY = 'catalog_version'
 const SETTINGS_HASH_KEY = 'catalog_hash'
+const SETTINGS_GENERATED_AT_KEY = 'catalog_generated_at'
 
 export class CatalogService {
   constructor(
@@ -46,6 +49,17 @@ export class CatalogService {
     )?.value
   }
 
+  /** generated_at of the last accepted catalog (anti-rollback axis 2). */
+  private lastGeneratedAt(): string | null {
+    return (
+      (
+        this.db.prepare('SELECT value FROM settings WHERE key=?').get(SETTINGS_GENERATED_AT_KEY) as
+          | { value: string }
+          | undefined
+      )?.value ?? null
+    )
+  }
+
   /** ingest = verify (trust boundary) → validate (shape/refs) → replace atomically. */
   ingest(signed: SignedCatalog): CatalogIngestResult {
     // Idempotent re-ingest: same content hash already applied is a no-op and
@@ -58,9 +72,19 @@ export class CatalogService {
     }
     if (hash === this.currentHash()) return { success: true, reused: true }
 
-    const v = verifyCatalog(signed, { publicKeyPem: this.opts.publicKeyPem, lastVersion: this.lastVersion() })
+    const baseline = effectiveBaseline(
+      { lastCounter: this.lastVersion(), lastPublishedAt: this.lastGeneratedAt() },
+      pinnedCatalogFloor(),
+    )
+    const v = verifyCatalog(signed, {
+      publicKeyPem: this.opts.publicKeyPem,
+      lastVersion: baseline.lastCounter,
+      lastGeneratedAt: baseline.lastPublishedAt,
+      now: Date.now(),
+    })
     if (!v.ok || !v.catalog) {
-      this.log('warn', `catalogo rifiutato: ${v.error}`)
+      if (v.freshness) this.log('warn', `Update rejected: freshness violation — ${v.error}`)
+      else this.log('warn', `catalogo rifiutato: ${v.error}`)
       return { success: false, errorKind: v.kind, error: v.error }
     }
 
@@ -143,6 +167,7 @@ export class CatalogService {
       )
       up.run(SETTINGS_VERSION_KEY, String(cat.catalog_version))
       up.run(SETTINGS_HASH_KEY, hash)
+      up.run(SETTINGS_GENERATED_AT_KEY, cat.generated_at ?? '')
       return cat.mods.length
     })
   }

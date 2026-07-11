@@ -1,5 +1,6 @@
 import { canonicalJSON } from './canonicalJson'
 import { verifyEd25519Signed } from './signature'
+import { checkFreshness } from '../net/freshness'
 
 // ── Trust boundary on the remote manifest (fixes C1 RCE + M3 replay). ─────────
 // The manifest is UNTRUSTED input. Before any of its data is used we require:
@@ -37,14 +38,17 @@ export interface SignedManifest {
 
 export interface VerifyOptions {
   publicKeyPem: string
-  lastCounter: number // highest release_counter already accepted
+  lastCounter: number // highest release_counter already accepted (fold the pinned floor in first)
+  lastPublishedAt?: string | null // timestamp of the last accepted release (anti-rollback axis 2)
   allowedHosts: RegExp[]
+  now?: number // enables the future-skew guard (caller passes Date.now())
 }
 
 export interface VerifyResult {
   ok: boolean
   manifest?: ManifestBody
   error?: string
+  freshness?: boolean // true when the rejection was an anti-rollback/freshness violation
 }
 
 const fail = (error: string): VerifyResult => ({ ok: false, error })
@@ -66,12 +70,13 @@ export function verifyManifest(signed: SignedManifest, opts: VerifyOptions): Ver
       return fail('firma Ed25519 non valida (manifest non attendibile)')
     }
 
-    // (3) anti-replay / anti-downgrade
-    const counter = signed.manifest.release_counter
-    if (typeof counter !== 'number' || !Number.isInteger(counter))
-      return fail('release_counter mancante o non intero')
-    if (counter <= opts.lastCounter)
-      return fail(`replay/downgrade: counter ${counter} <= ${opts.lastCounter}`)
+    // (3) anti-replay / anti-downgrade — monotonic counter AND non-regressing published_at.
+    const fresh = checkFreshness(
+      { counter: signed.manifest.release_counter, publishedAt: signed.manifest.published_at },
+      { lastCounter: opts.lastCounter, lastPublishedAt: opts.lastPublishedAt ?? null },
+      { now: opts.now, counterLabel: 'counter' },
+    )
+    if (!fresh.ok) return { ok: false, error: fresh.reason, freshness: true }
 
     // (4) host allow-list on every download_url
     const mods = Array.isArray(signed.manifest.mods) ? signed.manifest.mods : []
