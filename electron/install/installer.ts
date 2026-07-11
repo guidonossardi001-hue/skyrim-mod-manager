@@ -59,6 +59,7 @@ export interface InstallOptions {
   onProgress?: (p: InstallProgress) => void
   force?: boolean // reinstall over an existing deployed mod
   modName?: string // final folder name (sanitized); defaults to mod_<nexusId>
+  hashAlgo?: 'md5' | 'sha256' // algorithm for the fileHash pre-extraction gate (default sha256)
 }
 
 // ── Injectable extractor (real 7-Zip in prod, a fake in tests) ────────────────
@@ -217,7 +218,7 @@ export class InstallerService {
       // 1) Pre-extraction integrity (stream the archive; reject before touching disk).
       if (fileHash) {
         progress('verifying')
-        const v = await verifyArchiveHash(archivePath, fileHash)
+        const v = await verifyArchiveHash(archivePath, fileHash, opts.hashAlgo ?? 'sha256')
         if (!v.ok)
           return this.fail(
             nexusId,

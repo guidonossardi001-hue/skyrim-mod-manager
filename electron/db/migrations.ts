@@ -259,6 +259,23 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 9,
+    name: 'download-integrity-hash',
+    up: (db) => {
+      // Trusted expected hash for the MANDATORY download integrity gate. Set at download
+      // creation from a trusted source (delta manifest sha256, or a backup/catalog md5);
+      // NULL means "no local hash" → the gate falls back to Nexus md5_search or fails closed.
+      // hash_algo distinguishes md5 (Nexus/backup native) from sha256 (delta manifest).
+      // Guarded: downloads is created by initDatabase() before migrations.
+      if (tableExists(db, 'downloads')) {
+        if (!columnExists(db, 'downloads', 'file_hash'))
+          db.exec('ALTER TABLE downloads ADD COLUMN file_hash TEXT')
+        if (!columnExists(db, 'downloads', 'hash_algo'))
+          db.exec('ALTER TABLE downloads ADD COLUMN hash_algo TEXT')
+      }
+    },
+  },
 ]
 
 export interface MigrationResult {

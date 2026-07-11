@@ -49,6 +49,13 @@ describe('migration framework', () => {
     expect(columnExists(db, 'mods', 'file_hash')).toBe(true)
   })
 
+  it('adds the download integrity-hash columns (v9)', () => {
+    const db = freshDb()
+    runMigrations(db)
+    expect(columnExists(db, 'downloads', 'file_hash')).toBe(true)
+    expect(columnExists(db, 'downloads', 'hash_algo')).toBe(true)
+  })
+
   it('is idempotent (re-running applies nothing and does not throw)', () => {
     const db = freshDb()
     runMigrations(db)

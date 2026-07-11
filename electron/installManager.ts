@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import Database from 'better-sqlite3'
 import { logger } from './logger'
 import { columnExists } from './db/sqlite'
+import { pickExpectedHash, type ExpectedHash } from './install/integrity'
 import type { InstallerService, InstallResult, InstallProgress } from './install/installer'
 
 /**
@@ -75,20 +76,32 @@ export function initInstallManager(
     win()?.webContents.send(channel, payload)
   }
 
-  // The expected sha256 for a delta-driven download comes from the signed manifest
-  // (delta_changeset.to_file_hash). Passed to the installer, which verifies the
-  // archive BEFORE extracting — a corrupt/tampered archive is rejected, never unpacked.
-  function expectedHash(downloadId: number): string | null {
+  // Second-barrier expected hash for the installer (defense-in-depth behind the download
+  // gate; also covers install:run on a pre-existing archive). Layered: the download row's
+  // own file_hash/hash_algo (persisted trusted hash, or an md5_search-confirmed md5) first,
+  // then the delta manifest's to_file_hash (sha256). The installer verifies BEFORE extracting.
+  function expectedHash(downloadId: number): ExpectedHash | null {
+    let downloadColumn: { value: string | null; algo: string | null } | null = null
+    let deltaSha256: string | null = null
+    try {
+      const dl = db.prepare('SELECT file_hash, hash_algo FROM downloads WHERE id=?').get(downloadId) as
+        | { file_hash: string | null; hash_algo: string | null }
+        | undefined
+      if (dl) downloadColumn = { value: dl.file_hash, algo: dl.hash_algo }
+    } catch {
+      /* pre-v9 schema without the columns */
+    }
     try {
       const row = db
         .prepare(
           'SELECT to_file_hash AS h FROM delta_changeset WHERE download_id=? AND to_file_hash IS NOT NULL LIMIT 1',
         )
         .get(downloadId) as { h: string } | undefined
-      return row?.h ?? null
+      deltaSha256 = row?.h ?? null
     } catch {
-      return null
+      /* delta_changeset optional */
     }
+    return pickExpectedHash({ downloadColumn, deltaSha256 })
   }
 
   async function runInstall(downloadId: number): Promise<InstallResult> {
@@ -103,13 +116,14 @@ export function initInstallManager(
     }
 
     const nexusId = row.nexus_id ?? 0
-    const fileHash = expectedHash(downloadId)
+    const expected = expectedHash(downloadId)
     db.prepare("UPDATE downloads SET status='installing' WHERE id=?").run(downloadId)
 
     // Delegate the full pipeline (verify → stage → extract → map → commit) to the
     // InstallerService. It is a no-throw boundary AND cleans its own staging on any
     // failure, so this adapter only has to translate the Result into DB state + events.
-    const res = await installer.installMod(nexusId, row.file_id ?? null, fileHash, row.file_path, {
+    const res = await installer.installMod(nexusId, row.file_id ?? null, expected?.value ?? null, row.file_path, {
+      hashAlgo: expected?.algo,
       // Namespace the on-disk folder by the stable nexus_id (mirrors massSync.modDestDir
       // `${modId}-${name}`): two different mods that sanitize to the SAME display name
       // no longer collide, so a reinstall can never wipe another mod's deployed files.

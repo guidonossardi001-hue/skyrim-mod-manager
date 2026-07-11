@@ -319,7 +319,17 @@ const DownloadRow = memo(function DownloadRow({
       <div className="flex-1 min-w-0">
         <div className="flex items-center justify-between gap-2">
           <span className="text-sm font-medium text-white/85 truncate">{dl.name}</span>
-          <span className={clsx('text-xs flex-shrink-0', statusColor)}>{statusLabel}</span>
+          <div className="flex items-center gap-1.5 flex-shrink-0">
+            {dl.status === 'failed' && dl.error?.startsWith('Integrità') && (
+              <span
+                title={dl.error}
+                className="text-[10px] uppercase tracking-wide text-red-300 bg-red-900/30 border border-red-500/30 rounded px-1.5 py-0.5"
+              >
+                Integrità fallita
+              </span>
+            )}
+            <span className={clsx('text-xs', statusColor)}>{statusLabel}</span>
+          </div>
         </div>
 
         {dl.status === 'downloading' || dl.status === 'installing' ? (

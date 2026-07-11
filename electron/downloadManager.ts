@@ -9,6 +9,8 @@ import { resolveDownloadLink } from './nexus/downloadLink'
 import { classifyDownloadFailure, backoffWithJitter, CircuitBreaker } from './install/retryPolicy'
 import { sanitizePathSegment } from './util/paths'
 import { axiosGet, axiosJson } from './http/axiosAdapters'
+import { hashFile, md5File } from './install/extract'
+import { pickExpectedHash, md5SearchConfirms, decideIntegrity } from './install/integrity'
 
 interface DownloadRow {
   id: number
@@ -23,6 +25,8 @@ interface DownloadRow {
   status: string
   nxm_key: string | null
   nxm_expires: number | null
+  file_hash: string | null
+  hash_algo: string | null
 }
 
 interface DownloadTask {
@@ -165,14 +169,102 @@ export function initDownloadManager(
     return null
   }
 
+  // ── MANDATORY integrity gate ────────────────────────────────────────────────
+  // Verify a freshly-downloaded (or cached) archive against a TRUSTED hash BEFORE it is
+  // ever declared a valid download or handed to the installer. Layered & fail-closed:
+  //   1. an expected hash from the download row / delta manifest → digest & compare;
+  //   2. otherwise ask Nexus md5_search whether this file's md5 maps to the requested
+  //      (mod, file) — the CDN link is untrusted, Nexus itself is the authority;
+  //   3. anything unresolved (no key, API error, no match, mismatch) → REJECT.
+  async function nexusMd5Confirms(
+    md5: string,
+    want: { modId: number; fileId: number | null },
+  ): Promise<boolean | null> {
+    const apiKey = getApiKey()
+    if (!apiKey) return null // cannot verify without a key → decideIntegrity fails closed
+    const ac = new AbortController()
+    const timer = setTimeout(() => ac.abort(), 15000) // don't let a hung API stall the gate
+    try {
+      const res = await axiosJson(
+        `https://api.nexusmods.com/v1/games/skyrimspecialedition/mods/md5_search/${md5}.json`,
+        { headers: { apikey: apiKey, 'User-Agent': 'SkyrimAEModManager/1.0' }, signal: ac.signal },
+      )
+      return md5SearchConfirms((res as { data: unknown }).data, want)
+    } catch {
+      return null // API/network error/timeout → unconfirmed → fail closed
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+
+  async function integrityGate(row: DownloadRow, filePath: string): Promise<{ ok: boolean; reason?: string }> {
+    let deltaSha256: string | null = null
+    try {
+      const d = db
+        .prepare('SELECT to_file_hash AS h FROM delta_changeset WHERE download_id=? AND to_file_hash IS NOT NULL LIMIT 1')
+        .get(row.id) as { h: string } | undefined
+      deltaSha256 = d?.h ?? null
+    } catch {
+      /* delta_changeset optional on partial schemas */
+    }
+
+    const expected = pickExpectedHash({
+      downloadColumn: row.file_hash ? { value: row.file_hash, algo: row.hash_algo } : null,
+      deltaSha256,
+    })
+
+    if (expected) {
+      const actual = await hashFile(filePath, expected.algo)
+      const computed = expected.algo === 'md5' ? { md5: actual } : { sha256: actual }
+      const decision = decideIntegrity({ expected, computed })
+      return decision.ok ? { ok: true } : { ok: false, reason: decision.reason }
+    }
+
+    // No trusted local hash → Nexus md5_search authoritative fallback.
+    const md5 = await md5File(filePath)
+    const confirmed = row.nexus_id
+      ? await nexusMd5Confirms(md5, { modId: row.nexus_id, fileId: row.file_id ?? null })
+      : null
+    const decision = decideIntegrity({ expected: null, computed: { md5 }, md5SearchConfirmed: confirmed })
+    if (decision.ok) {
+      // Persist the now-authoritative md5 so a re-check / cache-hit verifies locally & offline.
+      try {
+        db.prepare("UPDATE downloads SET file_hash=?, hash_algo='md5' WHERE id=?").run(md5, row.id)
+      } catch {
+        /* best effort */
+      }
+      return { ok: true }
+    }
+    return { ok: false, reason: decision.reason }
+  }
+
+  // Terminal, NON-retryable failure for a poisoned/corrupt archive: delete it (and its
+  // cache) so a retry re-downloads clean, and never loop on a compromised CDN.
+  function failIntegrity(downloadId: number, row: DownloadRow, reason: string) {
+    attempts.delete(downloadId)
+    removeArtifacts(row)
+    db.prepare("UPDATE downloads SET status='failed', error=?, file_path=NULL WHERE id=?").run(
+      `Integrità: ${reason}`,
+      downloadId,
+    )
+    logger.error('download', `Integrità FALLITA "${row.name}": ${reason}`)
+    win()?.webContents.send('download:error', { id: downloadId, error: `Integrità: ${reason}`, integrity: true })
+  }
+
   async function startDownload(downloadId: number): Promise<void> {
     if (activeDownloads.has(downloadId)) return
     const row = getRow(downloadId)
     if (!row) return
 
-    // Cache hit → skip the network entirely and hand straight to the installer.
+    // Cache hit → skip the network, but STILL gate: a cached archive on disk is untrusted
+    // (a prior poisoned download, or a planted file) and must pass integrity before install.
     const cached = findCachedArchive(row)
     if (cached) {
+      const gate = await integrityGate(row, cached)
+      if (!gate.ok) {
+        failIntegrity(downloadId, row, gate.reason ?? 'cache non verificata')
+        return
+      }
       logger.info('download', `Cache hit per "${row.name}" → ${cached}`)
       db.prepare(
         "UPDATE downloads SET status='completed', file_path=?, downloaded_size=total_size WHERE id=?",
@@ -252,11 +344,18 @@ export function initDownloadManager(
       })
 
       // streamToFile streams to <dest>.part, verifies the byte count, and atomically
-      // promotes it — a truncated transfer never reaches the extractor.
+      // promotes it — a truncated transfer never reaches the extractor. Byte count is
+      // necessary but NOT sufficient: the MANDATORY integrity gate must pass before the
+      // archive is declared complete or handed to the installer (fail-closed).
+      const gate = await integrityGate(row, destPath)
+      activeDownloads.delete(downloadId)
+      if (!gate.ok) {
+        failIntegrity(downloadId, row, gate.reason ?? 'verifica integrità fallita')
+        return
+      }
       db.prepare(
         "UPDATE downloads SET status='completed', file_path=?, downloaded_size=?, total_size=? WHERE id=?",
       ).run(destPath, result.bytes, result.total || result.bytes, downloadId)
-      activeDownloads.delete(downloadId)
       attempts.delete(downloadId)
       breaker.recordSuccess() // a success breaks the failure streak
       logger.info(

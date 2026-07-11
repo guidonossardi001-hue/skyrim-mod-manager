@@ -171,11 +171,15 @@ export default function App() {
       useAppStore.getState().setActivePage('downloads')
       toast.success('Download avviato da Nexus', 'Aggiunto alla coda')
     }
+    // A rejected download (esp. an integrity/hash failure) must surface app-wide, not only
+    // on the Downloads page — the file was quarantined and never installed.
+    const onDownloadError = (p?: { integrity?: boolean; error?: string }) => {
+      refresh()
+      if (p?.integrity) toast.error('Download rifiutato', p.error ?? 'Verifica di integrità fallita')
+    }
     const subs = [
-      ...['download:complete', 'install:complete', 'download:error'].map((ch) => ({
-        ch,
-        w: api.on!(ch, refresh),
-      })),
+      ...['download:complete', 'install:complete'].map((ch) => ({ ch, w: api.on!(ch, refresh) })),
+      { ch: 'download:error', w: api.on!('download:error', onDownloadError as (...a: unknown[]) => void) },
       { ch: 'nxm:queued', w: api.on!('nxm:queued', onNxm) },
     ]
     return () => subs.forEach((s) => api.off?.(s.ch, s.w))

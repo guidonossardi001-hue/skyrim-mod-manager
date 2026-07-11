@@ -37,10 +37,10 @@ export function listFilesRel(root: string): string[] {
   return out
 }
 
-/** Streaming sha256 — constant memory regardless of archive size. */
-export function sha256File(path: string): Promise<string> {
+/** Streaming digest with the given algorithm — constant memory regardless of archive size. */
+export function hashFile(path: string, algo: 'md5' | 'sha256'): Promise<string> {
   return new Promise((res, rej) => {
-    const h = createHash('sha256')
+    const h = createHash(algo)
     const s = createReadStream(path)
     s.on('error', rej)
     s.on('data', (d) => h.update(d as Buffer))
@@ -48,11 +48,22 @@ export function sha256File(path: string): Promise<string> {
   })
 }
 
+/** Streaming sha256 — constant memory regardless of archive size. */
+export function sha256File(path: string): Promise<string> {
+  return hashFile(path, 'sha256')
+}
+
+/** Streaming md5 (Nexus/backup-native digest). */
+export function md5File(path: string): Promise<string> {
+  return hashFile(path, 'md5')
+}
+
 export async function verifyArchiveHash(
   path: string,
   expected: string,
+  algo: 'md5' | 'sha256' = 'sha256',
 ): Promise<{ ok: boolean; actual: string }> {
-  const actual = await sha256File(path)
+  const actual = await hashFile(path, algo)
   return { ok: actual.toLowerCase() === expected.toLowerCase(), actual }
 }
 
