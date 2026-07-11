@@ -366,6 +366,25 @@ export default function Settings() {
               />
             </div>
           </div>
+
+          <div>
+            <label
+              className="text-xs text-dark-300 mb-1 block"
+              title="Il mass-installer seleziona automaticamente la variante di risoluzione di ogni mod: 2K = archivi più leggeri (meno spazio su disco), 4K = qualità massima. Fallback automatico se la variante scelta non esiste."
+            >
+              Qualità texture (mass-install)
+            </label>
+            <select
+              value={local.textureQualityProfile ?? '4K'}
+              onChange={(e) =>
+                setLocal((l) => ({ ...l, textureQualityProfile: e.target.value as '2K' | '4K' }))
+              }
+              className="input-field w-full"
+            >
+              <option value="2K">2K — più leggero (risparmia spazio)</option>
+              <option value="4K">4K — qualità massima</option>
+            </select>
+          </div>
         </div>
       </Section>
 

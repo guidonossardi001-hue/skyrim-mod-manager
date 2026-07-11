@@ -3,6 +3,12 @@ import { isPathInside } from './../install/extract'
 import { sameVolume } from './../install/stockGame'
 import { CircuitBreaker, withRetry } from './../install/retryPolicy'
 import { sanitizePathSegment } from './../util/paths'
+import {
+  resolveMods,
+  DEFAULT_TEXTURE_PROFILE,
+  type TextureProfile,
+  type TextureVariant,
+} from './textureProfile'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mass-sync orchestrator (hardened) — production version of scripts/e2e_batch.mjs.
@@ -28,6 +34,9 @@ export interface SyncMod {
   name: string
   md5?: string
   fileSize?: number
+  // Resolution alternatives (2K/4K/…) reconstructed from the raw backup. When present, the active
+  // textureProfile selects which one is actually downloaded (see ./textureProfile).
+  variants?: TextureVariant[]
 }
 
 export type SyncItemPhase = 'downloading' | 'verifying' | 'extracting'
@@ -92,6 +101,7 @@ export interface MassSyncConfig {
   extractionOverhead?: number // extracted-vs-archive size factor (default 1.5)
   safetyFactor?: number // cross-disk headroom on the estimate (default 1.15; same-disk uses SAME_DISK_EXTRACT_FACTOR)
   skipDiskCheck?: boolean // bypass the aggregate disk pre-flight (tests / explicit override)
+  textureProfile?: TextureProfile // 2K/4K quality profile; selects per-mod variant (default 4K)
   onProgress?: (s: SyncProgress) => void
   onLog?: (m: string) => void
   now?: () => number // injectable clock (default Date.now) for throughput/ETA + tests
@@ -213,10 +223,13 @@ export async function diskPreflight(
     downloadsDir?: string
     extractionOverhead?: number
     safetyFactor?: number
+    textureProfile?: TextureProfile
   },
 ): Promise<DiskPreflight> {
   const modsDir = stockGameModsDir(cfg.stockGameDir)
-  const pend = pendingBytes(cfg.mods, modsDir, deps.exists)
+  // Estimate against the PROFILE-SELECTED files, so a 2K profile estimates the lighter archives.
+  const resolved = resolveMods(cfg.mods, cfg.textureProfile ?? DEFAULT_TEXTURE_PROFILE)
+  const pend = pendingBytes(resolved, modsDir, deps.exists)
   const free = await deps.freeSpace(cfg.stockGameDir)
   // Same-disk ⇒ archives + extracted output compete for one volume (heavier estimate).
   const sameDisk = cfg.downloadsDir ? sameVolume(cfg.downloadsDir, cfg.stockGameDir) : false
@@ -235,6 +248,12 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
   deps.ensureDir(cfg.downloadsDir)
   deps.ensureDir(modsDir)
 
+  // Resolve every mod to the file matching the active texture profile (2K/4K) ONCE, up front:
+  // the preflight estimate, the total bytes and the download loop all consume the same selection,
+  // so switching profile changes both the estimated weight and the URLs/fileIds coherently.
+  const profile = cfg.textureProfile ?? DEFAULT_TEXTURE_PROFILE
+  const mods = resolveMods(cfg.mods, profile)
+
   // Aggregate disk pre-flight (PRECHECK-01) — BLOCK before any download if the StockGame
   // volume can't hold the estimated extracted output. Fail-closed.
   if (!cfg.skipDiskCheck) {
@@ -244,6 +263,7 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
       downloadsDir: cfg.downloadsDir,
       extractionOverhead: cfg.extractionOverhead,
       safetyFactor: cfg.safetyFactor,
+      textureProfile: profile,
     })
     const gb = (b: number) => (b / 1024 ** 3).toFixed(1)
     if (!pf.ok) {
@@ -263,7 +283,7 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
   const breaker = new CircuitBreaker(cfg.errorThreshold ?? 50)
   let halted = false
 
-  const total = cfg.mods.length
+  const total = mods.length
   const slots = new Set<ActiveItem>()
   let completedBytes = 0 // real bytes of finished mods (+ skipped mods' nominal size)
   const state: SyncProgress = {
@@ -273,7 +293,7 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     modsFailed: 0,
     modsSkipped: 0,
     bytesDownloaded: 0,
-    bytesTotal: cfg.mods.reduce((a, m) => a + (m.fileSize ?? 0), 0),
+    bytesTotal: mods.reduce((a, m) => a + (m.fileSize ?? 0), 0),
     throughputMBps: 0,
     etaSeconds: null,
     active: [],
@@ -391,7 +411,7 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     while (!cfg.signal.aborted && !halted) {
       const i = idx++
       if (i >= total) return
-      const m = cfg.mods[i]
+      const m = mods[i]
       const slot: ActiveItem = {
         name: m.name,
         phase: 'downloading',

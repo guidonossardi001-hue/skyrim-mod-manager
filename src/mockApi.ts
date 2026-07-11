@@ -246,6 +246,7 @@ const DEFAULT_SETTINGS: Record<string, unknown> = {
   downloadThreads: 4,
   downloadRetries: 3,
   errorThreshold: 50,
+  textureQualityProfile: '4K',
 }
 
 // ─── Caricamento / persistenza ───────────────────────────────────────────────

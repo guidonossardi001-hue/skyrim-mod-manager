@@ -46,6 +46,12 @@ import {
   type StockGameProgress,
 } from './install/stockGame'
 import {
+  buildVariants,
+  isTextureProfile,
+  DEFAULT_TEXTURE_PROFILE,
+  type TextureProfile,
+} from './sync/textureProfile'
+import {
   runMassSync,
   stockGameModsDir,
   modDestDir,
@@ -919,6 +925,11 @@ app.whenReady().then(() => {
     safetyFactor:
       Number(store.get('diskSafetyFactor')) > 0 ? Number(store.get('diskSafetyFactor')) : undefined,
   })
+  // Global texture quality profile (2K/4K). Validated; unknown/unset → default 4K.
+  const syncTextureProfile = (): TextureProfile => {
+    const v = store.get('textureQualityProfile')
+    return isTextureProfile(v) ? v : DEFAULT_TEXTURE_PROFILE
+  }
   // Source of truth: the persisted backup (survives a Vortex wipe); fallback to a live scan.
   const loadSyncMods = (): SyncMod[] => {
     const candidates = [
@@ -937,9 +948,29 @@ app.whenReady().then(() => {
           md5?: string
           fileSize?: number
         }>
+        // Reconstruct resolution VARIANTS from the raw per-collection files: `deduped` keeps one
+        // file per modId, but the raw collections may hold the same mod in 2K AND 4K.
+        const rawByMod = new Map<number, Array<{ fileId: number; name: string; md5?: string; fileSize?: number }>>()
+        for (const c of (b.collections ?? []) as Array<{
+          mods?: Array<{ modId: number; fileId: number; name: string; md5?: string; fileSize?: number }>
+        }>) {
+          for (const rm of c.mods ?? []) {
+            if (!rm?.modId || !rm?.fileId) continue
+            const list = rawByMod.get(rm.modId) ?? []
+            list.push({ fileId: rm.fileId, name: rm.name, md5: rm.md5, fileSize: rm.fileSize })
+            rawByMod.set(rm.modId, list)
+          }
+        }
         const mods = arr
           .filter((m) => m.modId && m.fileId)
-          .map((m) => ({ modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize }))
+          .map((m) => {
+            const variants = buildVariants(rawByMod.get(m.modId) ?? [])
+            // Attach only when there's a REAL choice (≥2 resolutions); a single tagged file is not
+            // an alternative worth switching to.
+            return variants.length > 1
+              ? { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize, variants }
+              : { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize }
+          })
         if (mods.length) {
           logger.info('sync', `sorgente: backup ${p} (${mods.length} mod)`)
           return mods
@@ -948,7 +979,7 @@ app.whenReady().then(() => {
         /* try next */
       }
     }
-    // fallback: live Vortex scan
+    // fallback: live Vortex scan (no variant reconstruction — a live scan has one file per mod)
     const root = (store.get('vortexPath') as string | undefined) || defaultVortexModsRoot()
     if (root && existsSync(root)) {
       const scan = scanVortexMods(root)
@@ -1012,6 +1043,7 @@ app.whenReady().then(() => {
       signal: syncAbort.signal,
       maxRetries: Math.max(0, Math.min(10, Number(store.get('downloadRetries') ?? 3))),
       errorThreshold: Math.max(1, Number(store.get('errorThreshold')) || 50),
+      textureProfile: syncTextureProfile(),
       ...syncFactors(),
       onProgress: (s) => {
         syncState = s
@@ -1066,10 +1098,17 @@ app.whenReady().then(() => {
         mods,
         stockGameDir: stockDir,
         downloadsDir: join(app.getPath('userData'), 'downloads'),
+        textureProfile: syncTextureProfile(),
         ...syncFactors(),
       },
     )
-    return { ...pf, stockGameDir: stockDir, modsTotal: all.length, modsSelected: mods.length }
+    return {
+      ...pf,
+      stockGameDir: stockDir,
+      modsTotal: all.length,
+      modsSelected: mods.length,
+      textureProfile: syncTextureProfile(),
+    }
   })
 
   // ── Vortex importer ────────────────────────────────────────────────────────

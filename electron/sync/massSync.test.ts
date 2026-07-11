@@ -12,6 +12,7 @@ import {
   type SyncMod,
   type SyncProgress,
 } from './massSync'
+import { resolveMods } from './textureProfile'
 
 describe('massSync: isolation guard', () => {
   it('refuses StockGame that equals / contains / is inside the Steam game', () => {
@@ -117,6 +118,47 @@ describe('massSync: orchestration', () => {
     expect(calls.removed.some((p) => p.includes('downloads'))).toBe(true)
     expect(calls.removed.some((p) => p.includes('SG/mods/'))).toBe(true)
     expect(res.phase).toBe('error')
+  })
+
+  it('texture profile: switching to 2K changes the selected fileId AND the estimated weight', async () => {
+    const variantMod: SyncMod = {
+      modId: 183,
+      fileId: 4000,
+      name: '(CBBE) 4K',
+      md5: 'abc123',
+      fileSize: 300,
+      variants: [
+        { resolution: '4K', fileId: 4000, name: '(CBBE) 4K', md5: 'abc123', fileSize: 300 },
+        { resolution: '2K', fileId: 2000, name: '(CBBE) 2K', md5: 'abc123', fileSize: 120 },
+      ],
+    }
+    const plainMod: SyncMod = { modId: 9, fileId: 90, name: 'NoVariants', md5: 'abc123', fileSize: 50 }
+    const run = async (profile: '2K' | '4K') => {
+      const picked: Array<[number, number]> = []
+      const { deps } = mkDeps({
+        resolveLink: vi.fn(async (modId: number, fileId: number) => {
+          picked.push([modId, fileId])
+          return `https://cdn/files/${fileId}.7z`
+        }),
+      })
+      const res = await runMassSync(deps, cfg([variantMod, plainMod], { textureProfile: profile, concurrency: 1 }))
+      return { res, picked }
+    }
+
+    // URLs selected coherently: the variant mod resolves to the 4K vs 2K fileId.
+    const at4k = await run('4K')
+    expect(at4k.picked.find(([m]) => m === 183)?.[1]).toBe(4000)
+    expect(at4k.res.bytesTotal).toBe(350) // 300 (4K) + 50
+
+    const at2k = await run('2K')
+    expect(at2k.picked.find(([m]) => m === 183)?.[1]).toBe(2000) // switched to the 2K file
+    expect(at2k.res.bytesTotal).toBe(170) // 120 (2K) + 50 — lighter
+
+    // The disk-space pre-flight estimate follows the profile (pendingBytes over resolved mods).
+    const pending4k = pendingBytes(resolveMods([variantMod, plainMod], '4K'), 'D:/SG/mods', () => false)
+    const pending2k = pendingBytes(resolveMods([variantMod, plainMod], '2K'), 'D:/SG/mods', () => false)
+    expect(pending2k).toBeLessThan(pending4k)
+    expect([pending4k, pending2k]).toEqual([350, 170])
   })
 
   it('idempotent: skips mods whose dest dir already exists', async () => {

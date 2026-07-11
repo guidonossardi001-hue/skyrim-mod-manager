@@ -124,6 +124,7 @@ export interface AppSettings {
   downloadThreads: number
   downloadRetries?: number
   errorThreshold?: number
+  textureQualityProfile?: '2K' | '4K' // mass-installer texture quality/space profile (default 4K)
 }
 
 export interface ConflictInfo {

@@ -95,6 +95,7 @@ const defaultSettings: AppSettings = {
   checkConflicts: true,
   autoBackup: true,
   downloadThreads: 4,
+  textureQualityProfile: '4K',
 }
 
 // Guard di staleness per le load asincrone legate al profilo attivo: ogni load
