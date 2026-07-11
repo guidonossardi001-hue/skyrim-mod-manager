@@ -671,6 +671,17 @@ export const mockApi = {
       return result
     },
     seed: async () => ({ inserted: catalog.length }),
+    // Preview stub: no Vortex backup on disk in the browser mock.
+    importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
+    // Preview stub: the real backend fetches a signed remote catalog and replaces
+    // modlist_catalog wholesale. Here there is no signed endpoint, so mirror the
+    // real "URL non configurato" no-throw failure the packaged app returns when
+    // NOLVUS_MOD_CATALOG_URL is unset — the button + error toast stay verifiable.
+    update: async () => ({
+      success: false as const,
+      errorKind: 'network' as const,
+      error: 'URL catalogo non configurato (NOLVUS_MOD_CATALOG_URL)',
+    }),
     // Mirrors the backend InstallPlanResult shape. Resolves `requires` by name
     // (the seed catalog's legacy format) so dependency chains produce a real
     // forced order for the preview demo; cycle/conflict branches share the shape.

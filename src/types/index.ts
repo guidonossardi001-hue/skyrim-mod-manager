@@ -192,6 +192,15 @@ declare global {
       catalog: {
         list(filter?: { category?: string; search?: string }): Promise<CatalogMod[]>
         seed(mods: Partial<CatalogMod>[]): Promise<{ inserted: number }>
+        // Import the full de-duplicated modlist (~4568 mods) from the Vortex backup into the
+        // catalog without clobbering curated rows. Never rejects — inspect success.
+        importVortex(): Promise<{
+          success: boolean
+          candidates?: number
+          imported?: number
+          total?: number
+          error?: string
+        }>
         // Fetch + verify + atomically replace the reference catalog from the
         // signed remote source. url is optional (main process falls back to its
         // configured default). Never rejects — inspect success/errorKind.

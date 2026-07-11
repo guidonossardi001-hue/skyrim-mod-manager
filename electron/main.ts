@@ -14,7 +14,8 @@ import { applyPragmas, integrityCheck, type SqliteDb } from './db/sqlite'
 import { runMigrations } from './db/migrations'
 import { setSecret, getSecret, hasSecret, type SecretCrypto } from './db/secrets'
 import { initDeltaEngine, onDeltaDownloadComplete, onDeltaDownloadFailed } from './delta/engine'
-import { initCatalogEngine } from './catalog/engine'
+import { initCatalogEngine, triggerBootCatalogUpdate } from './catalog/engine'
+import { buildCatalogRowsFromBackup } from './catalog/vortexImport'
 import { initInstallEngine } from './install/engine'
 import { initDeployEngine } from './deploy/engine'
 import { recoverOnStartup } from './delta/journal'
@@ -560,6 +561,10 @@ app.whenReady().then(() => {
   initDeltaEngine(requireDb(), { enqueueDownload: (id) => downloadQueue?.enqueue(id) })
   // Reference mod catalog engine (signed catalog fetch + verify + atomic replace).
   initCatalogEngine(requireDb())
+  // Boot auto-refresh: pull the signed 4000+ catalog in the background so the DB
+  // is not stuck on the bundled seed. Fire-and-forget, never blocks boot — a
+  // missing NOLVUS_MOD_CATALOG_URL or network failure is a logged no-op.
+  triggerBootCatalogUpdate()
   // StockGame source/target resolvers — used both by the deploy engine's Creation
   // Club source and by the stockgame:* handlers below. Plain store reads, so there is
   // no init-order dependency and they can live here, ahead of their first use.
@@ -1430,6 +1435,51 @@ ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
   })
   insertMany(mods)
   return { inserted: mods.length }
+})
+
+// Import the FULL de-duplicated modlist (~4568 "compatible" mods) from the Vortex collections
+// backup into modlist_catalog, so the Catalog page reflects the real modlist and not just the
+// ~122 bundled essentials. INSERT OR IGNORE: adds the modlist WITHOUT overwriting curated rows
+// (a nexus_id already present keeps its rich metadata). Reuses the same backup path resolution as
+// mass-sync (settings override → userData → cwd/data).
+ipcMain.handle('catalog:import-vortex', () => {
+  const candidates = [
+    store.get('collectionsBackupPath') as string | undefined,
+    join(app.getPath('userData'), 'vortex-collections-backup.json'),
+    join(process.cwd(), 'data', 'vortex-collections-backup.json'),
+  ].filter(Boolean) as string[]
+  let backup: unknown = null
+  let src = ''
+  for (const p of candidates) {
+    try {
+      if (existsSync(p)) {
+        backup = JSON.parse(readFileSync(p, 'utf8'))
+        src = p
+        break
+      }
+    } catch {
+      /* try next candidate */
+    }
+  }
+  if (!backup) return { success: false, error: 'Backup Vortex non trovato (vortex-collections-backup.json)' }
+  const rows = buildCatalogRowsFromBackup(backup)
+  if (!rows.length) return { success: false, error: 'Nessuna mod valida nel backup Vortex' }
+
+  const db = getRawDb()
+  const before = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO modlist_catalog
+    (nexus_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
+    VALUES (@nexus_id, @name, @category, @subcategory, @priority_order, @required, @description, @author, @tags, @size_mb, @has_it_translation, @notes, @conflicts_with, @requires)
+  `)
+  const tx = db.transaction((rs: ReturnType<typeof buildCatalogRowsFromBackup>) => {
+    for (const r of rs) insert.run(r as unknown as Record<string, unknown>)
+  })
+  tx(rows)
+  const after = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
+  const imported = after - before
+  logger.info('catalog', `import Vortex: ${rows.length} candidati → ${imported} nuovi (totale ${after}) da ${src}`)
+  return { success: true, candidates: rows.length, imported, total: after }
 })
 
 // ─── Downloads IPC ────────────────────────────────────────────────────────────

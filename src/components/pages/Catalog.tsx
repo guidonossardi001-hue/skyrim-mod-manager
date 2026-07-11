@@ -50,6 +50,7 @@ export default function Catalog() {
   const [installing, setInstalling] = useState<Set<number>>(new Set())
   const [checkingAll, setCheckingAll] = useState(false)
   const [updatingCatalog, setUpdatingCatalog] = useState(false)
+  const [importingVortex, setImportingVortex] = useState(false)
   // Multi-select for the dependency resolver. Kept as a stable Set reference across
   // renders (updated only on toggle) so the resolver drawer never resets spuriously.
   const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
@@ -70,7 +71,7 @@ export default function Catalog() {
         .then(() => loadCatalog())
         .catch((e) => toast.error('Caricamento catalogo fallito', (e as Error).message))
     }
-  }, [catalog.length])
+  }, [catalog.length, loadCatalog])
 
   // Everything already in the profile (installed OR queued) counts as "satisfied"
   // for the resolver so it neither re-adds nor re-plans it.
@@ -242,6 +243,28 @@ export default function Catalog() {
     }
   }
 
+  // Import the full de-duplicated modlist (~4568 mods) from the local Vortex backup into the
+  // catalog. INSERT OR IGNORE main-side, so curated rows keep their rich metadata.
+  const importVortex = async () => {
+    setImportingVortex(true)
+    try {
+      const res = await window.api.catalog.importVortex()
+      if (res.success) {
+        await loadCatalog()
+        toast.success(
+          'Modlist importata',
+          `${res.imported ?? 0} nuove mod dal backup Vortex (totale ${res.total ?? 0})`,
+        )
+      } else {
+        toast.error('Import Vortex fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Import Vortex fallito', (e as Error).message)
+    } finally {
+      setImportingVortex(false)
+    }
+  }
+
   const installAllFiltered = async () => {
     const missing = filtered.filter((m) => !installedSet.has(m.nexus_id))
     if (missing.length === 0) {
@@ -294,6 +317,22 @@ export default function Catalog() {
                 <Boxes size={12} /> Risolvi dipendenze ({selectedNexusIds.size})
               </button>
             )}
+            <button
+              onClick={importVortex}
+              disabled={importingVortex}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Importa la modlist completa (~4568 mod) dal backup Vortex locale"
+            >
+              {importingVortex ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Import...
+                </>
+              ) : (
+                <>
+                  <Boxes size={12} /> Importa modlist Vortex
+                </>
+              )}
+            </button>
             <button
               onClick={updateCatalog}
               disabled={updatingCatalog}

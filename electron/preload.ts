@@ -65,6 +65,9 @@ contextBridge.exposeInMainWorld('api', {
   catalog: {
     list: (filter?: { category?: string; search?: string }) => invoke('catalog:list', filter),
     seed: (mods: unknown[]) => invoke('catalog:seed', mods),
+    // Import the full de-duplicated modlist (~4568 mods) from the Vortex backup into the
+    // catalog, without overwriting curated rows. Resolves to { success, imported, total, ... }.
+    importVortex: () => invoke('catalog:import-vortex'),
     // Fetch the signed reference catalog (URL optional — falls back to the
     // main-process NOLVUS_MOD_CATALOG_URL config) and ingest it. Always resolves
     // to a CatalogIngestResult, never rejects (no-throw boundary end to end).
