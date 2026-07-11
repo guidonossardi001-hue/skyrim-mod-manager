@@ -75,6 +75,18 @@ import { createHash, randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
 import { logger } from './logger'
 
+// Trust-anchor hardening (fixes the NODE_ENV-spoof vector). The pinned Ed25519 pubkey override
+// and the anti-rollback floor relax themselves outside production (dev/test/ci) via NODE_ENV. In
+// a PACKAGED build that env var must NEVER weaken the trust anchor — a local attacker launching
+// with NODE_ENV=development would otherwise enable NOLVUS_MANIFEST_PUBKEY (forge any manifest) and
+// zero the floor (downgrade). app.isPackaged reflects a real packaged binary and is not settable
+// by an env var, so force production semantics whenever packaged, before any verify path runs.
+try {
+  if (app.isPackaged && process.env.NODE_ENV !== 'production') process.env.NODE_ENV = 'production'
+} catch {
+  /* app may be unavailable in a non-Electron context */
+}
+
 // Dev is signalled either by NODE_ENV or, when launched by vite-plugin-electron,
 // by the injected VITE_DEV_SERVER_URL — the live renderer dev server to load.
 const devServerUrl = process.env.VITE_DEV_SERVER_URL
@@ -1613,7 +1625,26 @@ ipcMain.handle('fs:reveal-folder', async (_e, kind: string) => {
       /* best-effort */
     }
   }
-  const err = await shell.openPath(dir) // '' on success, an error string otherwise
+  // Harden the sink: the game/mo2 (and modsPath/stockGamePath/instancePath) kinds resolve to
+  // store values a compromised renderer can set via settings:set. shell.openPath EXECUTES a
+  // file target (e.g. an .exe) and mounts a UNC share, so require the resolved path to be a
+  // real, EXISTING DIRECTORY and not a UNC path before opening it — a file/exe never reaches
+  // the sink. realpath first so a junction pointing at a file is caught by isDirectory().
+  if (/^\\\\/.test(dir) || /^\/\//.test(dir)) {
+    logger.warn('security', `fs:reveal-folder rifiutato (percorso UNC): ${dir.slice(0, 120)}`)
+    return { success: false, error: 'Cartella non disponibile' }
+  }
+  let realDir: string
+  try {
+    realDir = existsSync(dir) ? realpathSync.native(dir) : dir
+    if (!statSync(realDir).isDirectory()) {
+      logger.warn('security', `fs:reveal-folder rifiutato (non è una directory): ${dir.slice(0, 120)}`)
+      return { success: false, error: 'Cartella non disponibile' }
+    }
+  } catch {
+    return { success: false, error: 'Cartella non disponibile' }
+  }
+  const err = await shell.openPath(realDir) // '' on success, an error string otherwise
   if (err) {
     logger.warn('fs', `fs:reveal-folder: apertura fallita (${kind}): ${err}`)
     return { success: false, error: err }
