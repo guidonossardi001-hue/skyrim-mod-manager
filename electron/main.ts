@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
@@ -54,6 +54,12 @@ import {
 } from './sync/massSync'
 import { getFreeSpace } from './install/diskSpace'
 import { sanitizePathSegment } from './util/paths'
+import {
+  revealDirForKind,
+  validateOpenPath,
+  type RevealRoots,
+  type RevealProbe,
+} from './util/openTargets'
 import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
 import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
@@ -1490,7 +1496,73 @@ ipcMain.handle('fs:read-dir', async (_e, path: string) => {
   }
 })
 
-ipcMain.handle('fs:open-path', (_e, path: string) => shell.openPath(path))
+// Intent-based file opening. The renderer NEVER passes a path: it names a fixed folder
+// `kind` or a numeric download id, and the main process resolves the concrete path from the
+// settings store / DB. This replaces the old `fs:open-path(path)` handler, which handed any
+// renderer-supplied path straight to shell.openPath — arbitrary local-file open, and RUN for
+// an executable/UNC path (LFI → RCE via an XSS'd mod name/description/catalog value).
+const APP_MANAGED_KINDS = new Set(['backups', 'downloads', 'logs', 'mods', 'stockGame', 'instances'])
+function revealRoots(): RevealRoots {
+  const ud = app.getPath('userData')
+  const mo2 = store.get('mo2Path') as string | undefined
+  return {
+    backups: join(ud, 'backups'),
+    downloads: join(ud, 'downloads'),
+    logs: join(ud, 'logs'),
+    mods: (store.get('modsPath') as string) || join(ud, 'mods'),
+    stockGame: (store.get('stockGamePath') as string) || defaultStockGameDir(ud),
+    instances: (store.get('instancePath') as string) || join(ud, 'instances'),
+    game: (store.get('gamePath') as string) || null,
+    mo2: mo2 ? dirname(mo2) : null,
+  }
+}
+// realpathSync.native throws on a missing path; validateOpenPath only calls realpath after
+// its own existsSync guard, so this adapter is safe.
+const revealProbe: RevealProbe = { exists: existsSync, realpath: (p) => realpathSync.native(p) }
+
+// Open one of a FIXED set of authorized folders in the OS file manager. `kind` is validated
+// against the whitelist; opening a directory never executes anything.
+ipcMain.handle('fs:reveal-folder', async (_e, kind: string) => {
+  const dir = revealDirForKind(kind, revealRoots())
+  if (!dir) {
+    logger.warn('security', `fs:reveal-folder rifiutato (kind non valido/non configurato): ${String(kind).slice(0, 60)}`)
+    return { success: false, error: 'Cartella non disponibile' }
+  }
+  // App-managed dirs may not exist yet on first use; create them. We never create the
+  // externally-owned game/MO2 dirs — if missing, openPath simply reports it.
+  if (APP_MANAGED_KINDS.has(kind)) {
+    try {
+      mkdirSync(dir, { recursive: true })
+    } catch {
+      /* best-effort */
+    }
+  }
+  const err = await shell.openPath(dir) // '' on success, an error string otherwise
+  if (err) {
+    logger.warn('fs', `fs:reveal-folder: apertura fallita (${kind}): ${err}`)
+    return { success: false, error: err }
+  }
+  return { success: true }
+})
+
+// Reveal a COMPLETED download in the file manager (showItemInFolder — never opens/executes
+// the file). The renderer passes only the numeric id; the path is looked up in the DB and must
+// resolve inside an authorized root and not be an executable.
+ipcMain.handle('fs:open-download', (_e, downloadId: number) => {
+  if (!Number.isInteger(downloadId) || downloadId <= 0) return { success: false, error: 'id non valido' }
+  const row = getRawDb().prepare('SELECT file_path FROM downloads WHERE id=?').get(downloadId) as
+    | { file_path: string | null }
+    | undefined
+  if (!row?.file_path) return { success: false, error: 'File non disponibile' }
+  const decision = validateOpenPath(row.file_path, revealRoots(), revealProbe)
+  if (!decision.ok) {
+    logger.warn('security', `fs:open-download rifiutato (${decision.reason}): ${row.file_path.slice(0, 120)}`)
+    return { success: false, error: 'Percorso non autorizzato' }
+  }
+  shell.showItemInFolder(decision.path) // reveal in Explorer; does not launch the file
+  return { success: true }
+})
+
 // Only web URLs may leave the app: anything else (file:, smb:, custom schemes able
 // to trigger local handlers) is refused.
 ipcMain.handle('fs:open-external', (_e, url: string) => {

@@ -255,7 +255,8 @@ declare global {
         readDir(
           path: string,
         ): Promise<Array<{ name: string; path: string; isDirectory: boolean; size: number }>>
-        openPath(path: string): Promise<void>
+        revealFolder(kind: string): Promise<{ success: boolean; error?: string }>
+        openDownload(downloadId: number): Promise<{ success: boolean; error?: string }>
         openExternal(url: string): Promise<void>
       }
       tools: {

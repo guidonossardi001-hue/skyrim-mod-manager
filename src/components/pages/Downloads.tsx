@@ -373,7 +373,7 @@ const DownloadRow = memo(function DownloadRow({
         )}
         {dl.status === 'completed' && dl.file_path && (
           <button
-            onClick={() => window.api.fs.openPath(dl.file_path!)}
+            onClick={() => window.api.fs.openDownload(dl.id)}
             title="Apri cartella"
             className="w-7 h-7 rounded flex items-center justify-center text-dark-400 hover:text-soul-400 hover:bg-soul-900/20 transition-all"
           >

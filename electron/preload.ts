@@ -95,7 +95,11 @@ contextBridge.exposeInMainWorld('api', {
     pickFile: (title?: string, filters?: unknown[]) => invoke('fs:pick-file', title, filters),
     exists: (path: string) => invoke('fs:exists', path),
     readDir: (path: string) => invoke('fs:read-dir', path),
-    openPath: (path: string) => invoke('fs:open-path', path),
+    // Intent-based opening: the renderer names a whitelisted folder `kind` or a numeric
+    // download id — never a raw path. The main process resolves the concrete path, so a
+    // compromised renderer cannot open (or execute) an arbitrary local file.
+    revealFolder: (kind: string) => invoke('fs:reveal-folder', kind),
+    openDownload: (downloadId: number) => invoke('fs:open-download', downloadId),
     openExternal: (url: string) => invoke('fs:open-external', url),
   },
 

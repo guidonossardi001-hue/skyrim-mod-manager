@@ -134,7 +134,7 @@ export default function Backup() {
             {loading ? 'Attendi...' : 'Crea Backup Ora'}
           </button>
           <button
-            onClick={() => window.api.fs.openPath('')}
+            onClick={() => window.api.fs.revealFolder('backups')}
             className="btn-ghost flex items-center gap-2 justify-center"
           >
             <FolderOpen size={14} />

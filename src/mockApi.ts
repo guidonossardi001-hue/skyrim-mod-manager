@@ -799,8 +799,13 @@ export const mockApi = {
     },
     exists: async (p: string) => !!p,
     readDir: async () => [],
-    openPath: async (p: string) => {
-      console.info('[mock] openPath:', p || '(cartella backup)')
+    revealFolder: async (kind: string) => {
+      console.info('[mock] revealFolder:', kind)
+      return { success: true }
+    },
+    openDownload: async (downloadId: number) => {
+      console.info('[mock] openDownload:', downloadId)
+      return { success: true }
     },
     openExternal: async (url: string) => {
       window.open(url, '_blank')
