@@ -56,6 +56,16 @@ describe('migration framework', () => {
     expect(columnExists(db, 'downloads', 'hash_algo')).toBe(true)
   })
 
+  it('creates the mod_translation mapping table (v10)', () => {
+    const db = freshDb()
+    runMigrations(db)
+    const t = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='mod_translation'").get()
+    expect(t).toBeTruthy()
+    for (const c of ['base_nexus_id', 'language', 'translation_nexus_id', 'translation_file_id', 'source']) {
+      expect(columnExists(db, 'mod_translation', c), `column ${c}`).toBe(true)
+    }
+  })
+
   it('is idempotent (re-running applies nothing and does not throw)', () => {
     const db = freshDb()
     runMigrations(db)

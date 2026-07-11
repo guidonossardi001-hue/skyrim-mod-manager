@@ -276,6 +276,29 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 10,
+    name: 'mod-translations',
+    up: (db) => {
+      // Best-effort translation mapping for the mass-installer: base mod nexus_id → its ITA
+      // translation mod/file on Nexus. Populated from the Vortex backup (collections often ship the
+      // ITA patch as a separate mod) and/or Nexus discovery. One mapping per (base mod, language);
+      // the resolver reads it fail-soft (no row → install the base mod, no error).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS mod_translation (
+          base_nexus_id        INTEGER NOT NULL,
+          language             TEXT NOT NULL DEFAULT 'it',
+          translation_nexus_id INTEGER NOT NULL,
+          translation_file_id  INTEGER,
+          translation_md5      TEXT,
+          source               TEXT,               -- 'backup' | 'curated' | 'nexus'
+          created_at           TEXT DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (base_nexus_id, language)
+        );
+        CREATE INDEX IF NOT EXISTS idx_mod_translation_base ON mod_translation(base_nexus_id);
+      `)
+    },
+  },
 ]
 
 export interface MigrationResult {
