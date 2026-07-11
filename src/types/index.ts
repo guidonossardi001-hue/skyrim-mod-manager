@@ -135,6 +135,17 @@ export interface InstallProgress {
   message: string
 }
 
+// Load order (v1.1.0 "Conflict & Load Order"): one entry per plugin Skyrim reads,
+// merged from the game's real plugins.txt (AppData/Local) + the .esp/.esm/.esl
+// files on disk. `index` is the 0-based position in the effective load order.
+// Distinct from lib/plugins.ts `Plugin` (derived from the mod set) — this reflects
+// the actual game state.
+export interface LoadOrderEntry {
+  name: string
+  active: boolean
+  index: number
+}
+
 // Window API type (injected by preload)
 declare global {
   interface Window {
@@ -345,6 +356,10 @@ declare global {
       // Compatibility engine — runtime/SKSE version + plugins.txt modlist report.
       compat: {
         analyze(): Promise<CompatAnalysis>
+      }
+      // Load order (v1.1.0) — reads the game's real plugins.txt + Data/ scan.
+      plugin: {
+        getOrder(): Promise<LoadOrderEntry[]>
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).
       stockGame: {

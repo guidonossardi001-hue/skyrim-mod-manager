@@ -895,6 +895,22 @@ export const mockApi = {
       return { ...mockSmart }
     },
   },
+  // Load order (v1.1.0) — browser simulation: base masters + one .esp per installed mod.
+  plugin: {
+    getOrder: async () => {
+      const base = ['Skyrim.esm', 'Update.esm', 'Dawnguard.esm', 'HearthFires.esm', 'Dragonborn.esm'].map(
+        (name, index) => ({ name, active: true, index }),
+      )
+      const mods = state.mods
+        .filter((m) => m.is_installed)
+        .map((m, i) => ({
+          name: `${m.name.replace(/[^\w .'-]/g, '').trim() || 'Mod'}.esp`,
+          active: !!m.is_enabled,
+          index: base.length + i,
+        }))
+      return [...base, ...mods]
+    },
+  },
 
   // Vortex importer — simulated scan of two collections for the browser preview.
   // Generates a realistic ~833-mod / ~290 GB dataset so the Dashboard counters match

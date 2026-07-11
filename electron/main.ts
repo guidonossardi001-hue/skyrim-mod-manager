@@ -23,6 +23,7 @@ import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } 
 import { detectSteamEnv } from './steam/detect'
 import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
 import { runCompatReport } from './launch/compat'
+import { getLoadOrder } from './pluginManager'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
@@ -696,6 +697,19 @@ app.whenReady().then(() => {
 
   // Compatibility report (runtime/SKSE version + active-profile plugins.txt).
   ipcMain.handle('compat:analyze', () => runCompatReport(getRawDb(), store))
+
+  // Load order (v1.1.0 "Conflict & Load Order"): the effective plugin order Skyrim
+  // reads. Data source = the isolated StockGame Data (where mods are hardlinked) if
+  // it exists, else the vanilla game Data; order source = the game's real plugins.txt
+  // in %LOCALAPPDATA%. READ-ONLY — never writes plugins.txt or the load order (yet).
+  ipcMain.handle('plugin:get-order', () => {
+    const stockData = join(resolveStockTarget(), 'Data')
+    const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+    const dataDir = existsSync(stockData) ? stockData : gamePath ? join(gamePath, 'Data') : ''
+    const localAppData = process.env.LOCALAPPDATA || join(app.getPath('home'), 'AppData', 'Local')
+    const pluginsTxtPath = join(localAppData, 'Skyrim Special Edition', 'plugins.txt')
+    return getLoadOrder({ dataDir, pluginsTxtPath })
+  })
 
   // Pandora detection (PANDORA-REGISTER-01): locate the engine exe, persist its path,
   // and report presence. READ-ONLY — never spawns Pandora, never generates output.

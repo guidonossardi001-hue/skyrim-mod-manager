@@ -14,6 +14,9 @@ import { SortableContext, verticalListSortingStrategy, useSortable, arrayMove } 
 import { CSS } from '@dnd-kit/utilities'
 import { toast } from '@/lib/toast'
 import { derivePluginsFromMods, type Plugin } from '@/lib/plugins'
+import { LoadOrderPanel } from '@/components/LoadOrderPanel'
+
+type PluginTab = 'loadorder' | 'derived'
 
 const TYPE_COLORS = {
   ESM: 'text-soul-400 bg-soul-900/30',
@@ -22,7 +25,10 @@ const TYPE_COLORS = {
 }
 
 export default function Plugins() {
-  const { mods } = useAppStore()
+  // Single-value selector (not the whole store): re-render only when `mods` changes,
+  // consistent with the app's useShallow/selector convention on hot components.
+  const mods = useAppStore((s) => s.mods)
+  const [tab, setTab] = useState<PluginTab>('loadorder')
   const [search, setSearch] = useState('')
   const [plugins, setPlugins] = useState<Plugin[]>(() => derivePluginsFromMods(mods))
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
@@ -95,63 +101,99 @@ export default function Plugins() {
           <h1 className="text-lg font-bold gradient-text-soul" style={{ fontFamily: 'Cinzel, serif' }}>
             Plugin Manager
           </h1>
-          <div className="flex items-center gap-3 text-xs text-dark-400">
-            <span className={TYPE_COLORS.ESM + ' px-2 py-0.5 rounded font-mono'}>{counts.esm} ESM</span>
-            <span className={TYPE_COLORS.ESP + ' px-2 py-0.5 rounded font-mono'}>{counts.esp} ESP</span>
-            <span className={TYPE_COLORS.ESL + ' px-2 py-0.5 rounded font-mono'}>{counts.esl} ESL</span>
-            <span className="text-dark-500">·</span>
-            <span>
-              {counts.enabled}/{plugins.length} attivi
-            </span>
+          {tab === 'derived' && (
+            <div className="flex items-center gap-3 text-xs text-dark-400">
+              <span className={TYPE_COLORS.ESM + ' px-2 py-0.5 rounded font-mono'}>{counts.esm} ESM</span>
+              <span className={TYPE_COLORS.ESP + ' px-2 py-0.5 rounded font-mono'}>{counts.esp} ESP</span>
+              <span className={TYPE_COLORS.ESL + ' px-2 py-0.5 rounded font-mono'}>{counts.esl} ESL</span>
+              <span className="text-dark-500">·</span>
+              <span>
+                {counts.enabled}/{plugins.length} attivi
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Tabs: real game load order (plugins.txt) vs the mod-derived view */}
+        <div className="flex items-center gap-1">
+          {(
+            [
+              { id: 'loadorder', label: 'Load Order (reale)' },
+              { id: 'derived', label: 'Vista derivata' },
+            ] as const
+          ).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={clsx(
+                'px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors',
+                tab === t.id ? 'bg-soul-500/20 text-soul-300' : 'text-dark-400 hover:text-white/80 hover:bg-white/5',
+              )}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+
+        {tab === 'derived' && (
+          <>
+            <div className="flex items-center gap-3">
+              <div className="relative flex-1">
+                <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Cerca plugin o mod..."
+                  className="input-field pl-9"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-start gap-2 p-2.5 rounded-lg bg-soul-900/10 border border-soul-500/20 text-xs text-soul-300">
+              <Info size={13} className="flex-shrink-0 mt-0.5" />
+              <span>
+                L'ordine di carico mostrato è derivato dalla lista mod. Per l'ordine definitivo usa LOOT dalla
+                pagina Strumenti.
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+
+      {tab === 'loadorder' ? (
+        // Real effective load order (game plugins.txt + Data scan) — read-only.
+        <div className="flex-1 overflow-y-auto">
+          <LoadOrderPanel />
+        </div>
+      ) : (
+        <>
+          {/* Table header */}
+          <div className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-dark-400 uppercase tracking-wide border-b border-dark-800 flex-shrink-0">
+            <div className="w-4" />
+            <div className="w-8 text-center">#</div>
+            <div className="flex-1">Plugin</div>
+            <div className="w-14 text-center">Tipo</div>
+            <div className="w-40 hidden md:block">Mod</div>
+            <div className="w-16 text-center">Stato</div>
           </div>
-        </div>
 
-        <div className="flex items-center gap-3">
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-dark-400" />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Cerca plugin o mod..."
-              className="input-field pl-9"
-            />
+          {/* Plugin list */}
+          <div className="flex-1 overflow-y-auto">
+            <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+              <SortableContext items={filtered.map((p) => p.id)} strategy={verticalListSortingStrategy}>
+                {filtered.map((plugin) => (
+                  <SortablePluginRow key={plugin.id} plugin={plugin} onToggle={() => togglePlugin(plugin.id)} />
+                ))}
+              </SortableContext>
+            </DndContext>
           </div>
-        </div>
 
-        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-soul-900/10 border border-soul-500/20 text-xs text-soul-300">
-          <Info size={13} className="flex-shrink-0 mt-0.5" />
-          <span>
-            L'ordine di carico mostrato è derivato dalla lista mod. Per l'ordine definitivo usa LOOT dalla
-            pagina Strumenti.
-          </span>
-        </div>
-      </div>
-
-      {/* Table header */}
-      <div className="flex items-center gap-2 px-4 py-2 text-xs font-semibold text-dark-400 uppercase tracking-wide border-b border-dark-800 flex-shrink-0">
-        <div className="w-4" />
-        <div className="w-8 text-center">#</div>
-        <div className="flex-1">Plugin</div>
-        <div className="w-14 text-center">Tipo</div>
-        <div className="w-40 hidden md:block">Mod</div>
-        <div className="w-16 text-center">Stato</div>
-      </div>
-
-      {/* Plugin list */}
-      <div className="flex-1 overflow-y-auto">
-        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={filtered.map((p) => p.id)} strategy={verticalListSortingStrategy}>
-            {filtered.map((plugin) => (
-              <SortablePluginRow key={plugin.id} plugin={plugin} onToggle={() => togglePlugin(plugin.id)} />
-            ))}
-          </SortableContext>
-        </DndContext>
-      </div>
-
-      {/* Footer */}
-      <div className="px-4 py-2 border-t border-dark-800 text-xs text-dark-400 flex-shrink-0">
-        {filtered.length} plugin · Trascina per riordinare
-      </div>
+          {/* Footer */}
+          <div className="px-4 py-2 border-t border-dark-800 text-xs text-dark-400 flex-shrink-0">
+            {filtered.length} plugin · Trascina per riordinare
+          </div>
+        </>
+      )}
     </div>
   )
 }
