@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { buildCatalogRowsFromBackup } from './vortexImport'
+import { buildCatalogRowsFromBackup, removeVortexNameDuplicates, VORTEX_IMPORT_NOTE } from './vortexImport'
+import { type SqliteDb, applyPragmas } from '../db/sqlite'
+import { openTestDb } from '../db/openTestDb'
 
 const mod = (over: Record<string, unknown> = {}) => ({
   modId: 151,
@@ -68,5 +70,53 @@ describe('buildCatalogRowsFromBackup', () => {
     expect(buildCatalogRowsFromBackup({})).toEqual([])
     expect(buildCatalogRowsFromBackup({ deduped: 'nope' })).toEqual([])
     expect(buildCatalogRowsFromBackup({ deduped: [] })).toEqual([])
+  })
+})
+
+describe('removeVortexNameDuplicates', () => {
+  function setup(): SqliteDb {
+    const db = openTestDb()
+    applyPragmas(db)
+    db.exec(`CREATE TABLE modlist_catalog (id INTEGER PRIMARY KEY AUTOINCREMENT,
+      nexus_id INTEGER UNIQUE, name TEXT NOT NULL, category TEXT NOT NULL, notes TEXT);`)
+    return db
+  }
+  const add = (db: SqliteDb, nexus_id: number, name: string, notes: string | null) =>
+    db.prepare('INSERT INTO modlist_catalog (nexus_id, name, category, notes) VALUES (?,?,?,?)').run(nexus_id, name, 'x', notes)
+  const names = (db: SqliteDb) =>
+    (db.prepare('SELECT nexus_id, name FROM modlist_catalog ORDER BY nexus_id').all() as { nexus_id: number; name: string }[])
+
+  it('drops the CURATED row and keeps the Vortex row on a cross-source name collision', () => {
+    const db = setup()
+    add(db, 1137, 'SkyUI', null) // curated seed, placeholder id
+    add(db, 12604, 'SkyUI', `${VORTEX_IMPORT_NOTE} (Mon Skyril)`) // vortex, real id
+    const removed = removeVortexNameDuplicates(db)
+    expect(removed).toBe(1)
+    expect(names(db)).toEqual([{ nexus_id: 12604, name: 'SkyUI' }]) // authoritative id kept
+  })
+
+  it('is case/space-insensitive on the name match', () => {
+    const db = setup()
+    add(db, 100, '  True   Directional Movement ', null)
+    add(db, 51614, 'true directional movement', `${VORTEX_IMPORT_NOTE}`)
+    expect(removeVortexNameDuplicates(db)).toBe(1)
+    expect(names(db)).toEqual([{ nexus_id: 51614, name: 'true directional movement' }])
+  })
+
+  it('does NOT touch within-Vortex generic-name collisions (distinct mods)', () => {
+    const db = setup()
+    add(db, 71227, 'Main File', `${VORTEX_IMPORT_NOTE} (A)`)
+    add(db, 81017, 'Main File', `${VORTEX_IMPORT_NOTE} (B)`)
+    add(db, 161963, 'Main File', `${VORTEX_IMPORT_NOTE} (C)`)
+    expect(removeVortexNameDuplicates(db)).toBe(0)
+    expect(names(db)).toHaveLength(3)
+  })
+
+  it('leaves a curated row with no Vortex twin untouched', () => {
+    const db = setup()
+    add(db, 555, 'Some Curated Only Mod', null)
+    add(db, 12604, 'SkyUI', `${VORTEX_IMPORT_NOTE}`)
+    expect(removeVortexNameDuplicates(db)).toBe(0)
+    expect(names(db)).toHaveLength(2)
   })
 })

@@ -673,6 +673,7 @@ export const mockApi = {
     seed: async () => ({ inserted: catalog.length }),
     // Preview stub: no Vortex backup on disk in the browser mock.
     importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
+    dedupe: async () => ({ success: true as const, removed: 0, total: catalog.length }),
     // Preview stub: the real backend fetches a signed remote catalog and replaces
     // modlist_catalog wholesale. Here there is no signed endpoint, so mirror the
     // real "URL non configurato" no-throw failure the packaged app returns when

@@ -15,7 +15,7 @@ import { runMigrations } from './db/migrations'
 import { setSecret, getSecret, hasSecret, type SecretCrypto } from './db/secrets'
 import { initDeltaEngine, onDeltaDownloadComplete, onDeltaDownloadFailed } from './delta/engine'
 import { initCatalogEngine, triggerBootCatalogUpdate } from './catalog/engine'
-import { buildCatalogRowsFromBackup } from './catalog/vortexImport'
+import { buildCatalogRowsFromBackup, removeVortexNameDuplicates } from './catalog/vortexImport'
 import { initInstallEngine } from './install/engine'
 import { initDeployEngine } from './deploy/engine'
 import { recoverOnStartup } from './delta/journal'
@@ -1476,10 +1476,25 @@ ipcMain.handle('catalog:import-vortex', () => {
     for (const r of rs) insert.run(r as unknown as Record<string, unknown>)
   })
   tx(rows)
+  // Remove cross-source name duplicates (curated placeholder-id row vs the Vortex real-id row),
+  // so a fresh import lands a clean list. Within-Vortex generic-name collisions are left intact.
+  const deduped = removeVortexNameDuplicates(db)
   const after = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
-  const imported = after - before
-  logger.info('catalog', `import Vortex: ${rows.length} candidati → ${imported} nuovi (totale ${after}) da ${src}`)
-  return { success: true, candidates: rows.length, imported, total: after }
+  const imported = after + deduped - before
+  logger.info(
+    'catalog',
+    `import Vortex: ${rows.length} candidati → ${imported} nuovi, ${deduped} doppioni rimossi (totale ${after}) da ${src}`,
+  )
+  return { success: true, candidates: rows.length, imported, deduped, total: after }
+})
+
+// Standalone dedupe for a catalog that already contains the cross-source duplicates (e.g. imported
+// before this fix). Removes the curated placeholder-id row when a Vortex real-id row shares its name.
+ipcMain.handle('catalog:dedupe', () => {
+  const removed = removeVortexNameDuplicates(getRawDb())
+  const total = (getRawDb().prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
+  logger.info('catalog', `dedupe catalogo: ${removed} doppioni rimossi (totale ${total})`)
+  return { success: true, removed, total }
 })
 
 // ─── Downloads IPC ────────────────────────────────────────────────────────────

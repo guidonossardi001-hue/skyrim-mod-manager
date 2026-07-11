@@ -2,7 +2,13 @@
 // array is the de-duplicated, cross-collection-merged modlist (~4568 mods) — the "compatible"
 // set the download/mass-sync pipeline already uses. This maps it into the curated-catalog row
 // shape so the Catalog page can show the full modlist, not just the ~122 bundled essentials.
-// Pure & Electron-free so the mapping/filtering is unit-testable in isolation.
+// The mapping/filtering (buildCatalogRowsFromBackup) is pure & Electron-free. The dedupe helper
+// operates on the SqliteDb interface (type-only import) so it stays unit-testable with node:sqlite.
+import type { SqliteDb } from '../db/sqlite'
+
+// Marker written into modlist_catalog.notes for every Vortex-imported row. Used to tell a
+// Vortex-origin row (sparse metadata, AUTHORITATIVE Nexus id) from a curated seed row.
+export const VORTEX_IMPORT_NOTE = 'Importato dal backup Vortex'
 
 export interface VortexBackupMod {
   modId?: number
@@ -62,10 +68,37 @@ export function buildCatalogRowsFromBackup(backup: unknown): CatalogRow[] {
       tags: '[]',
       size_mb: Math.round(sizeBytes / (1024 * 1024)),
       has_it_translation: 0,
-      notes: `Importato dal backup Vortex${typeof m.collection === 'string' && m.collection ? ` (${m.collection})` : ''}`,
+      notes: `${VORTEX_IMPORT_NOTE}${typeof m.collection === 'string' && m.collection ? ` (${m.collection})` : ''}`,
       conflicts_with: '[]',
       requires: '[]',
     })
   }
   return rows
+}
+
+/**
+ * Remove cross-source name duplicates: a curated seed row and a Vortex-imported row that share a
+ * name are the SAME mod, but the seed's hand-authored nexus_id is often a placeholder (e.g. SkyUI
+ * seed#1137 vs the real #12604) while the Vortex id comes from a real install and is authoritative
+ * for downloads. So drop the CURATED row and keep the Vortex one. Within-Vortex name collisions
+ * (generic file names like "Main File" across genuinely distinct mods) are deliberately left alone.
+ * Returns the number of duplicate rows removed.
+ */
+export function removeVortexNameDuplicates(db: SqliteDb): number {
+  // Normalize names in JS (case + full internal-whitespace collapse) — SQLite's trim() can't
+  // collapse internal runs, and the collision detection must match the import-time normalization.
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
+  const isVortex = (notes: string | null) => !!notes && notes.startsWith(VORTEX_IMPORT_NOTE)
+  const rows = db.prepare('SELECT id, name, notes FROM modlist_catalog').all() as {
+    id: number
+    name: string
+    notes: string | null
+  }[]
+  const vortexNames = new Set<string>()
+  for (const r of rows) if (isVortex(r.notes)) vortexNames.add(norm(r.name))
+  const toDelete = rows.filter((r) => !isVortex(r.notes) && vortexNames.has(norm(r.name)))
+  if (!toDelete.length) return 0
+  const del = db.prepare('DELETE FROM modlist_catalog WHERE id = ?')
+  for (const r of toDelete) del.run(r.id)
+  return toDelete.length
 }

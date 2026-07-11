@@ -51,6 +51,7 @@ export default function Catalog() {
   const [checkingAll, setCheckingAll] = useState(false)
   const [updatingCatalog, setUpdatingCatalog] = useState(false)
   const [importingVortex, setImportingVortex] = useState(false)
+  const [deduping, setDeduping] = useState(false)
   // Multi-select for the dependency resolver. Kept as a stable Set reference across
   // renders (updated only on toggle) so the resolver drawer never resets spuriously.
   const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
@@ -251,9 +252,10 @@ export default function Catalog() {
       const res = await window.api.catalog.importVortex()
       if (res.success) {
         await loadCatalog()
+        const dd = res.deduped ? `, ${res.deduped} doppioni rimossi` : ''
         toast.success(
           'Modlist importata',
-          `${res.imported ?? 0} nuove mod dal backup Vortex (totale ${res.total ?? 0})`,
+          `${res.imported ?? 0} nuove mod dal backup Vortex${dd} (totale ${res.total ?? 0})`,
         )
       } else {
         toast.error('Import Vortex fallito', res.error ?? 'errore sconosciuto')
@@ -262,6 +264,25 @@ export default function Catalog() {
       toast.error('Import Vortex fallito', (e as Error).message)
     } finally {
       setImportingVortex(false)
+    }
+  }
+
+  // Remove cross-source name duplicates (curated placeholder-id row vs the Vortex real-id row).
+  const dedupeCatalog = async () => {
+    setDeduping(true)
+    try {
+      const res = await window.api.catalog.dedupe()
+      if (res.success) {
+        await loadCatalog()
+        if (res.removed) toast.success('Doppioni rimossi', `${res.removed} mod duplicate eliminate (totale ${res.total ?? 0})`)
+        else toast.info('Nessun doppione', 'Il catalogo non ha duplicati cross-source')
+      } else {
+        toast.error('Rimozione doppioni fallita', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Rimozione doppioni fallita', (e as Error).message)
+    } finally {
+      setDeduping(false)
     }
   }
 
@@ -317,6 +338,22 @@ export default function Catalog() {
                 <Boxes size={12} /> Risolvi dipendenze ({selectedNexusIds.size})
               </button>
             )}
+            <button
+              onClick={dedupeCatalog}
+              disabled={deduping}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Rimuovi le mod duplicate (stesso nome tra seed curato e import Vortex)"
+            >
+              {deduping ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Pulizia...
+                </>
+              ) : (
+                <>
+                  <X size={12} /> Rimuovi doppioni
+                </>
+              )}
+            </button>
             <button
               onClick={importVortex}
               disabled={importingVortex}

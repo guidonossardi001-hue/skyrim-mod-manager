@@ -198,9 +198,12 @@ declare global {
           success: boolean
           candidates?: number
           imported?: number
+          deduped?: number
           total?: number
           error?: string
         }>
+        // Remove cross-source name duplicates from the catalog. Never rejects.
+        dedupe(): Promise<{ success: boolean; removed?: number; total?: number; error?: string }>
         // Fetch + verify + atomically replace the reference catalog from the
         // signed remote source. url is optional (main process falls back to its
         // configured default). Never rejects — inspect success/errorKind.

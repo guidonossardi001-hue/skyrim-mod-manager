@@ -68,6 +68,8 @@ contextBridge.exposeInMainWorld('api', {
     // Import the full de-duplicated modlist (~4568 mods) from the Vortex backup into the
     // catalog, without overwriting curated rows. Resolves to { success, imported, total, ... }.
     importVortex: () => invoke('catalog:import-vortex'),
+    // Remove cross-source name duplicates (curated placeholder-id row vs the Vortex real-id row).
+    dedupe: () => invoke('catalog:dedupe'),
     // Fetch the signed reference catalog (URL optional — falls back to the
     // main-process NOLVUS_MOD_CATALOG_URL config) and ingest it. Always resolves
     // to a CatalogIngestResult, never rejects (no-throw boundary end to end).
