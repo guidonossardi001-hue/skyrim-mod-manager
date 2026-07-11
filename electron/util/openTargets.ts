@@ -1,4 +1,4 @@
-import { extname, resolve } from 'path'
+import { extname, resolve, join, isAbsolute } from 'path'
 import { isPathInside } from '../install/extract'
 
 // Security core for the "open a folder / reveal a downloaded file" IPC surface.
@@ -95,4 +95,35 @@ export function validateOpenPath(
     return { ok: false, reason: 'percorso fuori dalle cartelle autorizzate' }
   }
   return { ok: true, path: p }
+}
+
+/**
+ * Resolve a directory-listing target for the intent-based fs:read-dir. The renderer names a
+ * folder `kind` (never an absolute path); an optional RELATIVE subpath may descend within that
+ * ONE root. The result is confined to the kind's own root (not just "some authorized root"):
+ * a read-dir of 'backups' can never wander into 'mods'. `..` and symlink/junction escapes are
+ * defeated by canonicalizing (realpath) both base and target before the containment check.
+ */
+export function resolveReadDir(
+  kind: unknown,
+  roots: RevealRoots,
+  subpath: string | undefined,
+  probe: RevealProbe,
+): OpenDecision {
+  const base = revealDirForKind(kind, roots)
+  if (!base) return { ok: false, reason: 'cartella non disponibile' }
+  if (subpath !== undefined && subpath !== '') {
+    if (typeof subpath !== 'string') return { ok: false, reason: 'subpath non valido' }
+    // An absolute or UNC subpath would ignore `base` entirely once join'd — refuse outright.
+    if (isAbsolute(subpath) || /^\\\\/.test(subpath) || /^\/\//.test(subpath)) {
+      return { ok: false, reason: 'subpath assoluto non consentito' }
+    }
+  }
+  const target = subpath ? join(base, subpath) : base
+  const cBase = canonical(base, probe)
+  const cTarget = canonical(target, probe)
+  if (!isPathInside(cBase, cTarget)) {
+    return { ok: false, reason: 'percorso fuori dalla cartella autorizzata' }
+  }
+  return { ok: true, path: cTarget }
 }

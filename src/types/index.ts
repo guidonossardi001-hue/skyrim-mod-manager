@@ -268,10 +268,14 @@ declare global {
       fs: {
         pickDirectory(title?: string): Promise<string | null>
         pickFile(title?: string, filters?: unknown[]): Promise<string | null>
-        exists(path: string): Promise<boolean>
         readDir(
-          path: string,
-        ): Promise<Array<{ name: string; path: string; isDirectory: boolean; size: number }>>
+          kind: string,
+          subpath?: string,
+        ): Promise<{
+          ok: boolean
+          error?: string
+          entries: Array<{ name: string; isDirectory: boolean; size: number }>
+        }>
         revealFolder(kind: string): Promise<{ success: boolean; error?: string }>
         openDownload(downloadId: number): Promise<{ success: boolean; error?: string }>
         openExternal(url: string): Promise<void>

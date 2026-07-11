@@ -58,6 +58,7 @@ import { sanitizePathSegment } from './util/paths'
 import {
   revealDirForKind,
   validateOpenPath,
+  resolveReadDir,
   type RevealRoots,
   type RevealProbe,
 } from './util/openTargets'
@@ -1541,26 +1542,33 @@ ipcMain.handle('fs:pick-file', async (_e, title?: string, filters?: Electron.Fil
   return result.canceled ? null : result.filePaths[0]
 })
 
-ipcMain.handle('fs:exists', (_e, path: string) => existsSync(path))
-
-// Async + one stat per entry via Dirent: a big directory no longer freezes the
-// main process the way the old readdirSync/statSync-per-file version did.
-ipcMain.handle('fs:read-dir', async (_e, path: string) => {
+// Intent-based directory listing (confines the old whole-disk read-dir oracle). The renderer
+// names a whitelisted folder `kind` (never a path); an optional RELATIVE subpath may descend
+// within that one root, with `..`/symlink escapes rejected by resolveReadDir (realpath +
+// containment). Entry names/sizes only — the absolute path is not returned to the renderer.
+// Async + one stat per entry via Dirent so a big directory never freezes the main process.
+ipcMain.handle('fs:read-dir', async (_e, kind: string, subpath?: string) => {
+  const decision = resolveReadDir(kind, revealRoots(), subpath, revealProbe)
+  if (!decision.ok) {
+    logger.warn('security', `fs:read-dir rifiutato (${decision.reason}): kind=${String(kind).slice(0, 40)}`)
+    return { ok: false, error: decision.reason, entries: [] }
+  }
   try {
-    const entries = await readdir(path, { withFileTypes: true })
-    return await Promise.all(
+    const entries = await readdir(decision.path, { withFileTypes: true })
+    const out = await Promise.all(
       entries.map(async (d) => {
-        const full = join(path, d.name)
-        const size = d.isDirectory()
+        const isDirectory = d.isDirectory()
+        const size = isDirectory
           ? 0
-          : await stat(full)
+          : await stat(join(decision.path, d.name))
               .then((s) => s.size)
               .catch(() => 0)
-        return { name: d.name, path: full, isDirectory: d.isDirectory(), size }
+        return { name: d.name, isDirectory, size }
       }),
     )
-  } catch {
-    return []
+    return { ok: true, entries: out }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message, entries: [] }
   }
 })
 

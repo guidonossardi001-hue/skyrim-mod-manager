@@ -6,6 +6,7 @@ import {
   revealDirForKind,
   allowedRoots,
   validateOpenPath,
+  resolveReadDir,
   type RevealRoots,
   type RevealProbe,
 } from './openTargets'
@@ -104,5 +105,48 @@ describe('validateOpenPath', () => {
       realpath: (p) => (p === fake ? 'C:\\Windows\\System32\\evil.7z' : p),
     }
     expect(validateOpenPath(fake, roots, escaping)).toMatchObject({ ok: false })
+  })
+})
+
+describe('resolveReadDir (intent-based directory listing)', () => {
+  it('resolves a whitelisted kind to its own root', () => {
+    expect(resolveReadDir('backups', roots, undefined, idProbe)).toEqual({ ok: true, path: roots.backups })
+    expect(resolveReadDir('logs', roots, undefined, idProbe)).toEqual({ ok: true, path: roots.logs })
+  })
+
+  it('rejects an unknown or unconfigured kind', () => {
+    expect(resolveReadDir('bogus', roots, undefined, idProbe)).toMatchObject({ ok: false })
+    expect(resolveReadDir('C:\\Windows', roots, undefined, idProbe)).toMatchObject({ ok: false })
+    expect(resolveReadDir('game', { ...roots, game: null }, undefined, idProbe)).toMatchObject({ ok: false })
+  })
+
+  it('allows a relative subpath that stays inside the kind root', () => {
+    const d = resolveReadDir('mods', roots, 'SomeMod\\meshes', idProbe)
+    expect(d.ok).toBe(true)
+    if (d.ok) expect(d.path).toBe(join(roots.mods, 'SomeMod', 'meshes'))
+  })
+
+  it('rejects a ../ subpath that escapes the kind root', () => {
+    expect(resolveReadDir('mods', roots, '..\\..\\Windows', idProbe)).toMatchObject({ ok: false })
+    expect(resolveReadDir('backups', roots, '../downloads', idProbe)).toMatchObject({ ok: false })
+  })
+
+  it('rejects an absolute or UNC subpath', () => {
+    expect(resolveReadDir('mods', roots, 'C:\\Windows\\System32', idProbe)).toMatchObject({ ok: false })
+    expect(resolveReadDir('mods', roots, '\\\\server\\share', idProbe)).toMatchObject({ ok: false })
+  })
+
+  it('confines to the SPECIFIC kind root (backups cannot reach mods)', () => {
+    // Even though mods is also whitelisted, a backups listing must not resolve into it.
+    const d = resolveReadDir('backups', roots, '..\\mods', idProbe)
+    expect(d.ok).toBe(false)
+  })
+
+  it('rejects a subpath whose REAL target escapes via a junction', () => {
+    const escaping: RevealProbe = {
+      exists: () => true,
+      realpath: (p) => (p === join(roots.mods, 'evil') ? 'C:\\Windows\\System32' : p),
+    }
+    expect(resolveReadDir('mods', roots, 'evil', escaping)).toMatchObject({ ok: false })
   })
 })

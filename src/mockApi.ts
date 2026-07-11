@@ -804,8 +804,7 @@ export const mockApi = {
         return def
       }
     },
-    exists: async (p: string) => !!p,
-    readDir: async () => [],
+    readDir: async () => ({ ok: true, entries: [] }),
     revealFolder: async (kind: string) => {
       console.info('[mock] revealFolder:', kind)
       return { success: true }

@@ -103,8 +103,9 @@ contextBridge.exposeInMainWorld('api', {
   fs: {
     pickDirectory: (title?: string) => invoke('fs:pick-directory', title),
     pickFile: (title?: string, filters?: unknown[]) => invoke('fs:pick-file', title, filters),
-    exists: (path: string) => invoke('fs:exists', path),
-    readDir: (path: string) => invoke('fs:read-dir', path),
+    // Intent-based listing: name a whitelisted folder `kind` (+ optional relative subpath),
+    // never a raw path. The main process confines the read to that root (../ + symlink safe).
+    readDir: (kind: string, subpath?: string) => invoke('fs:read-dir', kind, subpath),
     // Intent-based opening: the renderer names a whitelisted folder `kind` or a numeric
     // download id — never a raw path. The main process resolves the concrete path, so a
     // compromised renderer cannot open (or execute) an arbitrary local file.
