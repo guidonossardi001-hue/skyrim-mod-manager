@@ -10,8 +10,8 @@
 // SELF-TEST (abort mid-stream, then resume from .part) to prove big files survive a
 // dropped connection without corruption.
 //
-// Real-time logs go to stdout AND data/e2e/batch.log. Key from secrets/nexus.key
-// or $NEXUS_API_KEY (never printed, never committed).
+// Real-time logs go to stdout AND data/e2e/batch.log. Key ONLY from $NEXUS_API_KEY
+// (the plaintext secrets/nexus.key fallback is dismesso). Never printed, never committed.
 //
 //   node scripts/e2e_batch.mjs            # discover + run the batch
 //   node scripts/e2e_batch.mjs --plan     # discovery only (no downloads)

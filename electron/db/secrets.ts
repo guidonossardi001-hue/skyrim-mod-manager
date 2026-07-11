@@ -22,13 +22,26 @@ export function setSecret(db: SqliteDb, name: string, plaintext: string, crypto:
   ).run(name, value)
 }
 
-/** Read and decrypt a named secret, or null if absent/empty/undecryptable. */
+/**
+ * Read and decrypt a named secret, or null if absent/empty/undecryptable.
+ *
+ * The decrypt is wrapped so a ciphertext that cannot be decrypted (e.g. the DB was
+ * copied to another machine/user — OS-bound DPAPI/Keychain keys don't travel) surfaces
+ * as a clean null instead of throwing. Callers then behave exactly as "no key set":
+ * the UI shows an empty field and the user re-enters, which UPSERTs over the stale row.
+ * That is the graceful "reset + re-prompt, no crash" path — robust regardless of whether
+ * the injected crypto reports failure by returning '' or by throwing.
+ */
 export function getSecret(db: SqliteDb, name: string, crypto: SecretCrypto): string | null {
   const row = db.prepare('SELECT value FROM app_secrets WHERE name=?').get(name) as
     { value: string } | undefined
   if (!row) return null
-  const plain = crypto.decrypt(row.value)
-  return plain || null
+  try {
+    const plain = crypto.decrypt(row.value)
+    return plain || null
+  } catch {
+    return null
+  }
 }
 
 export function hasSecret(db: SqliteDb, name: string): boolean {

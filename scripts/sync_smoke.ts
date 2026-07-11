@@ -3,7 +3,7 @@
 // on ONE small real mod, printing every SyncProgress object. These printed objects ARE
 // the payloads main.ts forwards verbatim on `mainWindow.webContents.send('sync:progress', s)`.
 // Headless (no GUI) because the full GUI sync is gated behind the user's click + the key in
-// app_secrets; here the key is read from secrets/nexus.key. Extracts into a TEMP StockGame.
+// app_secrets; here the key is read ONLY from $NEXUS_API_KEY. Extracts into a TEMP StockGame.
 import { runMassSync, type MassSyncDeps } from '../electron/sync/massSync'
 import { streamToFile, type HttpGet } from '../electron/install/downloadStream'
 import { resolveDownloadLink, type HttpGetJson } from '../electron/nexus/downloadLink'

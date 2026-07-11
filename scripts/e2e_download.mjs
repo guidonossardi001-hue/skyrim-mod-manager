@@ -9,7 +9,8 @@
 //   4. extract with the bundled full 7-Zip into the isolated StockGame mods dir
 //   5. validate extraction: `7z t` integrity test + non-empty output tree
 //
-// SECURITY: the API key is read from $NEXUS_API_KEY or secrets/nexus.key (gitignored).
+// SECURITY: the API key is read ONLY from $NEXUS_API_KEY (or a local .env). The old
+// plaintext secrets/nexus.key fallback is dismesso — no code reads that file anymore.
 // It is NEVER printed, NEVER written to the repo. Run with no key for a dry-run that
 // only does target selection (steps 0–1 preview) and then halts with instructions.
 //

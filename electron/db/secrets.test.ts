@@ -64,4 +64,41 @@ describe('app_secrets store (encrypted Nexus API key persistence)', () => {
   it('returns null for an unknown secret', () => {
     expect(getSecret(db, 'missing', crypto)).toBeNull()
   })
+
+  // Requirement #3 — graceful reset when a stored ciphertext can no longer be decrypted
+  // (DB moved to another PC/user: OS-bound DPAPI/Keychain key is gone). The row is present
+  // but undecryptable; the app must surface "no key", never crash, and let the user re-enter.
+  describe('decrypt failure (moved-to-another-PC) is handled gracefully', () => {
+    // safeStorage.decryptString surfaces failure two ways depending on the value; the
+    // main-process adapter catches and returns '', but the store must be robust to either.
+    const failReturnsEmpty: SecretCrypto = { encrypt: crypto.encrypt, decrypt: () => '' }
+    const failThrows: SecretCrypto = {
+      encrypt: crypto.encrypt,
+      decrypt: () => {
+        throw new Error('DPAPI: cannot decrypt on this machine')
+      },
+    }
+
+    it('surfaces null (not the ciphertext, not a throw) when decrypt yields empty', () => {
+      setSecret(db, 'nexusApiKey', 'real-key-from-pc-A', crypto)
+      expect(() => getSecret(db, 'nexusApiKey', failReturnsEmpty)).not.toThrow()
+      expect(getSecret(db, 'nexusApiKey', failReturnsEmpty)).toBeNull()
+    })
+
+    it('surfaces null (does not propagate) when decrypt throws', () => {
+      setSecret(db, 'nexusApiKey', 'real-key-from-pc-A', crypto)
+      expect(() => getSecret(db, 'nexusApiKey', failThrows)).not.toThrow()
+      expect(getSecret(db, 'nexusApiKey', failThrows)).toBeNull()
+    })
+
+    it('re-entering a key UPSERTs over the undecryptable row (reset-on-re-entry)', () => {
+      setSecret(db, 'nexusApiKey', 'stale-key-from-pc-A', crypto)
+      // On PC B the old row is undecryptable → reads as null → user re-enters a fresh key.
+      expect(getSecret(db, 'nexusApiKey', failThrows)).toBeNull()
+      setSecret(db, 'nexusApiKey', 'fresh-key-on-pc-B', crypto)
+      expect(getSecret(db, 'nexusApiKey', crypto)).toBe('fresh-key-on-pc-B')
+      // No orphaned duplicate: the reset overwrote in place.
+      expect((db.prepare('SELECT COUNT(*) c FROM app_secrets').get() as { c: number }).c).toBe(1)
+    })
+  })
 })

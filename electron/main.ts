@@ -1434,7 +1434,16 @@ ipcMain.handle('nexus:validate-key', async (_e, apiKey?: string) => {
     const res = await axios.get('https://api.nexusmods.com/v1/users/validate.json', {
       headers: { apikey: key, 'User-Agent': 'SkyrimAEModManager/1.0' },
     })
-    return { success: true, data: res.data }
+    // NEVER return res.data raw: the Nexus validate endpoint echoes the submitted
+    // API key back in res.data.key (plus the account email), so forwarding the raw
+    // body would hand the plaintext secret to the renderer on every "Verifica" click
+    // — defeating the whole main-side secret store. Whitelist non-secret display
+    // fields only (same contract as the mock provider); drop key/email/user_id.
+    const d = (res.data ?? {}) as Record<string, unknown>
+    return {
+      success: true,
+      data: { name: d.name, is_premium: d.is_premium, is_supporter: d.is_supporter },
+    }
   } catch {
     return { success: false }
   }
