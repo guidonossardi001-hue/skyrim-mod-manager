@@ -21,45 +21,63 @@ function catalogHosts(): string[] {
 
 let service: CatalogService | null = null
 
+// fetch (network, may fail) → ingest (verify+validate+commit, already no-throw).
+// Shared by the catalog:update IPC handler and the boot-time auto-refresh below.
+// Every path returns a CatalogIngestResult — nothing throws.
+async function runCatalogUpdate(url?: string): Promise<CatalogIngestResult> {
+  if (!service) return { success: false, errorKind: 'db', error: 'catalog engine non inizializzato' }
+  const target = resolveModCatalogUrl(url)
+  if (!target) {
+    logger.warn('catalog', 'catalog:update: nessun URL configurato (NOLVUS_MOD_CATALOG_URL)')
+    return { success: false, errorKind: 'network', error: 'URL catalogo non configurato' }
+  }
+
+  let signed
+  try {
+    signed = await fetchSignedCatalog(target, { allowedHosts: catalogHosts() })
+  } catch (e) {
+    logger.warn('catalog', `fetch catalogo fallito: ${(e as Error).message}`)
+    return { success: false, errorKind: 'network', error: (e as Error).message }
+  }
+
+  try {
+    const res = service.ingest(signed)
+    if (res.success)
+      logger.info(
+        'catalog',
+        `catalogo remoto ingerito da ${target} (v${res.version}${res.reused ? ', riusato' : ''})`,
+      )
+    return res
+  } catch (e) {
+    // Defense-in-depth: ingest() is already no-throw by contract, but an
+    // unexpected error from a dependency must still not cross the boundary.
+    logger.warn('catalog', `catalog:update fallito inatteso: ${(e as Error).message}`)
+    return { success: false, errorKind: 'db', error: (e as Error).message }
+  }
+}
+
+/**
+ * Fire-and-forget boot refresh: pull the signed catalog on startup so the DB is
+ * not stuck on the bundled seed. NEVER blocks boot and never throws — a missing
+ * URL or a network failure is logged and left as a no-op (the seed stays live).
+ * The renderer can still trigger a manual catalog:update later.
+ */
+export function triggerBootCatalogUpdate(): void {
+  void runCatalogUpdate().catch((e) =>
+    logger.warn('catalog', `auto-update boot fallito: ${(e as Error).message}`),
+  )
+}
+
 export function initCatalogEngine(db: SqliteDb) {
   service = new CatalogService(db, {
     publicKeyPem: pinnedPublicKey(),
     log: (level, msg) => (level === 'warn' ? logger.warn('catalog', msg) : logger.info('catalog', msg)),
   })
 
-  // catalog:update = fetch (network, may fail) → ingest (verify+validate+commit,
-  // already no-throw). Every path returns a CatalogIngestResult — nothing thrown
-  // across the IPC boundary, ever.
-  ipcMain.handle('catalog:update', async (_e, url?: string): Promise<CatalogIngestResult> => {
-    const target = resolveModCatalogUrl(url)
-    if (!target) {
-      logger.warn('catalog', 'catalog:update: nessun URL configurato (NOLVUS_MOD_CATALOG_URL)')
-      return { success: false, errorKind: 'network', error: 'URL catalogo non configurato' }
-    }
-
-    let signed
-    try {
-      signed = await fetchSignedCatalog(target, { allowedHosts: catalogHosts() })
-    } catch (e) {
-      logger.warn('catalog', `fetch catalogo fallito: ${(e as Error).message}`)
-      return { success: false, errorKind: 'network', error: (e as Error).message }
-    }
-
-    try {
-      const res = service!.ingest(signed)
-      if (res.success)
-        logger.info(
-          'catalog',
-          `catalogo remoto ingerito da ${target} (v${res.version}${res.reused ? ', riusato' : ''})`,
-        )
-      return res
-    } catch (e) {
-      // Defense-in-depth: ingest() is already no-throw by contract, but an
-      // unexpected error from a dependency must still not cross the IPC boundary.
-      logger.warn('catalog', `catalog:update fallito inatteso: ${(e as Error).message}`)
-      return { success: false, errorKind: 'db', error: (e as Error).message }
-    }
-  })
+  // catalog:update = fetch → ingest. No-throw across the IPC boundary, ever.
+  ipcMain.handle('catalog:update', (_e, url?: string): Promise<CatalogIngestResult> =>
+    runCatalogUpdate(url),
+  )
 
   // catalog:resolve-plan = pure dependency resolution against the loaded catalog.
   // resolveInstallPlan is already a no-throw boundary; the extra try/catch here is
