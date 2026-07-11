@@ -385,6 +385,23 @@ export default function Settings() {
               <option value="4K">4K — qualità massima</option>
             </select>
           </div>
+          <label
+            className="flex items-start gap-3 cursor-pointer select-none pt-1"
+            title="Se una mod ha una traduzione italiana mappata, il mass-installer la scarica e la sovrappone nella stessa cartella (Fase B) sullo stesso slot di coda. Fail-soft: se la traduzione fallisce, la mod resta installata in inglese."
+          >
+            <input
+              type="checkbox"
+              checked={local.enableAutoTranslate !== false}
+              onChange={(e) => setLocal((l) => ({ ...l, enableAutoTranslate: e.target.checked }))}
+              className="mt-0.5 accent-soul-500"
+            />
+            <span className="text-sm text-dark-200">
+              Applica automaticamente le traduzioni ITA (overlay a due fasi)
+              <span className="block text-xs text-dark-400">
+                Fail-soft: se la traduzione non è disponibile, la mod resta installata in inglese.
+              </span>
+            </span>
+          </label>
         </div>
       </Section>
 

@@ -247,6 +247,7 @@ const DEFAULT_SETTINGS: Record<string, unknown> = {
   downloadRetries: 3,
   errorThreshold: 50,
   textureQualityProfile: '4K',
+  enableAutoTranslate: true,
 }
 
 // ─── Caricamento / persistenza ───────────────────────────────────────────────

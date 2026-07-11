@@ -77,6 +77,14 @@ export interface MassSyncDeps {
     onProgress: (p: number) => void,
     signal: AbortSignal,
   ): Promise<{ method: string }>
+  // Extract an archive INTO an existing dir, OVERWRITING matching files but keeping the rest
+  // (merge/overlay). Used for Phase B: an ITA translation dropped on top of the base mod.
+  extractOverlay?(
+    archive: string,
+    destDir: string,
+    onProgress: (p: number) => void,
+    signal: AbortSignal,
+  ): Promise<{ method: string }>
   exists(p: string): boolean
   ensureDir(p: string): void
   remove(p: string): void // file OR dir (rmSync recursive/force) — archive cleanup + partial-extract cleanup
@@ -102,6 +110,10 @@ export interface MassSyncConfig {
   safetyFactor?: number // cross-disk headroom on the estimate (default 1.15; same-disk uses SAME_DISK_EXTRACT_FACTOR)
   skipDiskCheck?: boolean // bypass the aggregate disk pre-flight (tests / explicit override)
   textureProfile?: TextureProfile // 2K/4K quality profile; selects per-mod variant (default 4K)
+  // Best-effort ITA translation: when enabled and translationOf returns a mapping, a second phase
+  // extracts the translation OVER the base mod in the same worker slot (see processOne Phase B).
+  enableAutoTranslate?: boolean // default true
+  translationOf?: (modId: number) => { nexus_id: number; file_id: number | null; md5: string | null } | null
   onProgress?: (s: SyncProgress) => void
   onLog?: (m: string) => void
   now?: () => number // injectable clock (default Date.now) for throughput/ETA + tests
@@ -403,6 +415,65 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
       },
       cfg.signal,
     )
+
+    // ── Phase B: best-effort ITA translation override (SAME slot, sequential) ───────────────────
+    // If auto-translate is on and a mapping exists, download the ITA patch and extract it OVER the
+    // base mod (overwrite matching files, keep the rest). FAIL-SOFT: any error here leaves the base
+    // install intact and the mod still counts as 'done' — it NEVER aborts the run, except on a real
+    // user cancel (cfg.signal.aborted), which must propagate. Same worker slot ⇒ no extra
+    // concurrency, no race between base and its translation.
+    if (cfg.enableAutoTranslate !== false && cfg.translationOf && deps.extractOverlay) {
+      const tr = cfg.translationOf(m.modId)
+      if (tr && tr.file_id) {
+        try {
+          slot.phase = 'downloading'
+          slot.downloaded = 0
+          slot.percent = 0
+          emit(true)
+          const turl = await deps.resolveLink(tr.nexus_id, tr.file_id)
+          const tArchive = join(
+            cfg.downloadsDir,
+            sanitize(filenameFromUrl(turl, `trans_${tr.nexus_id}_${tr.file_id}.7z`)),
+          )
+          await deps.streamDownload(
+            turl,
+            tArchive,
+            (d, t) => {
+              slot.downloaded = d
+              slot.total = t || slot.total
+              slot.percent = t > 0 ? Math.round((d / t) * 100) : 0
+              emit()
+            },
+            cfg.signal,
+          )
+          if (cfg.signal.aborted) throw new Error('annullato')
+          if (tr.md5) {
+            slot.phase = 'verifying'
+            emit(true)
+            const got = await deps.md5(tArchive)
+            if (got.toLowerCase() !== tr.md5.toLowerCase())
+              throw new Error(`md5 traduzione non combacia (atteso ${tr.md5.slice(0, 12)}…)`)
+          }
+          slot.phase = 'extracting'
+          slot.percent = 0
+          emit(true)
+          await deps.extractOverlay(
+            tArchive,
+            destDir,
+            (p) => {
+              slot.percent = p
+              emit()
+            },
+            cfg.signal,
+          )
+          cfg.onLog?.(`✔ traduzione ITA applicata: ${m.name}`)
+        } catch (e) {
+          if (cfg.signal.aborted) throw e // a genuine user cancel must still stop the run
+          // FAIL-SOFT: base stays installed (English); the mod is still 'done'.
+          cfg.onLog?.(`⚠ traduzione ITA non applicata a ${m.name} (fail-soft): ${(e as Error).message}`)
+        }
+      }
+    }
     return 'done'
   }
 

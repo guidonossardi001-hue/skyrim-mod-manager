@@ -41,7 +41,9 @@ export function baseNameOfTranslation(name: string): string {
  * each translation mod to a base mod by normalized base-name. Confident 1:1 pairs only — a
  * translation whose base name doesn't match any base mod is skipped (no guess).
  */
-export function pairBackupTranslations(mods: Array<{ modId: number; name: string }>): TranslationRef[] {
+export function pairBackupTranslations(
+  mods: Array<{ modId: number; name: string; fileId?: number; md5?: string }>,
+): TranslationRef[] {
   const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim()
   const baseByName = new Map<string, number>()
   for (const m of mods) {
@@ -58,7 +60,13 @@ export function pairBackupTranslations(mods: Array<{ modId: number; name: string
     const baseId = baseByName.get(baseKey)
     if (baseId && baseId !== m.modId && !seenBase.has(baseId)) {
       seenBase.add(baseId)
-      out.push({ base_nexus_id: baseId, translation_nexus_id: m.modId, translation_file_id: null, translation_md5: null })
+      // Carry the translation mod's OWN fileId/md5 (from the backup entry) so it is downloadable.
+      out.push({
+        base_nexus_id: baseId,
+        translation_nexus_id: m.modId,
+        translation_file_id: m.fileId ?? null,
+        translation_md5: m.md5 ?? null,
+      })
     }
   }
   return out

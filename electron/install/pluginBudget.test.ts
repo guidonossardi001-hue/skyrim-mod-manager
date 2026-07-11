@@ -4,6 +4,7 @@ import {
   isLightFlagged,
   classifyPlugin,
   computePluginBudget,
+  scanPluginBudget,
   FULL_PLUGIN_LIMIT,
 } from './pluginBudget'
 
@@ -85,5 +86,27 @@ describe('computePluginBudget', () => {
     expect(b.remaining).toBe(-1)
     // 500 light plugins do NOT push it over on their own
     expect(computePluginBudget(light).overBudget).toBe(false)
+  })
+})
+
+describe('scanPluginBudget (injected header reader)', () => {
+  it('classifies via header bytes and aggregates', () => {
+    const heads: Record<string, Uint8Array> = {
+      'A.esp': tes4(0), // full
+      'B.esm': tes4(0x0001), // full (master)
+      'C.esp': tes4(0x0200), // light-flagged .esp → light
+      'D.esl': tes4(0), // light by extension
+      'E.bsa': new Uint8Array(0), // other
+    }
+    const b = scanPluginBudget(Object.keys(heads), (p) => heads[p] ?? null)
+    expect(b.full).toBe(2) // A + B
+    expect(b.light).toBe(2) // C (flagged) + D (.esl)
+    expect(b.overBudget).toBe(false)
+  })
+
+  it('a null header (unreadable) makes a .esp count as FULL (conservative)', () => {
+    const b = scanPluginBudget(['X.esp', 'Y.esl'], () => null)
+    expect(b.full).toBe(1) // X.esp with no header → full
+    expect(b.light).toBe(1) // Y.esl → light regardless
   })
 })

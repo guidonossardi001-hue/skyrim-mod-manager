@@ -39,17 +39,17 @@ describe('baseNameOfTranslation', () => {
 })
 
 describe('pairBackupTranslations', () => {
-  it('pairs a translation mod to its base by normalized base-name', () => {
+  it('pairs a translation mod to its base and carries the translation file id/md5', () => {
     const pairs = pairBackupTranslations([
       { modId: 1137, name: 'SkyUI' },
-      { modId: 9999, name: 'SkyUI - Italian Translation' },
+      { modId: 9999, name: 'SkyUI - Italian Translation', fileId: 55, md5: 'deadbeef' },
       { modId: 200, name: 'Immersive Armors' },
-      { modId: 201, name: 'Immersive Armors ITA' },
+      { modId: 201, name: 'Immersive Armors ITA', fileId: 77 },
       { modId: 300, name: 'Lonely Mod (no translation)' },
     ])
     expect(pairs).toEqual([
-      { base_nexus_id: 1137, translation_nexus_id: 9999, translation_file_id: null, translation_md5: null },
-      { base_nexus_id: 200, translation_nexus_id: 201, translation_file_id: null, translation_md5: null },
+      { base_nexus_id: 1137, translation_nexus_id: 9999, translation_file_id: 55, translation_md5: 'deadbeef' },
+      { base_nexus_id: 200, translation_nexus_id: 201, translation_file_id: 77, translation_md5: null },
     ])
   })
   it('skips a translation with no matching base (no guess)', () => {

@@ -45,11 +45,17 @@ function mkDeps(over: Partial<MassSyncDeps> = {}, rec: Rec = { active: 0, maxAct
     download: [] as string[],
     md5: 0,
     extract: [] as string[],
+    overlay: [] as string[],
     removed: [] as string[],
     existing: new Set<string>(),
   }
   const deps: MassSyncDeps = {
     resolveLink: vi.fn(async (modId) => `https://cdn/files/${modId}.7z`),
+    extractOverlay: vi.fn(async (_a, d, onP) => {
+      onP(100)
+      calls.overlay.push(d.replace(/\\/g, '/'))
+      return { method: '7z' }
+    }),
     streamDownload: vi.fn(async (_url, dest, onP) => {
       rec.active++
       rec.maxActive = Math.max(rec.maxActive, rec.active)
@@ -159,6 +165,45 @@ describe('massSync: orchestration', () => {
     const pending2k = pendingBytes(resolveMods([variantMod, plainMod], '2K'), 'D:/SG/mods', () => false)
     expect(pending2k).toBeLessThan(pending4k)
     expect([pending4k, pending2k]).toEqual([350, 170])
+  })
+
+  it('two-phase: installs base then overlays the ITA translation in the SAME dir', async () => {
+    const { deps, calls } = mkDeps()
+    const translationOf = (modId: number) =>
+      modId === 1 ? { nexus_id: 9001, file_id: 500, md5: 'abc123' } : null
+    const res = await runMassSync(deps, cfg(MODS, { enableAutoTranslate: true, translationOf }))
+    expect(res.phase).toBe('done')
+    expect(res.modsDone).toBe(3)
+    // Base extract for all 3 mods; overlay ONLY for mod 1 (the one with a translation), same dir.
+    expect(calls.extract.map((d) => d.replace(/\\/g, '/'))).toContain('D:/SG/mods/1-Alpha')
+    expect(calls.overlay).toEqual(['D:/SG/mods/1-Alpha'])
+    // resolveLink called for base (1,2,3) AND the translation (9001).
+    expect((deps.resolveLink as unknown as { mock: { calls: unknown[][] } }).mock.calls.some((c) => c[0] === 9001)).toBe(true)
+  })
+
+  it('fail-soft: a failing translation leaves the base installed, mod still done, no abort', async () => {
+    const { deps, calls } = mkDeps({
+      // extractOverlay (Phase B) throws — base already extracted in Phase A.
+      extractOverlay: vi.fn(async () => {
+        throw new Error('server traduzione giù')
+      }),
+    })
+    const logs: string[] = []
+    const translationOf = (modId: number) =>
+      modId === 1 ? { nexus_id: 9001, file_id: 500, md5: null } : null
+    const res = await runMassSync(deps, cfg(MODS, { enableAutoTranslate: true, translationOf, onLog: (m) => logs.push(m) }))
+    expect(res.phase).toBe('done')
+    expect(res.modsDone).toBe(3) // ALL mods done despite the translation failure
+    expect(res.modsFailed).toBe(0)
+    expect(calls.extract.length).toBe(3) // every base extracted
+    expect(logs.some((l) => /fail-soft/.test(l))).toBe(true) // logged, not thrown
+  })
+
+  it('respects enableAutoTranslate=false: no translation phase', async () => {
+    const { deps, calls } = mkDeps()
+    const translationOf = (modId: number) => (modId === 1 ? { nexus_id: 9001, file_id: 500, md5: null } : null)
+    await runMassSync(deps, cfg(MODS, { enableAutoTranslate: false, translationOf }))
+    expect(calls.overlay).toEqual([]) // Phase B never ran
   })
 
   it('idempotent: skips mods whose dest dir already exists', async () => {

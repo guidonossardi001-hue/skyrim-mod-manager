@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync, cpSync, openSync, readSync, closeSync } from 'fs'
 import { readdir, lstat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
@@ -51,6 +51,8 @@ import {
   DEFAULT_TEXTURE_PROFILE,
   type TextureProfile,
 } from './sync/textureProfile'
+import { pairBackupTranslations, saveTranslations, resolveTranslation } from './sync/translationResolver'
+import { scanPluginBudget } from './install/pluginBudget'
 import {
   runMassSync,
   stockGameModsDir,
@@ -903,6 +905,29 @@ app.whenReady().then(() => {
         onProgress,
         signal,
       }).then((r) => ({ method: r.method })),
+    // Overlay (Phase B): extract the translation into a temp sibling atomically, then copy its
+    // files OVER the base mod dir (overwrite matching, keep the rest), then drop the temp.
+    extractOverlay: async (archive, destDir, onProgress, signal) => {
+      const tmp = `${destDir}.trans.tmp`
+      try {
+        if (existsSync(tmp)) rmSync(tmp, { recursive: true, force: true })
+      } catch {
+        /* best effort */
+      }
+      const r = await extractArchive(archive, tmp, {
+        bundled7zaPath: bundled7zaPath(),
+        full7zPath: resolveRar7z(store.get('sevenZipPath') as string | undefined) ?? undefined,
+        onProgress,
+        signal,
+      })
+      cpSync(tmp, destDir, { recursive: true, force: true }) // overlay over the base
+      try {
+        rmSync(tmp, { recursive: true, force: true })
+      } catch {
+        /* best effort */
+      }
+      return { method: r.method }
+    },
     exists: existsSync,
     ensureDir: (p) => {
       if (!existsSync(p)) mkdirSync(p, { recursive: true })
@@ -929,6 +954,37 @@ app.whenReady().then(() => {
   const syncTextureProfile = (): TextureProfile => {
     const v = store.get('textureQualityProfile')
     return isTextureProfile(v) ? v : DEFAULT_TEXTURE_PROFILE
+  }
+  // ESL/254 budget scan over the installed StockGame/mods. Walks the tree for plugin files and
+  // reads each one's 12-byte TES4 header (to detect an ESL-FLAGGED .esp/.esm, not just .esl ext).
+  const readPluginHead = (p: string): Uint8Array | null => {
+    try {
+      const fd = openSync(p, 'r')
+      const buf = Buffer.alloc(12)
+      readSync(fd, buf, 0, 12, 0)
+      closeSync(fd)
+      return new Uint8Array(buf)
+    } catch {
+      return null
+    }
+  }
+  const scanInstalledPluginBudget = (modsDir: string) => {
+    const paths: string[] = []
+    const walk = (dir: string) => {
+      let entries: import('fs').Dirent[]
+      try {
+        entries = readdirSync(dir, { withFileTypes: true })
+      } catch {
+        return
+      }
+      for (const e of entries) {
+        const full = join(dir, e.name)
+        if (e.isDirectory()) walk(full)
+        else if (/\.(esp|esm|esl)$/i.test(e.name)) paths.push(full)
+      }
+    }
+    walk(modsDir)
+    return scanPluginBudget(paths, readPluginHead)
   }
   // Source of truth: the persisted backup (survives a Vortex wipe); fallback to a live scan.
   const loadSyncMods = (): SyncMod[] => {
@@ -1021,10 +1077,28 @@ app.whenReady().then(() => {
     const steam = resolveGameSource()
     const all = loadSyncMods()
     if (!all.length) return { ok: false, error: 'Nessun mod da sincronizzare (backup e scan Vortex vuoti).' }
+    // Step 2 — populate ITA translation mappings from the backup (heuristic pairing, best-effort).
+    // The paired translation modIds are then REMOVED from the install list: they are not standalone
+    // installs, they get applied as the Phase-B override of their base mod inside the worker.
+    const enableAutoTranslate = store.get('enableAutoTranslate') !== false // default ON
+    const translationIds = new Set<number>()
+    if (enableAutoTranslate) {
+      try {
+        const pairs = pairBackupTranslations(
+          all.map((m) => ({ modId: m.modId, name: m.name, fileId: m.fileId, md5: m.md5 })),
+        )
+        if (pairs.length) saveTranslations(requireDb(), pairs, 'backup')
+        for (const p of pairs) translationIds.add(p.translation_nexus_id)
+        logger.info('sync', `traduzioni ITA mappate dal backup: ${pairs.length} (escluse dalla lista base)`)
+      } catch (e) {
+        logger.warn('sync', `mappatura traduzioni fallita (proseguo senza): ${(e as Error).message}`)
+      }
+    }
+    const baseList = translationIds.size ? all.filter((m) => !translationIds.has(m.modId)) : all
     // Run-Prog: con un limit il blocco è composto dalle prossime N mod NON ancora
     // presenti nello StockGame (non le prime N della lista, che dopo il primo run
     // sarebbero tutte skip). Senza limit: intera lista (lo skip fa da resume).
-    const mods = selectSyncBlock(all, stockDir, opts?.limit)
+    const mods = selectSyncBlock(baseList, stockDir, opts?.limit)
     if (!mods.length) return { ok: false, error: 'Tutte le mod risultano già sincronizzate nello StockGame.' }
     const downloadsDir = join(app.getPath('userData'), 'downloads')
     const concurrency =
@@ -1044,6 +1118,17 @@ app.whenReady().then(() => {
       maxRetries: Math.max(0, Math.min(10, Number(store.get('downloadRetries') ?? 3))),
       errorThreshold: Math.max(1, Number(store.get('errorThreshold')) || 50),
       textureProfile: syncTextureProfile(),
+      // Step 3 — two-phase install: when a base mod has an ITA mapping, the worker downloads and
+      // overlays the translation into the same dir on the SAME queue slot (fail-soft if it errors).
+      enableAutoTranslate,
+      translationOf: enableAutoTranslate
+        ? (modId: number) => {
+            const t = resolveTranslation(requireDb(), modId, 'it')
+            return t
+              ? { nexus_id: t.translation_nexus_id, file_id: t.translation_file_id, md5: t.translation_md5 }
+              : null
+          }
+        : undefined,
       ...syncFactors(),
       onProgress: (s) => {
         syncState = s
@@ -1056,6 +1141,22 @@ app.whenReady().then(() => {
           'sync',
           `mass-sync terminato: ${final.phase} (ok ${final.modsDone}, skip ${final.modsSkipped}, fail ${final.modsFailed})`,
         )
+        // Step 3 — post-list ESL/254 scan. Skyrim won't launch with >254 FULL plugins; ESL /
+        // ESL-flagged plugins are free. Log the budget; escalate to error if the limit is blown.
+        try {
+          const budget = scanInstalledPluginBudget(stockGameModsDir(stockDir))
+          const line = `plugin budget: ${budget.full}/${budget.limit} full + ${budget.light} light (ESL) = ${budget.total} totali`
+          if (budget.overBudget) {
+            logger.error(
+              'sync',
+              `⚠ LIMITE PLUGIN SUPERATO — ${line}. Skyrim non partirà: converti in ESL o rimuovi ${budget.full - budget.limit} plugin full.`,
+            )
+          } else {
+            logger.info('sync', `${line} — entro il limite (${budget.remaining} slot full liberi)`)
+          }
+        } catch (e) {
+          logger.warn('sync', `scan plugin budget fallita: ${(e as Error).message}`)
+        }
       })
       .catch((err) => {
         const msg = (err as Error).message

@@ -125,6 +125,7 @@ export interface AppSettings {
   downloadRetries?: number
   errorThreshold?: number
   textureQualityProfile?: '2K' | '4K' // mass-installer texture quality/space profile (default 4K)
+  enableAutoTranslate?: boolean // mass-installer: auto-apply the ITA translation overlay (default ON)
 }
 
 export interface ConflictInfo {

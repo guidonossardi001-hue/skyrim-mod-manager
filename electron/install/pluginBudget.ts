@@ -66,3 +66,18 @@ export function computePluginBudget(
   }
   return { full, light, total: full + light, limit, overBudget: full > limit, remaining: limit - full }
 }
+
+/**
+ * Scan a list of plugin file paths into a budget, reading each plugin's TES4 header via the
+ * injected `readHead` (returns the first ~12 bytes, or null on any IO error). Pure over the
+ * injected reader → the whole scan is unit-testable without a filesystem. The orchestrator wires
+ * `readHead` to a real 12-byte read and runs this after the install to verify the 254 limit.
+ */
+export function scanPluginBudget(
+  pluginPaths: string[],
+  readHead: (path: string) => Uint8Array | null,
+  limit: number = FULL_PLUGIN_LIMIT,
+): PluginBudget {
+  const classified = pluginPaths.map((p) => ({ name: p, kind: classifyPlugin(p, readHead(p)) }))
+  return computePluginBudget(classified, limit)
+}
