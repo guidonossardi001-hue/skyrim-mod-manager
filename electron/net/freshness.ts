@@ -41,6 +41,16 @@ export function parseTimestamp(s: string | null | undefined): number | null {
 }
 
 /**
+ * A rollback-resistant "now" for the future-skew guard. The wall clock (Date.now) can be rolled
+ * BACK by an attacker/user, which would make legitimately-newer releases look "too far future" and
+ * freeze all updates (a DoS that also sustains an existing downgrade). The last accepted release's
+ * published_at is a signed lower bound on real time, so never let effective-now fall below it.
+ */
+export function monotonicNow(wallNowMs: number, lastPublishedAt: string | null): number {
+  return Math.max(wallNowMs, parseTimestamp(lastPublishedAt) ?? 0)
+}
+
+/**
  * Fold the build-time floor into the DB baseline: the effective baseline is the HIGHER of the
  * two on each axis (counter = max; published_at = the later timestamp). So a fresh install
  * (empty DB) inherits the shipped floor, and an up-to-date install keeps its own higher values.

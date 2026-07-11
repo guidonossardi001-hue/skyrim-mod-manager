@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   parseTimestamp,
+  monotonicNow,
   effectiveBaseline,
   checkFreshness,
   type FreshnessBaseline,
@@ -12,6 +13,22 @@ describe('parseTimestamp', () => {
     expect(parseTimestamp('not a date')).toBeNull()
     expect(parseTimestamp(null)).toBeNull()
     expect(parseTimestamp('')).toBeNull()
+  })
+})
+
+describe('monotonicNow (clock-rollback resistance)', () => {
+  const LAST = '2026-07-10T00:00:00Z'
+  const lastMs = Date.parse(LAST)
+  it('uses the wall clock when it is ahead of the last accepted release', () => {
+    const wall = lastMs + 5 * 86400_000
+    expect(monotonicNow(wall, LAST)).toBe(wall)
+  })
+  it('floors to the last accepted published_at when the clock is rolled back', () => {
+    const rolledBack = lastMs - 30 * 86400_000
+    expect(monotonicNow(rolledBack, LAST)).toBe(lastMs)
+  })
+  it('falls back to the wall clock when there is no baseline', () => {
+    expect(monotonicNow(123456, null)).toBe(123456)
   })
 })
 

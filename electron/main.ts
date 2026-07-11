@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync } from 'fs'
-import { readdir, stat } from 'fs/promises'
+import { readdir, lstat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
 import Database from 'better-sqlite3'
@@ -1215,11 +1215,16 @@ function nexusKeyPreflight(): void {
 function migrateLegacySecrets() {
   if (!db) return
   for (const k of SECRET_KEYS) {
-    if (!hasSecret(db as unknown as SqliteDb, k) && store.has(k)) {
+    if (!store.has(k)) continue
+    // Migrate into the encrypted DB only if it isn't already there.
+    if (!hasSecret(db as unknown as SqliteDb, k)) {
       const plain = decryptSecret(store.get(k))
       if (typeof plain === 'string' && plain) setSecret(db as unknown as SqliteDb, k, plain, secretCrypto)
-      store.delete(k as never)
     }
+    // ALWAYS purge the legacy electron-store copy when present — a value that lingered here
+    // while the DB already had the secret would otherwise stay on disk (older builds wrote it
+    // in plaintext). The delete must not be gated on the "not yet migrated" branch.
+    store.delete(k as never)
   }
 }
 
@@ -1590,7 +1595,9 @@ ipcMain.handle('fs:read-dir', async (_e, kind: string, subpath?: string) => {
         const isDirectory = d.isDirectory()
         const size = isDirectory
           ? 0
-          : await stat(join(decision.path, d.name))
+          : // lstat (no-follow): a symlink entry reports the LINK's own size, never the size
+            // or existence of an out-of-root target it points at (info-leak defense).
+            await lstat(join(decision.path, d.name))
               .then((s) => s.size)
               .catch(() => 0)
         return { name: d.name, isDirectory, size }

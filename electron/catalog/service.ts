@@ -4,7 +4,7 @@ import { withTransaction, tableExists, columnExists } from '../db/sqlite'
 import { canonicalJSON } from '../delta/canonicalJson'
 import { verifyCatalog } from './verify'
 import { validateCatalog } from './validate'
-import { effectiveBaseline } from '../net/freshness'
+import { effectiveBaseline, monotonicNow } from '../net/freshness'
 import { pinnedCatalogFloor } from '../delta/pinnedKey'
 import type { ModCatalog, SignedCatalog, CatalogIngestResult } from './types'
 
@@ -80,7 +80,7 @@ export class CatalogService {
       publicKeyPem: this.opts.publicKeyPem,
       lastVersion: baseline.lastCounter,
       lastGeneratedAt: baseline.lastPublishedAt,
-      now: Date.now(),
+      now: monotonicNow(Date.now(), baseline.lastPublishedAt),
     })
     if (!v.ok || !v.catalog) {
       if (v.freshness) this.log('warn', `Update rejected: freshness violation — ${v.error}`)

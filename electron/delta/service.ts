@@ -3,7 +3,7 @@ import type { SqliteDb } from '../db/sqlite'
 import { withTransaction } from '../db/sqlite'
 import { canonicalJSON } from './canonicalJson'
 import { verifyManifest, DEFAULT_ALLOWED_HOSTS, type SignedManifest, type ManifestBody } from './manifest'
-import { effectiveBaseline } from '../net/freshness'
+import { effectiveBaseline, monotonicNow } from '../net/freshness'
 import { pinnedManifestFloor } from './pinnedKey'
 import { computeChangeset, summarizeChangeset, type SnapshotRow, type ReleaseRow } from './diff'
 import {
@@ -114,7 +114,7 @@ export class DeltaService {
       lastCounter: baseline.lastCounter,
       lastPublishedAt: baseline.lastPublishedAt,
       allowedHosts: this.allowedHosts,
-      now: Date.now(),
+      now: monotonicNow(Date.now(), baseline.lastPublishedAt),
     })
     if (!res.ok || !res.manifest) {
       if (res.freshness) this.log('warn', `Update rejected: freshness violation — ${res.error}`)
