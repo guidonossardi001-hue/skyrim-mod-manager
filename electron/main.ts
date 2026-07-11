@@ -540,10 +540,17 @@ app.whenReady().then(() => {
   })
   // Init subsystems. The install pipeline is wired into the download manager so
   // a completed download automatically extracts and deploys into the mods folder.
-  const installManager = initInstallManager(getRawDb(), () => mainWindow, installer, {
-    onComplete: (id) => onDeltaDownloadComplete(requireDb(), id),
-    onError: (id, err) => onDeltaDownloadFailed(requireDb(), id, err),
-  })
+  const installConcurrency = Math.max(1, Math.min(4, Number(store.get('installConcurrency')) || 3))
+  const installManager = initInstallManager(
+    getRawDb(),
+    () => mainWindow,
+    installer,
+    {
+      onComplete: (id) => onDeltaDownloadComplete(requireDb(), id),
+      onError: (id, err) => onDeltaDownloadFailed(requireDb(), id, err),
+    },
+    installConcurrency,
+  )
   downloadQueue = initDownloadManager(getRawDb(), () => mainWindow, {
     store,
     // Real Nexus requests read the manually-entered key from the encrypted DB store.

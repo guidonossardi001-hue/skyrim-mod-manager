@@ -89,7 +89,14 @@ export interface Download {
   created_at: string
 }
 
-export type DownloadStatus = 'pending' | 'downloading' | 'paused' | 'completed' | 'failed' | 'installing'
+export type DownloadStatus =
+  | 'pending'
+  | 'downloading'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'queued'
+  | 'installing'
 
 export interface AppSettings {
   nexusApiKey?: string

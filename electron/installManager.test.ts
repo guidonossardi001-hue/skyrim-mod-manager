@@ -52,6 +52,13 @@ function fakeInstaller(impl?: (args: unknown[]) => Promise<InstallResult> | Inst
   return { service: { installMod } as unknown as InstallerService, installMod, calls }
 }
 
+function deferred<T = void>() {
+  let resolve!: (v: T) => void
+  const promise = new Promise<T>((res) => (resolve = res))
+  return { promise, resolve }
+}
+const tick = () => new Promise((r) => setTimeout(r, 0))
+
 let dir: string
 let archive: string
 let archiveHash: string // REAL sha256 of the test archive, seeded so fixtures carry a genuine hash
@@ -146,8 +153,63 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
     })
     const mgr = initInstallManager(db as never, win, service)
     await mgr.runInstall(id)
-    const p = sent.find((s) => s.ch === 'install:progress')
+    // Filter to the installer's own 'extracting' event: the pool's onState hook now also emits an
+    // install:progress with stage 'verifying' when the slot is acquired, which arrives first.
+    const p = sent.find((s) => s.ch === 'install:progress' && s.payload.stage === 'extracting')
     expect(p?.payload).toMatchObject({ id, modName: 'Cool Mod', stage: 'extracting', percent: 50 })
+  })
+
+  it('CAP: runs at most `concurrency` installs at once, queues the excess, promotes on free slot', async () => {
+    const ids = [
+      seedDownload({ nexus_id: 1, file_hash: archiveHash }),
+      seedDownload({ nexus_id: 2, file_hash: archiveHash }),
+      seedDownload({ nexus_id: 3, file_hash: archiveHash }),
+    ]
+    const gates = [deferred(), deferred(), deferred()]
+    let started = 0
+    const { service, installMod } = fakeInstaller(() => {
+      const g = gates[started++]
+      return g.promise.then(() => ({ success: true, nexusId: 0, modPath: '/mods/x' }) as InstallResult)
+    })
+    const mgr = initInstallManager(db as never, win, service, {}, 2) // hard cap = 2
+    ids.forEach((id) => void mgr.runInstall(id))
+    await tick()
+
+    const statusOf = (id: number) => (db.prepare('SELECT status FROM downloads WHERE id=?').get(id) as { status: string }).status
+    const statuses = () => ids.map(statusOf)
+    // cap respected: exactly 2 installing, 1 queued; only 2 installers actually started
+    expect(installMod).toHaveBeenCalledTimes(2)
+    expect(statuses().filter((s) => s === 'installing')).toHaveLength(2)
+    expect(statuses().filter((s) => s === 'queued')).toHaveLength(1)
+    // the queued row emitted a 'queued' install:progress the UI can render
+    expect(sent.some((s) => s.ch === 'install:progress' && s.payload.stage === 'queued')).toBe(true)
+
+    // free a slot → the queued install is promoted and starts
+    gates[0].resolve()
+    await tick()
+    await tick()
+    expect(installMod).toHaveBeenCalledTimes(3)
+    expect(statuses().filter((s) => s === 'queued')).toHaveLength(0)
+  })
+
+  it('resilience: a failing install frees its slot for the next queued one', async () => {
+    const ids = [
+      seedDownload({ nexus_id: 1, file_hash: archiveHash }),
+      seedDownload({ nexus_id: 2, file_hash: archiveHash }),
+    ]
+    let call = 0
+    const { service, installMod } = fakeInstaller(() => {
+      call++
+      if (call === 1) return { success: false, nexusId: 1, errorKind: 'extract', error: 'boom' } as InstallResult
+      return { success: true, nexusId: 2, modPath: '/mods/ok' } as InstallResult
+    })
+    const mgr = initInstallManager(db as never, win, service, {}, 1) // cap 1 → strictly sequential
+    await mgr.runInstall(ids[0]) // fails
+    await mgr.runInstall(ids[1]) // must still run
+    expect(installMod).toHaveBeenCalledTimes(2)
+    const st = (id: number) => (db.prepare('SELECT status FROM downloads WHERE id=?').get(id) as { status: string }).status
+    expect(st(ids[0])).toBe('failed')
+    expect(st(ids[1])).toBe('completed')
   })
 
   it('missing download row → not-found, no throw', async () => {

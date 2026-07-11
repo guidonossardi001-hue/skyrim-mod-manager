@@ -4,6 +4,7 @@ import Database from 'better-sqlite3'
 import { logger } from './logger'
 import { columnExists } from './db/sqlite'
 import { pickExpectedHash, type ExpectedHash } from './install/integrity'
+import { TaskQueue } from './util/taskQueue'
 import type { InstallerService, InstallResult, InstallProgress } from './install/installer'
 
 /**
@@ -66,15 +67,38 @@ export interface InstallHooks {
  * InstallerService.installMod (see electron/install/installer.ts), so this file no
  * longer touches archives or the mods folder directly.
  */
+// Hard cap on simultaneous extractions/installs. Each install streams-hashes a (multi-GB)
+// archive and 7-Zip-extracts it — CPU + disk heavy — so unbounded parallelism (one install per
+// completing download) thrashes the machine. Default 3; overridable via the `concurrency` arg.
+const DEFAULT_INSTALL_CONCURRENCY = 3
+
 export function initInstallManager(
   db: Database.Database,
   win: () => BrowserWindow | null,
   installer: InstallerService,
   hooks?: InstallHooks,
+  concurrency: number = DEFAULT_INSTALL_CONCURRENCY,
 ) {
   function send(channel: string, payload: Record<string, unknown>) {
     win()?.webContents.send(channel, payload)
   }
+
+  // Bounded-concurrency pool: at most `concurrency` installs run at once; the rest wait as
+  // 'queued'. The state hook drives the DB status + UI so the user sees installing vs queued.
+  const pool = new TaskQueue({
+    concurrency,
+    onState: (id, state) => {
+      const status = state === 'queued' ? 'queued' : 'installing'
+      db.prepare('UPDATE downloads SET status=? WHERE id=?').run(status, id)
+      const r = db.prepare('SELECT name FROM downloads WHERE id=?').get(id) as { name: string } | undefined
+      send('install:progress', {
+        id,
+        modName: r?.name,
+        stage: state === 'queued' ? 'queued' : 'verifying',
+        percent: 0,
+      })
+    },
+  })
 
   // Second-barrier expected hash for the installer (defense-in-depth behind the download
   // gate; also covers install:run on a pre-existing archive). Layered: the download row's
@@ -104,7 +128,8 @@ export function initInstallManager(
     return pickExpectedHash({ downloadColumn, deltaSha256 })
   }
 
-  async function runInstall(downloadId: number): Promise<InstallResult> {
+  // The actual install work for ONE download (runs inside a pool slot). No-throw boundary.
+  async function doInstall(downloadId: number): Promise<InstallResult> {
     const row = db.prepare('SELECT * FROM downloads WHERE id=?').get(downloadId) as DownloadRow | undefined
     if (!row) return { success: false, nexusId: 0, errorKind: 'not-found', error: 'Download non trovato' }
     if (!row.file_path || !existsSync(row.file_path)) {
@@ -133,7 +158,7 @@ export function initInstallManager(
       hooks?.onError?.(downloadId, msg)
       return { success: false, nexusId, errorKind: 'hash', error: msg }
     }
-    db.prepare("UPDATE downloads SET status='installing' WHERE id=?").run(downloadId)
+    // (status is set to 'installing' by the pool's onState hook when the slot is acquired.)
 
     // Delegate the full pipeline (verify → stage → extract → map → commit) to the
     // InstallerService. It is a no-throw boundary AND cleans its own staging on any
@@ -182,6 +207,13 @@ export function initInstallManager(
     send('install:error', { id: downloadId, error: msg, errorKind: res.errorKind })
     hooks?.onError?.(downloadId, msg)
     return res
+  }
+
+  // Public entry: enqueue the install into the bounded pool. Excess installs wait as 'queued'
+  // and start as slots free (see the pool's onState hook). doInstall is a no-throw boundary, so
+  // the pooled task never rejects and a failing install frees its slot for the next one.
+  function runInstall(downloadId: number): Promise<InstallResult> {
+    return pool.enqueue(downloadId, () => doInstall(downloadId))
   }
 
   // Allow the renderer to (re)trigger an install for an already-downloaded archive.

@@ -106,7 +106,9 @@ export default function Downloads() {
   const { grouped, totalSize, totalDone, activeCount, completedCount } = useMemo(
     () => ({
       grouped: {
-        active: downloads.filter((d) => d.status === 'downloading' || d.status === 'installing'),
+        active: downloads.filter(
+          (d) => d.status === 'downloading' || d.status === 'installing' || d.status === 'queued',
+        ),
         pending: downloads.filter((d) => d.status === 'pending'),
         completed: downloads.filter((d) => d.status === 'completed'),
         failed: downloads.filter((d) => d.status === 'failed'),
@@ -260,16 +262,19 @@ const DownloadRow = memo(function DownloadRow({
   const sizeMB = dl.total_size / 1024 / 1024
   const doneMB = (prog?.downloaded ?? dl.downloaded_size) / 1024 / 1024
   const installLabel =
-    iprog?.stage === 'verifying'
-      ? 'Verifica integrità…'
-      : iprog?.stage === 'extracting'
-        ? `Estrazione ${iprog.percent}%`
-        : 'Installazione…'
+    iprog?.stage === 'queued'
+      ? 'In coda…'
+      : iprog?.stage === 'verifying'
+        ? 'Verifica integrità…'
+        : iprog?.stage === 'extracting'
+          ? `Estrazione ${iprog.percent}%`
+          : 'Installazione…'
 
   const statusColor =
     {
       downloading: 'text-blue-400',
       installing: 'text-purple-400',
+      queued: 'text-amber-400',
       completed: 'text-green-400',
       failed: 'text-red-400',
       paused: 'text-yellow-400',
@@ -280,6 +285,7 @@ const DownloadRow = memo(function DownloadRow({
     {
       downloading: 'Download...',
       installing: installLabel,
+      queued: 'In coda',
       completed: 'Completato',
       failed: 'Fallito',
       paused: 'In pausa',
@@ -312,6 +318,7 @@ const DownloadRow = memo(function DownloadRow({
         {dl.status === 'failed' && <AlertCircle size={16} className="text-red-400" />}
         {dl.status === 'paused' && <Pause size={16} className="text-yellow-400" />}
         {dl.status === 'pending' && <Clock size={16} className="text-dark-400" />}
+        {dl.status === 'queued' && <Clock size={16} className="text-amber-400" />}
         {dl.status === 'installing' && <Download size={16} className="text-purple-400 animate-pulse" />}
       </div>
 
