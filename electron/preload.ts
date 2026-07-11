@@ -17,6 +17,7 @@ const EVENT_CHANNELS = new Set([
   'deploy:progress',
   'launch:progress',
   'nxm:queued',
+  'nxm:confirm-request',
 ])
 
 // original listener → ipcRenderer wrapper, so off() accepts either one.
@@ -87,6 +88,15 @@ contextBridge.exposeInMainWorld('api', {
   nexus: {
     getMod: (nexusId: number) => invoke('nexus:get-mod', nexusId),
     validateKey: (apiKey?: string) => invoke('nexus:validate-key', apiKey),
+  },
+
+  // nxm:// consent gate. An nxm:// link never downloads on its own — the main process holds
+  // it as a pending request; the renderer lists them and approves/rejects by token. Subscribe
+  // to the 'nxm:confirm-request' event (via on/off) to know when to (re)load the list.
+  nxm: {
+    listPending: () => invoke('nxm:list-pending'),
+    approve: (token: string) => invoke('nxm:approve', token),
+    reject: (token: string) => invoke('nxm:reject', token),
   },
 
   // File system

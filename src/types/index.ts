@@ -248,6 +248,23 @@ declare global {
         getMod(nexusId: number): Promise<{ success: boolean; data?: unknown; error?: string }>
         validateKey(apiKey?: string): Promise<{ success: boolean; data?: unknown }>
       }
+      // nxm:// consent gate — the renderer only ever sees the id/name of a pending request
+      // (never the non-premium key) and approves/rejects it by token.
+      nxm: {
+        listPending(): Promise<
+          Array<{
+            token: string
+            game: string
+            modId: number
+            fileId: number
+            hasKey: boolean
+            name?: string
+            receivedAt: number
+          }>
+        >
+        approve(token: string): Promise<{ ok: boolean; id?: number; error?: string }>
+        reject(token: string): Promise<{ ok: boolean }>
+      }
       fs: {
         pickDirectory(title?: string): Promise<string | null>
         pickFile(title?: string, filters?: unknown[]): Promise<string | null>

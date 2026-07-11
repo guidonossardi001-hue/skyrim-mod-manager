@@ -18,7 +18,8 @@ import { initCatalogEngine } from './catalog/engine'
 import { initInstallEngine } from './install/engine'
 import { initDeployEngine } from './deploy/engine'
 import { recoverOnStartup } from './delta/journal'
-import { parseNxmUrl, findNxmUrl, createNxmDownload } from './nexus/nxm'
+import { parseNxmUrl, findNxmUrl, createNxmDownload, validateNxmLink, type NxmLink } from './nexus/nxm'
+import { NxmConsentStore } from './nexus/nxmConsent'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
 import { detectSteamEnv } from './steam/detect'
 import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
@@ -69,7 +70,7 @@ import { resolveDownloadLink } from './nexus/downloadLink'
 import { axiosGet, axiosJson } from './http/axiosAdapters'
 import { extractArchive } from './install/extract'
 import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
-import { createHash } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
 import { logger } from './logger'
 
@@ -400,10 +401,16 @@ function registerNxmProtocol() {
   }
 }
 
-// nxm:// dispatch: parse → create a pending download (with non-premium key/expires)
-// → enqueue into the live pipeline → focus the window. URLs that arrive before the
-// DB/queue are ready (cold start) are buffered and flushed after init.
+// nxm:// dispatch — CONSENT-GATED. The nxm:// handler is reachable by ANY web page, so a
+// link must NEVER auto-download: otherwise an attacker page forces the victim's launcher to
+// download AND auto-install (extract+deploy) an attacker-chosen file — a drive-by that can
+// stage a malicious native SKSE plugin (DLL) which the game then loads. Instead every link is
+// parsed, validated (game whitelist + expiry), and held as a PENDING CONSENT request; it only
+// becomes a real download when the user approves it via the nxm:approve IPC. URLs arriving
+// before the DB/queue exist (cold start) are buffered and flushed after init.
 const pendingNxm: string[] = []
+const nxmConsent = new NxmConsentStore({ genToken: () => randomUUID(), cap: 20 })
+
 function handleNxmUrl(raw: string) {
   if (!db || !downloadQueue) {
     pendingNxm.push(raw)
@@ -414,23 +421,45 @@ function handleNxmUrl(raw: string) {
     logger.warn('nxm', `URL nxm ignorato (malformato): ${raw}`)
     return
   }
+  const valid = validateNxmLink(link, { now: Date.now() })
+  if (!valid.ok) {
+    logger.warn('nxm', `URL nxm rifiutato (${valid.reason}): mod ${link.modId} file ${link.fileId}`)
+    return
+  }
   if (mainWindow) {
     if (mainWindow.isMinimized()) mainWindow.restore()
     mainWindow.focus()
   }
+  const added = nxmConsent.add(link, Date.now())
+  if (!added.ok) {
+    logger.warn('nxm', `richiesta nxm scartata (${added.reason})`)
+    return
+  }
+  // Signal the renderer to (re)load the pending list and show the consent modal. The event
+  // carries no data — nxm:list-pending is the single source of truth (and never leaks the key).
+  mainWindow?.webContents.send('nxm:confirm-request')
+  void enrichNxmRequest(added.token, link)
+}
+
+/** Best-effort mod-name lookup so the consent prompt is readable. Silent on failure/no key. */
+async function enrichNxmRequest(token: string, link: NxmLink) {
+  const key = readSecret('nexusApiKey')
+  if (!key) return
   try {
-    const profileId = resolveActiveProfileId(db, store)
-    const id = createNxmDownload(db as unknown as SqliteDb, link, { profileId })
-    downloadQueue.enqueue(id)
-    logger.info(
-      'nxm',
-      `download accodato da nxm: mod ${link.modId} file ${link.fileId} (#${id}${link.key ? ', non-premium' : ''})`,
+    const res = await axios.get(
+      `https://api.nexusmods.com/v1/games/${link.game}/mods/${link.modId}.json`,
+      { headers: { apikey: key, 'User-Agent': 'SkyrimAEModManager/1.0' }, timeout: 8000 },
     )
-    mainWindow?.webContents.send('nxm:queued', { id, modId: link.modId, fileId: link.fileId })
-  } catch (e) {
-    logger.error('nxm', `accodamento nxm fallito: ${(e as Error).message}`)
+    const name = (res.data as { name?: unknown })?.name
+    if (typeof name === 'string' && name) {
+      nxmConsent.patch(token, { name })
+      mainWindow?.webContents.send('nxm:confirm-request')
+    }
+  } catch {
+    /* best-effort: the prompt falls back to the mod/file ids */
   }
 }
+
 function flushPendingNxm() {
   const cold = findNxmUrl(process.argv) // protocol launch on a COLD start
   if (cold) pendingNxm.push(cold)
@@ -1453,6 +1482,45 @@ ipcMain.handle('nexus:validate-key', async (_e, apiKey?: string) => {
   } catch {
     return { success: false }
   }
+})
+
+// ─── nxm:// consent-gate IPC ──────────────────────────────────────────────────
+// The renderer lists pending consent requests and approves/rejects them by token.
+// nxm:approve is the ONLY path that creates a download row + enqueues it; the renderer
+// never sees the non-premium key (nxmConsent.list() strips it).
+ipcMain.handle('nxm:list-pending', () => nxmConsent.list())
+ipcMain.handle('nxm:approve', (_e, token: string) => {
+  if (typeof token !== 'string' || !token) return { ok: false, error: 'token non valido' }
+  const req = nxmConsent.take(token)
+  if (!req) return { ok: false, error: 'richiesta non trovata o già gestita' }
+  // Re-validate at approval time: the user may have sat on the prompt past the link's expiry.
+  const valid = validateNxmLink(req.link, { now: Date.now() })
+  if (!valid.ok) {
+    logger.warn('nxm', `approvazione rifiutata (${valid.reason}): mod ${req.link.modId}`)
+    return { ok: false, error: valid.reason }
+  }
+  try {
+    const profileId = resolveActiveProfileId(getRawDb(), store)
+    const id = createNxmDownload(getRawDb() as unknown as SqliteDb, req.link, {
+      profileId,
+      name: req.name,
+    })
+    downloadQueue?.enqueue(id)
+    logger.info(
+      'nxm',
+      `download APPROVATO dall'utente: mod ${req.link.modId} file ${req.link.fileId} (#${id}${req.link.key ? ', non-premium' : ''})`,
+    )
+    mainWindow?.webContents.send('nxm:queued', { id, modId: req.link.modId, fileId: req.link.fileId })
+    return { ok: true, id }
+  } catch (e) {
+    logger.error('nxm', `accodamento nxm fallito: ${(e as Error).message}`)
+    return { ok: false, error: (e as Error).message }
+  }
+})
+ipcMain.handle('nxm:reject', (_e, token: string) => {
+  const removed = typeof token === 'string' && nxmConsent.reject(token)
+  if (removed) logger.info('nxm', "richiesta nxm rifiutata dall'utente")
+  return { ok: !!removed }
 })
 
 // ─── File system IPC ──────────────────────────────────────────────────────────

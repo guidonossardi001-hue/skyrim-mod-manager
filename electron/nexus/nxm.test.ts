@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { type SqliteDb, applyPragmas } from '../db/sqlite'
 import { openTestDb } from '../db/openTestDb'
 import { runMigrations } from '../db/migrations'
-import { parseNxmUrl, findNxmUrl, createNxmDownload } from './nxm'
+import { parseNxmUrl, findNxmUrl, createNxmDownload, validateNxmLink } from './nxm'
 
 describe('nxm:// URL parsing', () => {
   it('parses a premium link (mod/file id only)', () => {
@@ -32,6 +32,36 @@ describe('nxm:// URL parsing', () => {
     expect(parseNxmUrl('nxm://game/mods/abc/files/1')).toBeNull() // non-numeric id
     expect(parseNxmUrl('nxm://game/mods/1')).toBeNull() // missing /files/
     expect(parseNxmUrl('')).toBeNull()
+  })
+})
+
+describe('validateNxmLink (consent-gate first defense)', () => {
+  const NOW = 1_719_200_000_000 // ms
+  const base = { game: 'skyrimspecialedition', modId: 2347, fileId: 12345 }
+
+  it('accepts a well-formed Skyrim SE link with no expiry (premium)', () => {
+    expect(validateNxmLink(base, { now: NOW })).toEqual({ ok: true })
+  })
+
+  it('accepts a link whose expiry is still in the future', () => {
+    expect(validateNxmLink({ ...base, expires: NOW / 1000 + 3600 }, { now: NOW })).toEqual({ ok: true })
+  })
+
+  it('rejects a game outside the whitelist', () => {
+    const r = validateNxmLink({ ...base, game: 'fallout4' }, { now: NOW })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain('gioco')
+  })
+
+  it('rejects a non-positive modId/fileId', () => {
+    expect(validateNxmLink({ ...base, modId: 0 }, { now: NOW }).ok).toBe(false)
+    expect(validateNxmLink({ ...base, fileId: -1 }, { now: NOW }).ok).toBe(false)
+  })
+
+  it('rejects a link whose expiry is already past (anti-replay)', () => {
+    const r = validateNxmLink({ ...base, expires: NOW / 1000 - 1 }, { now: NOW })
+    expect(r.ok).toBe(false)
+    if (!r.ok) expect(r.reason).toContain('scaduto')
   })
 })
 

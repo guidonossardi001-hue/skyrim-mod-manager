@@ -4,6 +4,7 @@ import TitleBar from '@/components/layout/TitleBar'
 import Sidebar from '@/components/layout/Sidebar'
 import { useAppStore } from '@/store/appStore'
 import { LauncherShell } from '@/components/ui/LauncherShell'
+import { NxmConsentModal } from '@/components/ui/NxmConsentModal'
 import { ToastContainer } from '@/components/ui/Toast'
 import { toast } from '@/lib/toast'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
@@ -239,6 +240,8 @@ export default function App() {
       )}
 
       <ToastContainer />
+      {/* Global nxm:// consent gate — appears over launcher AND manager views. */}
+      <NxmConsentModal />
     </div>
   )
 }

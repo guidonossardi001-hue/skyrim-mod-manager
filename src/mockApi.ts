@@ -772,6 +772,13 @@ export const mockApi = {
     },
   },
 
+  // nxm:// consent gate — no real protocol handling in the browser mock; nothing is ever pending.
+  nxm: {
+    listPending: async () => [],
+    approve: async () => ({ ok: true }),
+    reject: async () => ({ ok: true }),
+  },
+
   fs: {
     pickDirectory: async (title?: string) => {
       const def = 'C:\\Program Files (x86)\\Steam\\steamapps\\common\\Skyrim Special Edition'

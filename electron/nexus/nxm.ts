@@ -42,6 +42,34 @@ export function findNxmUrl(argv: readonly string[]): string | null {
   return argv.find((a) => typeof a === 'string' && /^nxm:\/\//i.test(a.trim())) ?? null
 }
 
+// This app manages Skyrim SE/AE only. A registered nxm:// handler is reachable by ANY
+// web page, so a link for another game (or with junk ids) must be refused BEFORE it can
+// become a pending download — that is the first defense of the drive-by consent gate.
+export const ALLOWED_NXM_GAMES = new Set(['skyrimspecialedition'])
+
+export type NxmValidation = { ok: true } | { ok: false; reason: string }
+
+/**
+ * Validate a parsed nxm link before it is offered to the user for consent.
+ *  • game must be whitelisted (Skyrim SE/AE);
+ *  • modId/fileId must be positive integers;
+ *  • if the link carries an `expires` (Nexus non-premium tokens do), reject it once past —
+ *    a stale/replayed link must not resolve. `expires` is a UNIX SECONDS timestamp.
+ */
+export function validateNxmLink(
+  link: NxmLink,
+  opts: { now: number; allowedGames?: ReadonlySet<string> },
+): NxmValidation {
+  const allowed = opts.allowedGames ?? ALLOWED_NXM_GAMES
+  if (!allowed.has(link.game)) return { ok: false, reason: `gioco non supportato: ${link.game}` }
+  if (!Number.isInteger(link.modId) || link.modId <= 0) return { ok: false, reason: 'modId non valido' }
+  if (!Number.isInteger(link.fileId) || link.fileId <= 0) return { ok: false, reason: 'fileId non valido' }
+  if (link.expires !== undefined && link.expires * 1000 <= opts.now) {
+    return { ok: false, reason: 'link scaduto' }
+  }
+  return { ok: true }
+}
+
 /**
  * Insert a pending download row for an nxm link (carrying key/expires for the
  * non-premium flow) and return its id. The caller enqueues it into the pipeline.
