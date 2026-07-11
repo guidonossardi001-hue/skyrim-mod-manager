@@ -10,6 +10,7 @@ import {
   CheckSquare,
   Square,
   Boxes,
+  RefreshCw,
   X,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
@@ -48,13 +49,22 @@ export default function Catalog() {
   const [showItalian, setShowItalian] = useState(false)
   const [installing, setInstalling] = useState<Set<number>>(new Set())
   const [checkingAll, setCheckingAll] = useState(false)
+  const [updatingCatalog, setUpdatingCatalog] = useState(false)
   // Multi-select for the dependency resolver. Kept as a stable Set reference across
   // renders (updated only on toggle) so the resolver drawer never resets spuriously.
   const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
   const [resolverOpen, setResolverOpen] = useState(false)
 
   useEffect(() => {
-    if (catalog.length === 0) {
+    // Seed the bundled baseline when the DB has FEWER mods than the bundle ships — covers both an
+    // empty DB and a STALE seed frozen at an older build's count (the old `=== 0` guard never
+    // topped up when modlistCatalog.ts grew). INSERT OR REPLACE is idempotent by the UNIQUE
+    // nexus_id, so this tops up to the full bundled set WITHOUT clobbering a richer remote-ingested
+    // catalog (whose count exceeds the bundle, so this branch is skipped).
+    const bundledCount = new Set(
+      (MODLIST_CATALOG as { nexus_id?: number }[]).map((m) => m.nexus_id).filter((n) => n != null),
+    ).size
+    if (catalog.length < bundledCount) {
       window.api.catalog
         .seed(MODLIST_CATALOG as never[])
         .then(() => loadCatalog())
@@ -206,6 +216,32 @@ export default function Catalog() {
     [activeProfileId, catalogByNexus, addCatalogMod],
   )
 
+  // Fetch + ingest the full signed reference catalog (4000+ mods). Distinct from
+  // the bundled MODLIST_CATALOG seed (essential mods only) auto-loaded on first
+  // mount: this replaces modlist_catalog wholesale with the remote signed set.
+  // No-throw IPC boundary — always a CatalogIngestResult.
+  const updateCatalog = async () => {
+    setUpdatingCatalog(true)
+    try {
+      const res = await window.api.catalog.update()
+      if (res.success) {
+        await loadCatalog()
+        toast.success(
+          'Catalogo aggiornato',
+          res.reused
+            ? 'Catalogo già aggiornato all’ultima versione'
+            : `${res.inserted ?? 0} mod ingerite (v${res.version ?? '?'})`,
+        )
+      } else {
+        toast.error('Aggiornamento catalogo fallito', res.error ?? res.errorKind ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Aggiornamento catalogo fallito', (e as Error).message)
+    } finally {
+      setUpdatingCatalog(false)
+    }
+  }
+
   const installAllFiltered = async () => {
     const missing = filtered.filter((m) => !installedSet.has(m.nexus_id))
     if (missing.length === 0) {
@@ -258,6 +294,22 @@ export default function Catalog() {
                 <Boxes size={12} /> Risolvi dipendenze ({selectedNexusIds.size})
               </button>
             )}
+            <button
+              onClick={updateCatalog}
+              disabled={updatingCatalog}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Scarica e ingerisci il catalogo firmato completo (4000+ mod)"
+            >
+              {updatingCatalog ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Aggiornamento...
+                </>
+              ) : (
+                <>
+                  <RefreshCw size={12} /> Aggiorna catalogo
+                </>
+              )}
+            </button>
             <button
               onClick={installAllFiltered}
               disabled={checkingAll}
