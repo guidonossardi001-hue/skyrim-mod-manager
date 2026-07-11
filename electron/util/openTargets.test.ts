@@ -6,6 +6,7 @@ import {
   revealDirForKind,
   allowedRoots,
   validateOpenPath,
+  validateInsideRoot,
   resolveReadDir,
   type RevealRoots,
   type RevealProbe,
@@ -148,5 +149,60 @@ describe('resolveReadDir (intent-based directory listing)', () => {
       realpath: (p) => (p === join(roots.mods, 'evil') ? 'C:\\Windows\\System32' : p),
     }
     expect(resolveReadDir('mods', roots, 'evil', escaping)).toMatchObject({ ok: false })
+  })
+
+  it('FAIL-CLOSED: realpath throwing on an existing path is rejected, not passed as literal', () => {
+    // P4: a broken/looping reparse point makes realpath throw; the old code returned the
+    // un-resolved literal (passes containment) while the OS still follows the reparse point.
+    const throwing: RevealProbe = {
+      exists: () => true,
+      realpath: (p) => {
+        if (p === join(roots.mods, 'loop')) throw new Error('ELOOP')
+        return p
+      },
+    }
+    const d = resolveReadDir('mods', roots, 'loop', throwing)
+    expect(d.ok).toBe(false)
+    if (!d.ok) expect(d.reason).toContain('canonicalizzazione')
+  })
+})
+
+describe('validateInsideRoot (single-root confinement, e.g. downloads reveal)', () => {
+  const DL = roots.downloads
+
+  it('accepts an archive inside the root', () => {
+    const p = join(DL, 'Cool Mod-f1.7z')
+    expect(validateInsideRoot(p, DL, idProbe)).toEqual({ ok: true, path: p })
+  })
+
+  it('rejects a path outside the root even if it is a valid authorized root elsewhere', () => {
+    expect(validateInsideRoot(join(roots.mods, 'x.7z'), DL, idProbe).ok).toBe(false)
+  })
+
+  it('rejects UNC, executables, and empty', () => {
+    expect(validateInsideRoot('\\\\srv\\share\\a.7z', DL, idProbe).ok).toBe(false)
+    expect(validateInsideRoot(join(DL, 'setup.exe'), DL, idProbe).ok).toBe(false)
+    expect(validateInsideRoot('', DL, idProbe).ok).toBe(false)
+  })
+
+  it('FAIL-CLOSED when realpath throws on the target', () => {
+    const bad = join(DL, 'loop.7z')
+    const throwing: RevealProbe = {
+      exists: () => true,
+      realpath: (p) => {
+        if (p === bad) throw new Error('ELOOP')
+        return p
+      },
+    }
+    expect(validateInsideRoot(bad, DL, throwing).ok).toBe(false)
+  })
+
+  it('rejects a junction whose REAL target escapes the root', () => {
+    const link = join(DL, 'link.7z')
+    const escaping: RevealProbe = {
+      exists: () => true,
+      realpath: (p) => (p === link ? 'C:\\Windows\\System32\\evil.7z' : p),
+    }
+    expect(validateInsideRoot(link, DL, escaping).ok).toBe(false)
   })
 })

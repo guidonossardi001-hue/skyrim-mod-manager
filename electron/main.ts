@@ -57,7 +57,7 @@ import { getFreeSpace } from './install/diskSpace'
 import { sanitizePathSegment } from './util/paths'
 import {
   revealDirForKind,
-  validateOpenPath,
+  validateInsideRoot,
   resolveReadDir,
   type RevealRoots,
   type RevealProbe,
@@ -422,10 +422,18 @@ function registerNxmProtocol() {
 // becomes a real download when the user approves it via the nxm:approve IPC. URLs arriving
 // before the DB/queue exist (cold start) are buffered and flushed after init.
 const pendingNxm: string[] = []
+// Cold-start buffer cap: the nxmConsent store already caps at 20 AFTER the DB is ready, but URLs
+// arriving BEFORE init sit here unbounded — a page firing a burst of nxm:// links at launch could
+// flood memory. Cap it the same way; extra links are dropped with a warning (default-deny).
+const PENDING_NXM_CAP = 20
 const nxmConsent = new NxmConsentStore({ genToken: () => randomUUID(), cap: 20 })
 
 function handleNxmUrl(raw: string) {
   if (!db || !downloadQueue) {
+    if (pendingNxm.length >= PENDING_NXM_CAP) {
+      logger.warn('nxm', `buffer nxm pre-init pieno (${PENDING_NXM_CAP}): link scartato`)
+      return
+    }
     pendingNxm.push(raw)
     return
   }
@@ -1559,7 +1567,17 @@ ipcMain.handle('fs:pick-file', async (_e, title?: string, filters?: Electron.Fil
 // within that one root, with `..`/symlink escapes rejected by resolveReadDir (realpath +
 // containment). Entry names/sizes only — the absolute path is not returned to the renderer.
 // Async + one stat per entry via Dirent so a big directory never freezes the main process.
+//
+// Only the APP-MANAGED, non-store-tunable kinds are listable (backups/downloads/logs — always
+// under userData). The user-configured kinds (game/mo2/mods/stockGame/instances) resolve through
+// store paths a compromised renderer can repoint via settings:set, which would turn read-dir back
+// into an arbitrary-directory oracle; they are refused here at the source.
+const READDIR_KINDS = new Set(['backups', 'downloads', 'logs'])
 ipcMain.handle('fs:read-dir', async (_e, kind: string, subpath?: string) => {
+  if (!READDIR_KINDS.has(kind)) {
+    logger.warn('security', `fs:read-dir rifiutato (kind non elencabile): ${String(kind).slice(0, 40)}`)
+    return { ok: false, error: 'Cartella non disponibile', entries: [] }
+  }
   const decision = resolveReadDir(kind, revealRoots(), subpath, revealProbe)
   if (!decision.ok) {
     logger.warn('security', `fs:read-dir rifiutato (${decision.reason}): kind=${String(kind).slice(0, 40)}`)
@@ -1661,7 +1679,11 @@ ipcMain.handle('fs:open-download', (_e, downloadId: number) => {
     | { file_path: string | null }
     | undefined
   if (!row?.file_path) return { success: false, error: 'File non disponibile' }
-  const decision = validateOpenPath(row.file_path, revealRoots(), revealProbe)
+  // A completed download ALWAYS lives under the app-managed userData/downloads dir (the download
+  // manager writes only there). Confine to that ONE non-store-tunable root — validating against
+  // the full revealRoots() would let a renderer widen a root via settings:set and reveal any file.
+  const downloadsDir = join(app.getPath('userData'), 'downloads')
+  const decision = validateInsideRoot(row.file_path, downloadsDir, revealProbe)
   if (!decision.ok) {
     logger.warn('security', `fs:open-download rifiutato (${decision.reason}): ${row.file_path.slice(0, 120)}`)
     return { success: false, error: 'Percorso non autorizzato' }

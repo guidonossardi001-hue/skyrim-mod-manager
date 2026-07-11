@@ -63,12 +63,17 @@ export interface RevealProbe {
   realpath: (p: string) => string
 }
 
-/** Canonicalize a path: real path when it exists (symlink-safe), else a plain resolve. */
-function canonical(p: string, probe: RevealProbe): string {
+/**
+ * Canonicalize a path: real path when it exists (symlink-safe), else a plain resolve.
+ * Returns null (FAIL-CLOSED) when the path exists but realpath THROWS — e.g. a broken or
+ * looping reparse point. Returning the un-resolved literal there (the old behavior) would pass
+ * containment while the OS still follows the reparse point to an out-of-root target.
+ */
+function canonical(p: string, probe: RevealProbe): string | null {
   try {
     return probe.exists(p) ? probe.realpath(p) : resolve(p)
   } catch {
-    return resolve(p)
+    return null
   }
 }
 
@@ -88,12 +93,31 @@ export function validateOpenPath(
   if (/^\\\\/.test(rawPath) || /^\/\//.test(rawPath)) return { ok: false, reason: 'percorso UNC non consentito' }
 
   const p = canonical(rawPath, probe)
+  if (p == null) return { ok: false, reason: 'canonicalizzazione fallita (reparse point non risolvibile)' }
   if (isExecutablePath(p)) return { ok: false, reason: `estensione eseguibile non consentita (${extname(p)})` }
 
-  const resolvedRoots = allowedRoots(roots).map((r) => canonical(r, probe))
+  const resolvedRoots = allowedRoots(roots)
+    .map((r) => canonical(r, probe))
+    .filter((r): r is string => r != null)
   if (!resolvedRoots.some((root) => isPathInside(root, p))) {
     return { ok: false, reason: 'percorso fuori dalle cartelle autorizzate' }
   }
+  return { ok: true, path: p }
+}
+
+/**
+ * Like validateOpenPath but confined to a SINGLE root (used to reveal a completed download,
+ * which only ever lives under the app-managed userData/downloads — never a store-tunable root).
+ * Rejects UNC, executables, unresolvable reparse points, and anything outside that one root.
+ */
+export function validateInsideRoot(rawPath: string, root: string, probe: RevealProbe): OpenDecision {
+  if (typeof rawPath !== 'string' || !rawPath.trim()) return { ok: false, reason: 'percorso vuoto' }
+  if (/^\\\\/.test(rawPath) || /^\/\//.test(rawPath)) return { ok: false, reason: 'percorso UNC non consentito' }
+  const p = canonical(rawPath, probe)
+  if (p == null) return { ok: false, reason: 'canonicalizzazione fallita (reparse point non risolvibile)' }
+  if (isExecutablePath(p)) return { ok: false, reason: `estensione eseguibile non consentita (${extname(p)})` }
+  const r = canonical(root, probe)
+  if (r == null || !isPathInside(r, p)) return { ok: false, reason: 'percorso fuori dalla cartella autorizzata' }
   return { ok: true, path: p }
 }
 
@@ -122,6 +146,9 @@ export function resolveReadDir(
   const target = subpath ? join(base, subpath) : base
   const cBase = canonical(base, probe)
   const cTarget = canonical(target, probe)
+  if (cBase == null || cTarget == null) {
+    return { ok: false, reason: 'canonicalizzazione fallita (reparse point non risolvibile)' }
+  }
   if (!isPathInside(cBase, cTarget)) {
     return { ok: false, reason: 'percorso fuori dalla cartella autorizzata' }
   }

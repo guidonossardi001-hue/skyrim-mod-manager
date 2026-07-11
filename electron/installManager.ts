@@ -117,6 +117,22 @@ export function initInstallManager(
 
     const nexusId = row.nexus_id ?? 0
     const expected = expectedHash(downloadId)
+    // FAIL-CLOSED second gate. The download boundary persists a trusted hash onto every archive it
+    // accepts (delta manifest sha256, or an md5_search-confirmed md5). A completed row with NO
+    // resolvable hash therefore never passed that gate — e.g. a compromised renderer calling
+    // downloads:add(status='completed', file_path=…) then install:run — so refuse to extract it.
+    // The installer must never open on missing verification data (was: verify only `if (fileHash)`).
+    if (!expected) {
+      const msg = 'integrità non verificabile: nessun hash di riferimento (download non verificato dal gate)'
+      db.prepare("UPDATE downloads SET status='failed', error=? WHERE id=?").run(
+        `Installazione [hash]: ${msg}`,
+        downloadId,
+      )
+      logger.warn('install', `Installazione rifiutata "${row.name}": ${msg}`)
+      send('install:error', { id: downloadId, error: msg, errorKind: 'hash', integrity: true })
+      hooks?.onError?.(downloadId, msg)
+      return { success: false, nexusId, errorKind: 'hash', error: msg }
+    }
     db.prepare("UPDATE downloads SET status='installing' WHERE id=?").run(downloadId)
 
     // Delegate the full pipeline (verify → stage → extract → map → commit) to the

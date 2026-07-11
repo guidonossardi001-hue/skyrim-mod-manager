@@ -24,7 +24,8 @@ function testDb(): SqliteDb {
     CREATE TABLE mods (id INTEGER PRIMARY KEY AUTOINCREMENT, is_installed INTEGER DEFAULT 0,
       install_path TEXT, updated_at TEXT);
     CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, mod_id INTEGER, nexus_id INTEGER,
-      file_id INTEGER, name TEXT NOT NULL, file_path TEXT, status TEXT DEFAULT 'pending', error TEXT);
+      file_id INTEGER, name TEXT NOT NULL, file_path TEXT, status TEXT DEFAULT 'pending', error TEXT,
+      file_hash TEXT, hash_algo TEXT);
     CREATE TABLE delta_changeset (id INTEGER PRIMARY KEY AUTOINCREMENT, download_id INTEGER, to_file_hash TEXT);
   `)
   return db
@@ -66,10 +67,23 @@ beforeEach(() => {
 })
 afterEach(() => rmSync(dir, { recursive: true, force: true }))
 
-const seedDownload = (over: Partial<{ mod_id: number; nexus_id: number; file_id: number; file_path: string }> = {}) => {
+const seedDownload = (
+  over: Partial<{ mod_id: number; nexus_id: number; file_id: number; file_path: string; file_hash: string }> = {},
+) => {
   const r = db
-    .prepare('INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status) VALUES (?,?,?,?,?,?)')
-    .run(over.mod_id ?? null, over.nexus_id ?? 1234, over.file_id ?? 55, 'Cool Mod', over.file_path ?? archive, 'pending')
+    .prepare(
+      'INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status, file_hash, hash_algo) VALUES (?,?,?,?,?,?,?,?)',
+    )
+    .run(
+      over.mod_id ?? null,
+      over.nexus_id ?? 1234,
+      over.file_id ?? 55,
+      'Cool Mod',
+      over.file_path ?? archive,
+      'pending',
+      over.file_hash ?? null,
+      over.file_hash ? 'sha256' : null,
+    )
   return Number(r.lastInsertRowid)
 }
 
@@ -105,7 +119,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('failure: records failed status with errorKind, emits install:error, fires onError', async () => {
-    const id = seedDownload()
+    const id = seedDownload({ file_hash: 'seedhash' })
     const { service } = fakeInstaller(() => ({ success: false, nexusId: 1234, errorKind: 'recipe', error: 'nessun file' }))
     const onError = vi.fn()
     const mgr = initInstallManager(db as never, win, service, { onError })
@@ -121,7 +135,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('forwards installer progress to install:progress', async () => {
-    const id = seedDownload()
+    const id = seedDownload({ file_hash: 'seedhash' })
     const { service } = fakeInstaller((args) => {
       const opts = (args as unknown[])[4] as { onProgress?: (p: InstallProgress) => void }
       opts.onProgress?.({ nexusId: 1234, stage: 'extracting', percent: 50 })
@@ -141,6 +155,24 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
     expect(res.errorKind).toBe('not-found')
   })
 
+  it('FAIL-CLOSED: refuses to install a completed download with no trusted hash (bypassed the gate)', async () => {
+    // A row with a real file but NO file_hash and NO delta hash never passed the download gate
+    // (e.g. downloads:add(status=completed, file_path) + install:run). It must be rejected, never
+    // extracted — the second gate is fail-closed, not fail-open on missing verification data.
+    const id = seedDownload() // no file_hash, no delta_changeset
+    const { service, installMod } = fakeInstaller()
+    const onError = vi.fn()
+    const mgr = initInstallManager(db as never, win, service, { onError })
+    const res = await mgr.runInstall(id)
+    expect(res.success).toBe(false)
+    expect(res.errorKind).toBe('hash')
+    expect(installMod).not.toHaveBeenCalled() // archive never reaches extraction
+    expect((db.prepare('SELECT status FROM downloads WHERE id=?').get(id) as { status: string }).status).toBe('failed')
+    const err = sent.find((s) => s.ch === 'install:error')
+    expect(err?.payload.integrity).toBe(true)
+    expect(onError).toHaveBeenCalled()
+  })
+
   it('missing archive file → marks the download failed with not-found', async () => {
     const id = seedDownload({ file_path: join(dir, 'gone.bin') })
     const { service, installMod } = fakeInstaller()
@@ -152,7 +184,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('install:run IPC handler is a no-throw boundary (installer throw → db result)', async () => {
-    const id = seedDownload()
+    const id = seedDownload({ file_hash: 'seedhash' })
     const { service } = fakeInstaller(() => {
       throw new Error('boom low-level')
     })
@@ -174,7 +206,8 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
       CREATE TABLE mods (id INTEGER PRIMARY KEY AUTOINCREMENT, is_installed INTEGER DEFAULT 0,
         install_path TEXT, updated_at TEXT, deploy_category TEXT, resolution_weight INTEGER);
       CREATE TABLE downloads (id INTEGER PRIMARY KEY AUTOINCREMENT, mod_id INTEGER, nexus_id INTEGER,
-        file_id INTEGER, name TEXT NOT NULL, file_path TEXT, status TEXT DEFAULT 'pending', error TEXT);
+        file_id INTEGER, name TEXT NOT NULL, file_path TEXT, status TEXT DEFAULT 'pending', error TEXT,
+        file_hash TEXT, hash_algo TEXT);
       CREATE TABLE delta_changeset (id INTEGER PRIMARY KEY AUTOINCREMENT, download_id INTEGER, to_file_hash TEXT);
       CREATE TABLE modlist_catalog (nexus_id INTEGER, name TEXT, deploy_category TEXT, resolution_weight INTEGER);
     `)
@@ -185,7 +218,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
     const dlId = Number(
       d
         .prepare(
-          'INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status) VALUES (?,?,?,?,?,?)',
+          "INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status, file_hash, hash_algo) VALUES (?,?,?,?,?,?,'seedhash','sha256')",
         )
         .run(modId, 4242, 7, 'HD Textures', archive, 'pending').lastInsertRowid,
     )
