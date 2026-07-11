@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, rmSync, readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -53,6 +54,7 @@ function fakeInstaller(impl?: (args: unknown[]) => Promise<InstallResult> | Inst
 
 let dir: string
 let archive: string
+let archiveHash: string // REAL sha256 of the test archive, seeded so fixtures carry a genuine hash
 let db: SqliteDb
 let sent: { ch: string; payload: Record<string, unknown> }[]
 const win = () => ({ webContents: { send: (ch: string, payload: Record<string, unknown>) => sent.push({ ch, payload }) } }) as never
@@ -61,6 +63,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'smm-im-'))
   archive = join(dir, 'a.bin')
   writeFileSync(archive, 'bytes')
+  archiveHash = createHash('sha256').update(readFileSync(archive)).digest('hex')
   db = testDb()
   sent = []
   vi.clearAllMocks()
@@ -91,7 +94,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   it('success: delegates with resolved identity, updates DB + mods, emits complete, fires hook', async () => {
     const modId = Number(db.prepare('INSERT INTO mods (is_installed) VALUES (0)').run().lastInsertRowid)
     const id = seedDownload({ mod_id: modId })
-    db.prepare('INSERT INTO delta_changeset (download_id, to_file_hash) VALUES (?,?)').run(id, 'abc123')
+    db.prepare('INSERT INTO delta_changeset (download_id, to_file_hash) VALUES (?,?)').run(id, archiveHash)
     const { service, installMod, calls } = fakeInstaller()
     const onComplete = vi.fn()
     const mgr = initInstallManager(db as never, win, service, { onComplete })
@@ -103,7 +106,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
     const [nexusId, fileId, fileHash, archivePath, opts] = calls[0] as [number, number, string, string, Record<string, unknown>]
     expect(nexusId).toBe(1234)
     expect(fileId).toBe(55)
-    expect(fileHash).toBe('abc123')
+    expect(fileHash).toBe(archiveHash) // the real delta sha256 flows through to the installer
     expect(archivePath).toBe(archive)
     expect(opts.force).toBe(true)
     // Folder namespaced by the stable nexus_id so same-name mods can't collide.
@@ -119,7 +122,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('failure: records failed status with errorKind, emits install:error, fires onError', async () => {
-    const id = seedDownload({ file_hash: 'seedhash' })
+    const id = seedDownload({ file_hash: archiveHash })
     const { service } = fakeInstaller(() => ({ success: false, nexusId: 1234, errorKind: 'recipe', error: 'nessun file' }))
     const onError = vi.fn()
     const mgr = initInstallManager(db as never, win, service, { onError })
@@ -135,7 +138,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('forwards installer progress to install:progress', async () => {
-    const id = seedDownload({ file_hash: 'seedhash' })
+    const id = seedDownload({ file_hash: archiveHash })
     const { service } = fakeInstaller((args) => {
       const opts = (args as unknown[])[4] as { onProgress?: (p: InstallProgress) => void }
       opts.onProgress?.({ nexusId: 1234, stage: 'extracting', percent: 50 })
@@ -184,7 +187,7 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('install:run IPC handler is a no-throw boundary (installer throw → db result)', async () => {
-    const id = seedDownload({ file_hash: 'seedhash' })
+    const id = seedDownload({ file_hash: archiveHash })
     const { service } = fakeInstaller(() => {
       throw new Error('boom low-level')
     })
@@ -218,9 +221,9 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
     const dlId = Number(
       d
         .prepare(
-          "INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status, file_hash, hash_algo) VALUES (?,?,?,?,?,?,'seedhash','sha256')",
+          "INSERT INTO downloads (mod_id, nexus_id, file_id, name, file_path, status, file_hash, hash_algo) VALUES (?,?,?,?,?,?,?,'sha256')",
         )
-        .run(modId, 4242, 7, 'HD Textures', archive, 'pending').lastInsertRowid,
+        .run(modId, 4242, 7, 'HD Textures', archive, 'pending', archiveHash).lastInsertRowid,
     )
 
     const { service } = fakeInstaller()
