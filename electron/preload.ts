@@ -153,9 +153,11 @@ contextBridge.exposeInMainWorld('api', {
   compat: {
     analyze: () => invoke('compat:analyze'),
   },
-  // Load order (v1.1.0): the effective plugin order Skyrim reads.
+  // Load order (v1.1.0): read the effective plugin order Skyrim reads, and write
+  // it back to plugins.txt (backed up first, atomic, no-throw).
   plugin: {
     getOrder: () => invoke('plugin:get-order'),
+    saveOrder: (entries: unknown) => invoke('plugin:save-order', entries),
   },
 
   // Download manager

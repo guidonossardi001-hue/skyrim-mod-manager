@@ -910,6 +910,12 @@ export const mockApi = {
         }))
       return [...base, ...mods]
     },
+    // Browser simulation: no real filesystem — echo a success Result.
+    saveOrder: async (entries: { name: string; active: boolean; index: number }[]) => ({
+      success: true,
+      written: Array.isArray(entries) ? entries.length : 0,
+      backupPath: 'C:/Users/User/AppData/Local/Skyrim Special Edition/plugins.txt.bak',
+    }),
   },
 
   // Vortex importer — simulated scan of two collections for the browser preview.

@@ -23,7 +23,8 @@ import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } 
 import { detectSteamEnv } from './steam/detect'
 import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
 import { runCompatReport } from './launch/compat'
-import { getLoadOrder } from './pluginManager'
+import { getLoadOrder, saveLoadOrder } from './pluginManager'
+import type { LoadOrderEntry } from '../src/types'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
@@ -701,14 +702,29 @@ app.whenReady().then(() => {
   // Load order (v1.1.0 "Conflict & Load Order"): the effective plugin order Skyrim
   // reads. Data source = the isolated StockGame Data (where mods are hardlinked) if
   // it exists, else the vanilla game Data; order source = the game's real plugins.txt
-  // in %LOCALAPPDATA%. READ-ONLY — never writes plugins.txt or the load order (yet).
-  ipcMain.handle('plugin:get-order', () => {
+  // in %LOCALAPPDATA%.
+  const resolveLoadOrderDataDir = (): string => {
     const stockData = join(resolveStockTarget(), 'Data')
     const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
-    const dataDir = existsSync(stockData) ? stockData : gamePath ? join(gamePath, 'Data') : ''
+    return existsSync(stockData) ? stockData : gamePath ? join(gamePath, 'Data') : ''
+  }
+  const resolvePluginsTxtPath = (): string => {
     const localAppData = process.env.LOCALAPPDATA || join(app.getPath('home'), 'AppData', 'Local')
-    const pluginsTxtPath = join(localAppData, 'Skyrim Special Edition', 'plugins.txt')
-    return getLoadOrder({ dataDir, pluginsTxtPath })
+    return join(localAppData, 'Skyrim Special Edition', 'plugins.txt')
+  }
+
+  ipcMain.handle('plugin:get-order', () =>
+    getLoadOrder({ dataDir: resolveLoadOrderDataDir(), pluginsTxtPath: resolvePluginsTxtPath() }),
+  )
+
+  // Write the load order back to the real plugins.txt (Milestone 2). Backs up the
+  // current file to plugins.txt.bak, writes atomically, and never throws — returns
+  // a { success, error?, backupPath, written } Result to the renderer.
+  ipcMain.handle('plugin:save-order', (_e, entries: LoadOrderEntry[]) => {
+    const res = saveLoadOrder(entries, resolvePluginsTxtPath())
+    if (res.success) logger.info('plugin', `plugins.txt salvato (${res.written} righe, backup: ${res.backupPath ?? 'nessuno'})`)
+    else logger.warn('plugin', `salvataggio plugins.txt fallito: ${res.error}`)
+    return res
   })
 
   // Pandora detection (PANDORA-REGISTER-01): locate the engine exe, persist its path,

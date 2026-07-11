@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, readdirSync } from 'fs'
-import type { LoadOrderEntry } from '../src/types'
+import { existsSync, readFileSync, readdirSync, writeFileSync, copyFileSync, renameSync, unlinkSync } from 'fs'
+import type { LoadOrderEntry, SaveLoadOrderResult } from '../src/types'
 
 // v1.1.0 "Conflict & Load Order" — visibility layer. Reads the EFFECTIVE load
 // order Skyrim uses: merges the game's real plugins.txt
@@ -121,4 +121,81 @@ export function getLoadOrder(sources: LoadOrderSources): LoadOrderEntry[] {
     txt = [] // unreadable → treat as absent
   }
   return mergeLoadOrder(txt, diskFiles)
+}
+
+// ── Write path (Milestone 2) ────────────────────────────────────────────────
+
+export interface SaveLoadOrderOptions {
+  // Skyrim SE reads plugins.txt as UTF-8 and is written WITHOUT a BOM by the
+  // engine and by Mod Organizer 2 — so that is the default. The flag exists only
+  // for a hypothetical engine variant that demands a BOM; parse is BOM-tolerant
+  // either way, so a round-trip is safe.
+  bom?: boolean
+}
+
+// SaveLoadOrderResult is single-sourced in src/types (shared API contract).
+
+/**
+ * Serialize a load order to Skyrim plugins.txt text: active plugins get a leading
+ * `*`, inactive ones just the name, one per line, CRLF-terminated (Windows engine).
+ * Entries are emitted in ascending `index` order; names are stripped of any stray
+ * line breaks so a bad name can never corrupt the line-based format. Pure.
+ */
+export function serializePluginsTxt(entries: LoadOrderEntry[], opts: SaveLoadOrderOptions = {}): string {
+  const ordered = [...entries].sort((a, b) => a.index - b.index)
+  const lines: string[] = []
+  for (const e of ordered) {
+    const name = e.name.replace(/[\r\n]+/g, '').trim()
+    if (name) lines.push((e.active ? '*' : '') + name)
+  }
+  const body = lines.length ? lines.join('\r\n') + '\r\n' : ''
+  return (opts.bom ? String.fromCharCode(0xfeff) : '') + body
+}
+
+/**
+ * Persist a load order to plugins.txt. Steps, all guarded — a failure returns a
+ * Result, never throws into the main process:
+ *   1. back up the current plugins.txt to plugins.txt.bak (overwriting a stale one);
+ *   2. write the new content to a temp sibling, then rename it over the target
+ *      (atomic — a crash mid-write cannot leave a half-written plugins.txt).
+ * A missing source file (Skyrim not yet run) just skips the backup and writes fresh.
+ */
+export function saveLoadOrder(
+  entries: LoadOrderEntry[],
+  pluginsTxtPath: string,
+  opts: SaveLoadOrderOptions = {},
+): SaveLoadOrderResult {
+  const tmpPath = pluginsTxtPath ? pluginsTxtPath + '.tmp' : ''
+  try {
+    if (!Array.isArray(entries)) {
+      return { success: false, written: 0, backupPath: null, error: 'entries non è un array valido' }
+    }
+    if (!pluginsTxtPath) {
+      return { success: false, written: 0, backupPath: null, error: 'Percorso di plugins.txt non risolto' }
+    }
+
+    const content = serializePluginsTxt(entries, opts)
+
+    // 1) Backup the existing file first (overwrite any previous .bak).
+    let backupPath: string | null = null
+    if (existsSync(pluginsTxtPath)) {
+      backupPath = pluginsTxtPath + '.bak'
+      copyFileSync(pluginsTxtPath, backupPath)
+    }
+
+    // 2) Atomic write: temp file → rename over target.
+    writeFileSync(tmpPath, content, 'utf8')
+    renameSync(tmpPath, pluginsTxtPath)
+
+    const written = (content.charCodeAt(0) === 0xfeff ? content.slice(1) : content).split(/\r?\n/).filter((l) => l.length > 0).length
+    return { success: true, written, backupPath }
+  } catch (e) {
+    // Best-effort cleanup of a leftover temp file; never rethrow.
+    try {
+      if (tmpPath && existsSync(tmpPath)) unlinkSync(tmpPath)
+    } catch {
+      /* ignore */
+    }
+    return { success: false, written: 0, backupPath: null, error: (e as Error).message }
+  }
 }

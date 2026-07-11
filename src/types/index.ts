@@ -146,6 +146,14 @@ export interface LoadOrderEntry {
   index: number
 }
 
+// Result of writing the load order back to plugins.txt (v1.1.0 Milestone 2).
+export interface SaveLoadOrderResult {
+  success: boolean
+  written: number
+  backupPath: string | null
+  error?: string
+}
+
 // Window API type (injected by preload)
 declare global {
   interface Window {
@@ -357,9 +365,11 @@ declare global {
       compat: {
         analyze(): Promise<CompatAnalysis>
       }
-      // Load order (v1.1.0) — reads the game's real plugins.txt + Data/ scan.
+      // Load order (v1.1.0) — reads the game's real plugins.txt + Data/ scan (get)
+      // and writes it back with a backup (save).
       plugin: {
         getOrder(): Promise<LoadOrderEntry[]>
+        saveOrder(entries: LoadOrderEntry[]): Promise<SaveLoadOrderResult>
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).
       stockGame: {
