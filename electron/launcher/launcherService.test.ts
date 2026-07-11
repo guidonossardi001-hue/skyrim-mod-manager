@@ -22,6 +22,13 @@ describe('launchGame', () => {
     expect(r.pid).toBeUndefined()
   })
 
+  it('rejects a UNC executable path (SRB-001 defense-in-depth), no spawn', () => {
+    const r = launchGame({ exePath: '\\\\attacker\\share\\evil.exe' })
+    expect(r.success).toBe(false)
+    expect(r.error).toMatch(/UNC/)
+    expect(r.pid).toBeUndefined()
+  })
+
   it('spawns a real executable detached and returns a pid', () => {
     // process.execPath (the Node binary running this test) is a real, absolute,
     // guaranteed-existing executable — no fixture needed. --version exits almost

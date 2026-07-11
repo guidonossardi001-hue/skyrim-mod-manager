@@ -55,6 +55,7 @@ import {
 } from './sync/massSync'
 import { getFreeSpace } from './install/diskSpace'
 import { sanitizePathSegment } from './util/paths'
+import { validateSettingWrite } from './util/settingsGuard'
 import {
   revealDirForKind,
   validateInsideRoot,
@@ -1238,6 +1239,14 @@ ipcMain.handle('settings:set', (_e, key: string, value: unknown) => {
   // identifier, so reject anything else up front (config-clobber / pollution guard).
   if (typeof key !== 'string' || !/^[A-Za-z][A-Za-z0-9_]*$/.test(key)) {
     logger.warn('security', `settings:set rifiutato (chiave non valida): ${String(key).slice(0, 80)}`)
+    return
+  }
+  // SRB-001: security-relevant PATH settings (gamePath/mo2Path/tool exes) feed filesystem
+  // resolution and process spawning. Reject a UNC / non-absolute / control-char value so a
+  // compromised renderer cannot repoint the launcher at a remote or crafted executable.
+  const writeCheck = validateSettingWrite(key, value)
+  if (!writeCheck.ok) {
+    logger.warn('security', `settings:set rifiutato per "${key}" (${writeCheck.reason})`)
     return
   }
   if (SECRET_KEYS.has(key)) {

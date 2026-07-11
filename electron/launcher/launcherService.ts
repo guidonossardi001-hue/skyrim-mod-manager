@@ -41,6 +41,12 @@ export interface LaunchGameResult {
  * it never rejects/throws into the caller.
  */
 export function launchGame(opts: LaunchGameOptions): LaunchGameResult {
+  // Defense-in-depth (SRB-001): never spawn from a UNC path — it would mount a remote/WebDAV
+  // share and run a remote executable. The exe path is resolved from settings (now UNC-guarded),
+  // but this boundary must hold regardless of how the caller obtained the path.
+  if (/^\\\\/.test(opts.exePath ?? '') || /^\/\//.test(opts.exePath ?? '')) {
+    return { success: false, error: `Percorso UNC non consentito: ${opts.exePath}` }
+  }
   if (!opts.exePath || !existsSync(opts.exePath)) {
     return { success: false, error: `Eseguibile non trovato: ${opts.exePath}` }
   }
