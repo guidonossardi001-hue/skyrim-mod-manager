@@ -23,6 +23,7 @@ import { toast } from '@/lib/toast'
 import { runPreflight, preflightSummary } from '@/lib/preflight'
 import { LaunchPreflight } from '@/components/ui/LaunchPreflight'
 import { StockGamePanel } from '@/components/ui/StockGamePanel'
+import { DeployPanel } from '@/components/ui/DeployPanel'
 import type { LogLine } from '@/store/appStore'
 import type { SyncProgressUI, DiskPreflightUI, DiskErrorUI, PluginBudgetUI } from '@/types'
 
@@ -958,6 +959,12 @@ export default function Dashboard() {
 
       {/* StockGame builder — isolated vanilla copy */}
       <StockGamePanel onLog={pushLog} />
+
+      {/* Hardlink deployment engine — link mods into the instance + load order */}
+      <DeployPanel
+        profileId={activeProfileId ?? null}
+        onLog={(m, level) => pushLog(m, (level as LogLine['level']) ?? 'info')}
+      />
 
       {/* Real-time activity log console */}
       <LogConsole lines={activityLog} onClear={clearLog} />

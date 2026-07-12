@@ -609,6 +609,15 @@ app.whenReady().then(() => {
     },
     // Creation Club "System DLC" source: the isolated StockGame's Data folder.
     resolveStockGameDataDir: () => join(resolveStockTarget(), 'Data'),
+    // plugins.txt DI SISTEMA: %LOCALAPPDATA%/Skyrim Special Edition — è quello che il gioco legge
+    // quando parte via SKSE diretto (senza MO2). Scritto solo se la cartella esiste già (gioco
+    // installato/avviato almeno una volta): non creiamo alberi in LOCALAPPDATA al buio.
+    resolveSystemPluginsDir: () => {
+      const base = process.env.LOCALAPPDATA
+      if (!base) return null
+      const dir = join(base, 'Skyrim Special Edition')
+      return existsSync(dir) ? dir : null
+    },
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
 

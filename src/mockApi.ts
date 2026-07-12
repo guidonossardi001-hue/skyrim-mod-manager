@@ -746,6 +746,36 @@ export const mockApi = {
     },
   },
 
+  // Preview stub: il deploy reale crea hardlink/junction su disco (solo app desktop). Il mock
+  // simula un run riuscito con numeri plausibili così la card Deployment è verificabile in anteprima.
+  deploy: {
+    run: async (_profileId: number) => {
+      const enabled = state.mods.filter((m) => m.is_enabled && m.is_installed).length
+      if (!enabled) return { success: false as const, errorKind: 'no-mods' as const, error: 'nessuna mod abilitata da distribuire' }
+      return {
+        success: true as const,
+        instanceDataDir: 'C:/preview/instances/Default/Data',
+        modsLinked: enabled,
+        filesHardlinked: enabled * 12,
+        junctionsCreated: Math.max(1, Math.floor(enabled / 2)),
+        pluginsWritten: enabled,
+        pluginsPath: 'C:/preview/instances/Default/plugins.txt',
+        systemPluginsPath: 'C:/preview/AppData/Local/Skyrim Special Edition/plugins.txt',
+        ccFilesLinked: 0,
+      }
+    },
+    purge: async (_profileId: number) => ({
+      success: true as const,
+      manifestFound: true,
+      filesRemoved: 24,
+      junctionsRemoved: 2,
+      dirsPruned: 3,
+      skipped: 0,
+      systemPluginsRestored: true,
+    }),
+    onProgress: (_cb: unknown) => () => {},
+  },
+
   downloads: {
     list: async (profileId: number) => {
       tickDownloads()

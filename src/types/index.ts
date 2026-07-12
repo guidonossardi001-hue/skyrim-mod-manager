@@ -404,14 +404,35 @@ declare global {
           junctionsCreated?: number
           pluginsWritten?: number
           pluginsPath?: string
-          errorKind?: 'no-mods' | 'cross-volume' | 'source-missing' | 'cleanup' | 'link' | 'db'
+          systemPluginsPath?: string
+          ccFilesLinked?: number
+          errorKind?:
+            | 'no-mods'
+            | 'cross-volume'
+            | 'source-missing'
+            | 'dependency-cycle'
+            | 'cleanup'
+            | 'link'
+            | 'db'
+          error?: string
+        }>
+        // Purge manifest-based: rimuove SOLO ciò che il deploy ha creato (hardlink/junction
+        // registrati) e ripristina il plugins.txt di sistema dal backup. Never rejects.
+        purge(profileId: number): Promise<{
+          success: boolean
+          manifestFound: boolean
+          filesRemoved: number
+          junctionsRemoved: number
+          dirsPruned: number
+          skipped: number
+          systemPluginsRestored: boolean
           error?: string
         }>
         // Streamed progress. Mirrors DeployProgress in electron/deploy/deployer.ts.
         // Returns an unsubscribe function — call it on unmount to detach the listener.
         onProgress(
           callback: (p: {
-            stage: 'scanning' | 'cleaning' | 'linking' | 'plugins' | 'done'
+            stage: 'scanning' | 'cleaning' | 'linking' | 'plugins' | 'ini' | 'done'
             currentMod?: string
             currentFile?: string
             processedItems?: number

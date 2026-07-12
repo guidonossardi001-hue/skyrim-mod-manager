@@ -228,6 +228,128 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
 
 const TYPE_RANK: Record<PluginType, number> = { ESM: 0, ESL: 1, ESP: 2 }
 
+// ── Ordinamento plugin sul grafo delle dipendenze (load order sicuro) ─────────────────────────
+// La priorità utente da sola non basta: se la mod A richiede la master della mod B ma l'utente ha
+// dato ad A priorità più bassa, il gioco crasha al load ("missing master"). Qui i MOD che
+// forniscono plugin vengono riordinati topologicamente sul grafo `requires` del catalogo
+// (dipendenze prima dei dipendenti), stabile rispetto a (priorità, nome) tra i nodi pronti.
+// Un ciclo nel grafo è un dato corrotto: NIENTE ordine parziale silenzioso — il chiamante deve
+// BLOCCARE il deploy e riportare il ciclo all'utente (fail-safe, mai un plugins.txt azzardato).
+
+export type PluginOrderResult =
+  | { ok: true; plugins: PluginEntry[] }
+  | { ok: false; cycle: string[] } // nomi dei mod coinvolti nel ciclo, in ordine di attraversamento
+
+export function orderPluginsByDependencies(
+  plugins: PluginEntry[],
+  nexusIdOf: Map<string, number>, // providing-mod name → nexus_id (mod senza id = nodo isolato)
+  requires: Map<number, number[]>, // grafo requires del catalogo (nexus_id → deps)
+): PluginOrderResult {
+  if (!plugins.length) return { ok: true, plugins: [] }
+  // Nodi = mod che forniscono plugin in QUESTO deploy. Priorità di un nodo = min tra i suoi plugin.
+  const modPriority = new Map<string, number>()
+  for (const p of plugins) {
+    const cur = modPriority.get(p.mod)
+    if (cur == null || p.priority < cur) modPriority.set(p.mod, p.priority)
+  }
+  const nodes = [...modPriority.keys()]
+  const byNexus = new Map<number, string>()
+  for (const n of nodes) {
+    const id = nexusIdOf.get(n)
+    if (id != null) byNexus.set(id, n)
+  }
+  // Archi dep→dependent, SOLO tra mod entrambi presenti nel deploy (una dipendenza esterna non
+  // vincola l'ordine interno). indegree[dependent] = numero di dipendenze interne.
+  const dependents = new Map<string, string[]>()
+  const indegree = new Map<string, number>(nodes.map((n) => [n, 0]))
+  for (const n of nodes) {
+    const id = nexusIdOf.get(n)
+    if (id == null) continue
+    for (const depId of requires.get(id) ?? []) {
+      const depMod = byNexus.get(depId)
+      if (!depMod || depMod === n) continue
+      const arr = dependents.get(depMod) ?? []
+      arr.push(n)
+      dependents.set(depMod, arr)
+      indegree.set(n, (indegree.get(n) ?? 0) + 1)
+    }
+  }
+  // Kahn stabile: tra i nodi pronti vince (priorità utente, nome) — l'ordine utente resta il
+  // tie-break dentro i vincoli del grafo.
+  const readySort = (a: string, b: string) =>
+    (modPriority.get(a) ?? 0) - (modPriority.get(b) ?? 0) || a.localeCompare(b)
+  const ready = nodes.filter((n) => (indegree.get(n) ?? 0) === 0).sort(readySort)
+  const seq = new Map<string, number>()
+  while (ready.length) {
+    const n = ready.shift() as string
+    seq.set(n, seq.size)
+    for (const d of dependents.get(n) ?? []) {
+      const left = (indegree.get(d) ?? 1) - 1
+      indegree.set(d, left)
+      if (left === 0) {
+        ready.push(d)
+        ready.sort(readySort)
+      }
+    }
+  }
+  if (seq.size !== nodes.length) {
+    // Ciclo: estrai un percorso concreto tra i nodi rimasti per un messaggio actionable.
+    const remaining = new Set(nodes.filter((n) => !seq.has(n)))
+    const start = [...remaining].sort(readySort)[0]
+    const cycle: string[] = []
+    const visited = new Set<string>()
+    let cur: string | undefined = start
+    while (cur && !visited.has(cur)) {
+      visited.add(cur)
+      cycle.push(cur)
+      const id: number | undefined = nexusIdOf.get(cur)
+      cur = id == null ? undefined : (requires.get(id) ?? []).map((d) => byNexus.get(d)).find((m) => m && remaining.has(m))
+    }
+    if (cur) cycle.push(cur) // chiude visivamente il ciclo (A → B → A)
+    return { ok: false, cycle }
+  }
+  // Riscrivi la priorità dei plugin con la sequenza topologica del loro mod: buildPluginsTxt
+  // (type-rank → priority) produrrà così un ordine che rispetta il grafo dentro ogni gruppo.
+  return {
+    ok: true,
+    plugins: plugins.map((p) => ({ ...p, priority: seq.get(p.mod) ?? p.priority })),
+  }
+}
+
+// ── Manifest di deploy (purge esatto) ─────────────────────────────────────────────────────────
+// Registra ESATTAMENTE ciò che il deployer ha creato nell'istanza. Il purge manifest-based rimuove
+// solo queste voci: è l'unico purge sicuro quando il target contiene file vanilla GIÀ hardlinkati
+// (StockGame: i BSA puntano agli originali Steam, nlink>1 — l'euristica lì cancellerebbe la base).
+export const DEPLOY_MANIFEST_FILE = '.smm-deploy-manifest.json'
+
+export interface DeployManifest {
+  version: 1
+  target: string // instance Data dir del deploy
+  junctions: string[] // dir Data-relative junctionate
+  files: string[] // file Data-relative hardlinkati (mod + Creation Club)
+  pluginsTxt?: string // percorso assoluto del plugins.txt d'istanza scritto
+  systemPluginsTxt?: string // percorso assoluto del plugins.txt di sistema (%LOCALAPPDATA%) scritto
+}
+
+/** Parse difensivo del manifest letto da disco: qualsiasi forma inattesa → null (mai throw). */
+export function parseDeployManifest(raw: string): DeployManifest | null {
+  try {
+    const m = JSON.parse(raw) as DeployManifest
+    if (m?.version !== 1 || typeof m.target !== 'string') return null
+    if (!Array.isArray(m.junctions) || !Array.isArray(m.files)) return null
+    return {
+      version: 1,
+      target: m.target,
+      junctions: m.junctions.filter((x): x is string => typeof x === 'string'),
+      files: m.files.filter((x): x is string => typeof x === 'string'),
+      pluginsTxt: typeof m.pluginsTxt === 'string' ? m.pluginsTxt : undefined,
+      systemPluginsTxt: typeof m.systemPluginsTxt === 'string' ? m.systemPluginsTxt : undefined,
+    }
+  } catch {
+    return null
+  }
+}
+
 // Base-game masters always load first (they live in the read-only StockGame Data,
 // not in any mod folder, so they are prepended here for a complete load order).
 export const BASE_MASTERS = [

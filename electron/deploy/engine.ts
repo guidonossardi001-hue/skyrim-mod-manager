@@ -1,6 +1,6 @@
 import { ipcMain } from 'electron'
 import type { SqliteDb } from '../db/sqlite'
-import { deployInstance, type DeployResult } from './deployer'
+import { deployInstance, purgeInstance, type DeployResult, type PurgeResult } from './deployer'
 
 // Thin ipcMain wrapper around deployInstance (same shape as catalog/engine.ts and
 // install/engine.ts). Path resolution (profileId → instance Data dir) is injected
@@ -13,6 +13,9 @@ export interface DeployEngineOptions {
   // content. Optional/injected so the engine stays config-agnostic; when omitted, CC
   // detection simply yields nothing (graceful).
   resolveStockGameDataDir?: (profileId: number) => string | null | undefined
+  // Cartella del plugins.txt DI SISTEMA (%LOCALAPPDATA%/Skyrim Special Edition). Opzionale: senza,
+  // il deploy scrive solo la copia d'istanza (il gioco lanciato senza MO2 legge quella di sistema).
+  resolveSystemPluginsDir?: () => string | null | undefined
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -38,6 +41,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       return await deployInstance(opts.db, dir, {
         profileId,
         stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
+        systemPluginsDir: opts.resolveSystemPluginsDir?.() ?? undefined,
         log: opts.log,
         onProgress: (p) => {
           try {
@@ -50,6 +54,39 @@ export function initDeployEngine(opts: DeployEngineOptions) {
     } catch (e) {
       opts.log?.('warn', `deploy:run errore inatteso: ${(e as Error).message}`)
       return { success: false, errorKind: 'db', error: (e as Error).message }
+    }
+  })
+
+  // deploy:purge = rimozione ESATTA (manifest-based) di tutto ciò che il deploy ha creato
+  // nell'istanza + ripristino del plugins.txt di sistema dal backup. L'euristica nlink resta
+  // abilitata SOLO qui come fallback legacy: il target istanza è dedicato (mai vanilla dentro).
+  ipcMain.handle('deploy:purge', (_e, profileId: number): PurgeResult & { error?: string } => {
+    try {
+      const dir = opts.resolveInstanceDataDir(profileId)
+      if (!dir)
+        return {
+          success: false,
+          manifestFound: false,
+          filesRemoved: 0,
+          junctionsRemoved: 0,
+          dirsPruned: 0,
+          skipped: 0,
+          systemPluginsRestored: false,
+          error: `profilo ${profileId} non trovato o percorso istanza non configurato`,
+        }
+      return purgeInstance(dir, { log: opts.log, allowHeuristic: true })
+    } catch (e) {
+      opts.log?.('warn', `deploy:purge errore inatteso: ${(e as Error).message}`)
+      return {
+        success: false,
+        manifestFound: false,
+        filesRemoved: 0,
+        junctionsRemoved: 0,
+        dirsPruned: 0,
+        skipped: 0,
+        systemPluginsRestored: false,
+        error: (e as Error).message,
+      }
     }
   })
 }

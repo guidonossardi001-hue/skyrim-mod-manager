@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest'
-import { computeDeployPlan, buildPluginsTxt, BASE_MASTERS, type DeployMod } from './plan'
+import {
+  computeDeployPlan,
+  buildPluginsTxt,
+  orderPluginsByDependencies,
+  parseDeployManifest,
+  BASE_MASTERS,
+  type DeployMod,
+  type PluginEntry,
+} from './plan'
 
 const mod = (
   name: string,
@@ -162,5 +170,104 @@ describe('buildPluginsTxt', () => {
     const updates = txt.split('\n').filter((l) => /update\.esm/i.test(l))
     expect(updates).toHaveLength(1) // only the base-master line, not a duplicate '*Update.esm'
     expect(updates[0]).toBe('Update.esm')
+  })
+})
+
+describe('orderPluginsByDependencies — load order sul grafo requires', () => {
+  const pe = (name: string, modName: string, priority: number): PluginEntry => ({
+    name,
+    type: 'ESP',
+    mod: modName,
+    priority,
+  })
+
+  it('riordina: la dipendenza precede il dipendente anche con priorità utente invertite', () => {
+    const plugins = [pe('Quest.esp', 'Quest', 1), pe('Lib.esp', 'Lib', 9)]
+    const ids = new Map([
+      ['Quest', 100],
+      ['Lib', 200],
+    ])
+    const r = orderPluginsByDependencies(plugins, ids, new Map([[100, [200]]]))
+    if (!r.ok) throw new Error('inatteso: ciclo')
+    const txt = buildPluginsTxt(r.plugins)
+    const lines = txt.trim().split('\n')
+    expect(lines.indexOf('*Lib.esp')).toBeLessThan(lines.indexOf('*Quest.esp'))
+  })
+
+  it('senza vincoli il tie-break resta (priorità utente, nome) — ordine stabile', () => {
+    const plugins = [pe('B.esp', 'B', 2), pe('A.esp', 'A', 1)]
+    const r = orderPluginsByDependencies(plugins, new Map(), new Map())
+    if (!r.ok) throw new Error('inatteso')
+    expect(r.plugins.map((p) => p.name)).toEqual(['B.esp', 'A.esp']) // input preservato
+    const txt = buildPluginsTxt(r.plugins)
+    expect(txt.indexOf('*A.esp')).toBeLessThan(txt.indexOf('*B.esp')) // priorità 1 prima di 2
+  })
+
+  it('dipendenze ESTERNE al deploy non vincolano (nessun deadlock su master assente)', () => {
+    const plugins = [pe('Solo.esp', 'Solo', 1)]
+    const r = orderPluginsByDependencies(plugins, new Map([['Solo', 1]]), new Map([[1, [999]]]))
+    expect(r.ok).toBe(true)
+  })
+
+  it('fail-safe: un ciclo ritorna ok=false col percorso del ciclo, mai un ordine parziale', () => {
+    const plugins = [pe('A.esp', 'A', 1), pe('B.esp', 'B', 2)]
+    const ids = new Map([
+      ['A', 1],
+      ['B', 2],
+    ])
+    const r = orderPluginsByDependencies(
+      plugins,
+      ids,
+      new Map([
+        [1, [2]],
+        [2, [1]],
+      ]),
+    )
+    expect(r.ok).toBe(false)
+    if (!r.ok) {
+      expect(r.cycle.length).toBeGreaterThanOrEqual(2)
+      expect(r.cycle).toContain('A')
+      expect(r.cycle).toContain('B')
+    }
+  })
+
+  it('catena transitiva: C→B→A produce A, B, C qualunque sia la priorità utente', () => {
+    const plugins = [pe('C.esp', 'C', 0), pe('A.esp', 'A', 5), pe('B.esp', 'B', 3)]
+    const ids = new Map([
+      ['A', 1],
+      ['B', 2],
+      ['C', 3],
+    ])
+    const r = orderPluginsByDependencies(
+      plugins,
+      ids,
+      new Map([
+        [3, [2]],
+        [2, [1]],
+      ]),
+    )
+    if (!r.ok) throw new Error('inatteso: ciclo')
+    const txt = buildPluginsTxt(r.plugins)
+    const at = (n: string) => txt.indexOf(`*${n}`)
+    expect(at('A.esp')).toBeLessThan(at('B.esp'))
+    expect(at('B.esp')).toBeLessThan(at('C.esp'))
+  })
+})
+
+describe('parseDeployManifest', () => {
+  it('round-trip di un manifest valido; forme inattese → null', () => {
+    const good = JSON.stringify({
+      version: 1,
+      target: 'C:/inst/Data',
+      junctions: ['textures'],
+      files: ['a.esp', 7, 'b.dds'], // il 7 spurio viene filtrato
+      pluginsTxt: 'C:/inst/plugins.txt',
+    })
+    const m = parseDeployManifest(good)
+    expect(m?.files).toEqual(['a.esp', 'b.dds'])
+    expect(m?.junctions).toEqual(['textures'])
+    expect(parseDeployManifest('{"version":2,"target":"x","junctions":[],"files":[]}')).toBeNull()
+    expect(parseDeployManifest('non-json')).toBeNull()
+    expect(parseDeployManifest('{"version":1}')).toBeNull()
   })
 })

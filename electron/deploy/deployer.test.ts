@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { type SqliteDb, applyPragmas } from '../db/sqlite'
 import { openTestDb } from '../db/openTestDb'
-import { deployInstance, type DeployProgress } from './deployer'
+import { deployInstance, purgeInstance, type DeployProgress } from './deployer'
+import { DEPLOY_MANIFEST_FILE } from './plan'
 
 // Integration: real hardlinks + junctions on the SAME tmp volume (junctions need
 // no admin on Windows; hardlinks need same volume). Verifies the priority override,
@@ -21,7 +22,7 @@ function testDb(): SqliteDb {
   d.exec(`
     CREATE TABLE mods (
       id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL DEFAULT 1,
-      name TEXT NOT NULL, priority INTEGER DEFAULT 0,
+      name TEXT NOT NULL, priority INTEGER DEFAULT 0, nexus_id INTEGER,
       is_enabled INTEGER DEFAULT 1, is_installed INTEGER DEFAULT 1, install_path TEXT,
       deploy_category TEXT, resolution_weight INTEGER
     );
@@ -32,6 +33,7 @@ function testDb(): SqliteDb {
 interface ModMeta {
   category?: string
   weight?: number
+  nexusId?: number
 }
 
 /** Create a deployed mod folder under modsRoot with the given Data-relative files. */
@@ -49,9 +51,16 @@ function makeMod(
     writeFileSync(abs, content)
   }
   db.prepare(
-    'INSERT INTO mods (name, priority, is_enabled, is_installed, install_path, deploy_category, resolution_weight) VALUES (?,?,?,1,?,?,?)',
-  ).run(name, priority, enabled, rootDir, meta.category ?? null, meta.weight ?? null)
+    'INSERT INTO mods (name, priority, is_enabled, is_installed, install_path, deploy_category, resolution_weight, nexus_id) VALUES (?,?,?,1,?,?,?,?)',
+  ).run(name, priority, enabled, rootDir, meta.category ?? null, meta.weight ?? null, meta.nexusId ?? null)
   return rootDir
+}
+
+/** modlist_catalog col grafo requires (nexus_id → deps) per i test di load order. */
+function seedCatalogRequires(edges: Record<number, number[]>): void {
+  db.exec('CREATE TABLE IF NOT EXISTS modlist_catalog (nexus_id INTEGER UNIQUE, requires TEXT)')
+  const ins = db.prepare('INSERT OR REPLACE INTO modlist_catalog (nexus_id, requires) VALUES (?,?)')
+  for (const [id, deps] of Object.entries(edges)) ins.run(Number(id), JSON.stringify(deps))
 }
 
 beforeEach(() => {
@@ -309,5 +318,95 @@ describe('deployInstance', () => {
     expect(lastLink.processedItems).toBe(lastLink.totalItems)
     expect(lastLink.percent).toBe(100)
     expect(lastLink.currentFile).toBeTruthy()
+  })
+
+  it('LOAD ORDER: il grafo requires vince sulla priorità utente (dipendenza prima del dipendente)', async () => {
+    // L'utente ha dato al Dependent priorità PIÙ BASSA della sua master library: senza il
+    // riordino topologico il plugins.txt caricherebbe il dipendente prima della sua master.
+    makeMod('DependentQuest', 1, { 'Quest.esp': '' }, 1, { nexusId: 100 })
+    makeMod('MasterLib', 9, { 'Lib.esp': '' }, 1, { nexusId: 200 })
+    seedCatalogRequires({ 100: [200] }) // Quest richiede Lib
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    const lines = readFileSync(r.pluginsPath!, 'utf8').trim().split('\n')
+    expect(lines.indexOf('*Lib.esp')).toBeLessThan(lines.indexOf('*Quest.esp'))
+  })
+
+  it('FAIL-SAFE: un ciclo di dipendenze BLOCCA il deploy senza toccare l’istanza', async () => {
+    makeMod('CycA', 1, { 'A.esp': '' }, 1, { nexusId: 1 })
+    makeMod('CycB', 2, { 'B.esp': '' }, 1, { nexusId: 2 })
+    seedCatalogRequires({ 1: [2], 2: [1] }) // A ↔ B
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(false)
+    expect(r.errorKind).toBe('dependency-cycle')
+    expect(r.error).toMatch(/Ciclo di dipendenze/)
+    expect(existsSync(instanceData)).toBe(false) // nulla creato: gate PRIMA del cleanup/link
+  })
+
+  it('MANIFEST: il deploy registra link e junction; il purge rimuove ESATTAMENTE quelli', async () => {
+    const src = makeMod('M', 1, { 'a.esp': 'PLUGIN', 'textures/set/t.dds': 'TEX' })
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    const manifestPath = join(instanceData, DEPLOY_MANIFEST_FILE)
+    expect(existsSync(manifestPath)).toBe(true)
+    const m = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    expect(m.version).toBe(1)
+    expect(m.files).toContain('a.esp')
+    expect(m.junctions).toContain('textures')
+
+    // File "proprio" dell'utente nell'istanza (nlink=1): il purge NON deve toccarlo.
+    writeFileSync(join(instanceData, 'user-notes.txt'), 'mio')
+    const p = purgeInstance(instanceData, {})
+    expect(p.success).toBe(true)
+    expect(p.manifestFound).toBe(true)
+    expect(p.filesRemoved).toBeGreaterThanOrEqual(1)
+    expect(p.junctionsRemoved).toBe(1)
+    expect(existsSync(join(instanceData, 'a.esp'))).toBe(false)
+    expect(existsSync(join(instanceData, 'textures'))).toBe(false)
+    expect(readFileSync(join(instanceData, 'user-notes.txt'), 'utf8')).toBe('mio') // preservato
+    expect(existsSync(manifestPath)).toBe(false) // manifest consumato
+    // Sorgenti mai toccate.
+    expect(readFileSync(join(src, 'a.esp'), 'utf8')).toBe('PLUGIN')
+    expect(readFileSync(join(src, 'textures/set/t.dds'), 'utf8')).toBe('TEX')
+  })
+
+  it('PURGE fail-safe: senza manifest e senza fallback euristico rifiuta con errore chiaro', async () => {
+    mkdirSync(instanceData, { recursive: true })
+    writeFileSync(join(instanceData, 'qualcosa.txt'), 'x')
+    const p = purgeInstance(instanceData, { allowHeuristic: false })
+    expect(p.success).toBe(false)
+    expect(p.manifestFound).toBe(false)
+    expect(p.error).toMatch(/manifest/i)
+    expect(existsSync(join(instanceData, 'qualcosa.txt'))).toBe(true) // nulla rimosso
+  })
+
+  it('PLUGINS DI SISTEMA: scrive %LOCALAPPDATA%-style plugins.txt con backup e il purge lo ripristina', async () => {
+    const sysDir = join(base, 'LocalAppData', 'Skyrim Special Edition')
+    mkdirSync(sysDir, { recursive: true })
+    writeFileSync(join(sysDir, 'plugins.txt'), '*VecchioOrdine.esp\n') // file utente preesistente
+    makeMod('M', 1, { 'M.esp': '' })
+    const r = await deployInstance(db, instanceData, { profileId: 1, systemPluginsDir: sysDir })
+    expect(r.success).toBe(true)
+    expect(r.systemPluginsPath).toBe(join(sysDir, 'plugins.txt'))
+    expect(readFileSync(join(sysDir, 'plugins.txt'), 'utf8')).toContain('*M.esp')
+    expect(readFileSync(join(sysDir, 'plugins.txt.pre-smm.bak'), 'utf8')).toBe('*VecchioOrdine.esp\n')
+
+    const p = purgeInstance(instanceData, {})
+    expect(p.success).toBe(true)
+    expect(p.systemPluginsRestored).toBe(true)
+    expect(readFileSync(join(sysDir, 'plugins.txt'), 'utf8')).toBe('*VecchioOrdine.esp\n') // ripristinato
+    expect(existsSync(join(sysDir, 'plugins.txt.pre-smm.bak'))).toBe(false)
+  })
+
+  it('REDEPLOY con manifest: il secondo deploy purga via manifest e rimpiazza i link (mai le sorgenti)', async () => {
+    makeMod('Old', 1, { 'old.esp': 'OLD' })
+    expect((await deployInstance(db, instanceData, { profileId: 1 })).success).toBe(true)
+    db.prepare("UPDATE mods SET is_enabled=0 WHERE name='Old'").run()
+    makeMod('New', 2, { 'new.esp': 'NEW' })
+    const r2 = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r2.success).toBe(true)
+    expect(existsSync(join(instanceData, 'old.esp'))).toBe(false) // rimosso via manifest
+    expect(readFileSync(join(instanceData, 'new.esp'), 'utf8')).toBe('NEW')
+    expect(readFileSync(join(modsRoot, 'Old', 'old.esp'), 'utf8')).toBe('OLD') // sorgente intatta
   })
 })
