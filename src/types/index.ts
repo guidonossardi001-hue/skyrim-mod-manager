@@ -492,6 +492,16 @@ declare global {
         cancel(): Promise<{ ok: boolean }>
         status(): Promise<SyncProgressUI | null>
         preflight(opts?: { limit?: number }): Promise<DiskPreflightUI>
+        // Registra le estrazioni StockGame esistenti come mod installate del profilo attivo
+        // (ponte verso il Deploy). Never rejects — inspect ok.
+        registerInstalled(): Promise<{
+          ok: boolean
+          found?: number
+          inserted?: number
+          updated?: number
+          unchanged?: number
+          error?: string
+        }>
       }
     }
   }

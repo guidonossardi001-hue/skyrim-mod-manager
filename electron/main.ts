@@ -64,6 +64,7 @@ import {
 } from './sync/massSync'
 import { computeRequiredSpace, decideDiskGate } from './sync/diskGatekeeper'
 import { computePrunePlan, isPruneError, type BackupCollectionsLike } from './catalog/collectionPrune'
+import { registerInstalledMods, type InstalledCandidate } from './sync/registerInstalled'
 import { validateDownloadSchema, validateCatalogLinks, summarizeInvalid } from './catalog/downloadSchema'
 import { getFreeSpace } from './install/diskSpace'
 import { sameVolume } from './install/stockGame'
@@ -1400,6 +1401,27 @@ app.whenReady().then(() => {
           'sync',
           `mass-sync terminato: ${final.phase} (ok ${final.modsDone}, skip ${final.modsSkipped}, fail ${final.modsFailed})`,
         )
+        // Ponte mass-sync → tabella mods: ogni estrazione presente su disco viene registrata come
+        // mod INSTALLATA del profilo attivo. Senza questo il Deploy (che legge mods.is_installed)
+        // non vedrà mai ciò che il mass-installer ha estratto nello StockGame.
+        try {
+          const modsDirNow = stockGameModsDir(stockDir)
+          const candidates: InstalledCandidate[] = mods
+            .filter((m) => existsSync(modDestDir(modsDirNow, m)))
+            .map((m) => ({
+              modId: m.modId,
+              name: m.name,
+              installPath: modDestDir(modsDirNow, m),
+              fileSize: m.fileSize,
+            }))
+          const reg = registerInstalledMods(requireDb(), resolveActiveProfileId(getRawDb(), store), candidates)
+          logger.info(
+            'sync',
+            `registrazione mods: ${reg.inserted} nuove, ${reg.updated} aggiornate, ${reg.unchanged} già registrate`,
+          )
+        } catch (e) {
+          logger.warn('sync', `registrazione mods fallita (il deploy non vedrà queste estrazioni): ${(e as Error).message}`)
+        }
         // Step 3 — post-list ESL/254 scan. Skyrim won't launch with >254 FULL plugins; ESL /
         // ESL-flagged plugins are free. The verdict is SENT TO THE RENDERER on a dedicated channel:
         // a log-file-only escalation defeated the feature's whole purpose (the user saw a green
@@ -1479,6 +1501,43 @@ app.whenReady().then(() => {
       savingBytes: plan.req.savingBytes,
       translationBytes: plan.req.translationBytes,
       cacheDisk: d.downloadsFreeBytes != null && d.gate.ok && d.preflight.ok && !d.ok,
+    }
+  })
+
+  // Backfill: registra nella tabella mods TUTTE le estrazioni già presenti nello StockGame che
+  // appartengono alla sorgente sync corrente (pruning + validazione schema inclusi — i leftover
+  // DOMAIN su disco NON vengono registrati). Copre le estrazioni storiche fatte PRIMA del ponte
+  // mass-sync→mods. Prova sia il nome profile-resolved sia quello raw del backup (le estrazioni
+  // pre-texture-profile usavano il nome raw).
+  ipcMain.handle('sync:register-installed', () => {
+    try {
+      const stockDir = resolveStockTarget()
+      const modsDirNow = stockGameModsDir(stockDir)
+      const all = loadSyncMods() // già sanificata (schema download + collezioni potate)
+      const resolved = resolveMods(all, syncTextureProfile())
+      const byId = new Map(all.map((m) => [m.modId, m]))
+      const candidates: InstalledCandidate[] = []
+      for (const m of resolved) {
+        const dir = modDestDir(modsDirNow, m)
+        if (existsSync(dir)) {
+          candidates.push({ modId: m.modId, name: m.name, installPath: dir, fileSize: m.fileSize })
+          continue
+        }
+        const raw = byId.get(m.modId)
+        if (raw && raw.name !== m.name) {
+          const rawDir = modDestDir(modsDirNow, raw)
+          if (existsSync(rawDir))
+            candidates.push({ modId: raw.modId, name: raw.name, installPath: rawDir, fileSize: raw.fileSize })
+        }
+      }
+      const reg = registerInstalledMods(requireDb(), resolveActiveProfileId(getRawDb(), store), candidates)
+      logger.info(
+        'sync',
+        `registrazione estratte: ${candidates.length} trovate su disco → ${reg.inserted} nuove, ${reg.updated} aggiornate, ${reg.unchanged} invariate`,
+      )
+      return { ok: true, found: candidates.length, ...reg }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
     }
   })
 

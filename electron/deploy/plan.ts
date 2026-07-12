@@ -121,6 +121,29 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   // lists — and therefore the resolved-conflict log — are stable across input order.
   const ordered = [...mods].sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
 
+  // Archive messiness reale: molte mod arrivano col loro albero INCAPSULATO in una cartella
+  // Data/ di primo livello (es. `Data/MCM/...`, `Data/MCMHelper.esp`). Il deploy vuole percorsi
+  // Data-RELATIVE: quando l'INTERO albero di una mod sta sotto Data/, il prefisso viene tolto e
+  // la root efficace diventa `<rootDir>/Data` — esattamente ciò che fanno MO2/Vortex all'install.
+  // Senza questo si otteneva `Data/Data/...` nell'istanza e i plugin della mod (annidati sotto
+  // Data/) non finivano mai nel load order.
+  const normalized = ordered.map((mod) => {
+    const rels = mod.files.map(normRel).filter(Boolean)
+    const wrapped =
+      rels.length > 0 &&
+      rels.every((r) => {
+        const i = r.indexOf('/')
+        return i > 0 && r.slice(0, i).toLowerCase() === 'data'
+      })
+    if (!wrapped) return { mod, files: rels, root: mod.rootDir }
+    const seg = rels[0].slice(0, rels[0].indexOf('/')) // casing originale della cartella Data
+    return {
+      mod,
+      files: rels.map((r) => r.slice(r.indexOf('/') + 1)).filter(Boolean),
+      root: `${mod.rootDir}/${seg}`,
+    }
+  })
+
   // Every mod that writes each destination key (lowercased destRel → candidates).
   // Canonical (original-case) path is carried per candidate so emitted paths keep
   // the WINNER's source casing.
@@ -130,17 +153,17 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
     src: string
   }
   const candidates = new Map<string, Candidate[]>()
-  for (const mod of ordered) {
-    for (const f of mod.files) {
-      const rel = normRel(f)
-      if (!rel) continue
+  for (const entry of normalized) {
+    for (const rel of entry.files) {
       const key = rel.toLowerCase()
       let arr = candidates.get(key)
       if (!arr) candidates.set(key, (arr = []))
       // A mod listing the same file twice contributes a single candidate.
-      if (!arr.some((c) => c.mod === mod)) arr.push({ mod, rel, src: `${mod.rootDir}/${rel}` })
+      if (!arr.some((c) => c.mod === entry.mod)) arr.push({ mod: entry.mod, rel, src: `${entry.root}/${rel}` })
     }
   }
+  // Root efficace per mod (per le junction: la sorgente deve includere l'eventuale Data/ tolta).
+  const rootOf = new Map<DeployMod, string>(normalized.map((e) => [e.mod, e.root]))
 
   // Resolve each destination to ONE winner via the category/weight/priority rules,
   // recording every override we auto-resolved so the user can audit the choices.
@@ -165,17 +188,23 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   }
 
   // Provider set for every ancestor directory of every final file. A directory
-  // owned by exactly one mod is a junction candidate.
+  // owned by exactly one mod is a junction candidate. Keys are LOWERCASED: NTFS è
+  // case-insensitive, quindi `MCM/` e `mcm/` sono la STESSA directory di destinazione —
+  // con chiavi case-sensitive due mod con casing diverso producevano due junction in
+  // collisione (EEXIST) invece di un normale conflitto risolto per file.
   const dirProviders = new Map<string, Set<DeployMod>>()
+  const dirCanon = new Map<string, string>() // dirLc → casing canonico (primo provider visto)
   for (const key of provider.keys()) {
     const rel = canon.get(key)!
     const mod = provider.get(key)!
     const segs = rel.split('/')
     for (let i = 0; i < segs.length; i++) {
       const dir = segs.slice(0, i).join('/') // '' = root, then each ancestor dir
-      let set = dirProviders.get(dir)
-      if (!set) dirProviders.set(dir, (set = new Set()))
+      const dirLc = dir.toLowerCase()
+      let set = dirProviders.get(dirLc)
+      if (!set) dirProviders.set(dirLc, (set = new Set()))
       set.add(mod)
+      if (dir && !dirCanon.has(dirLc)) dirCanon.set(dirLc, dir)
     }
   }
 
@@ -184,22 +213,24 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   // conflict-free subtree). Shallowest-first so nested dirs are skipped once an
   // ancestor is junctioned.
   const junctions: JunctionLink[] = []
-  const junctionDirs: string[] = []
-  const underJunction = (path: string) =>
-    junctionDirs.some((j) => path === j || path.startsWith(j + '/'))
+  const junctionDirsLc: string[] = []
+  const underJunction = (pathLc: string) =>
+    junctionDirsLc.some((j) => pathLc === j || pathLc.startsWith(j + '/'))
   const dirsByDepth = [...dirProviders.keys()]
     .filter((d) => d !== '')
     .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
-  for (const dir of dirsByDepth) {
-    if (underJunction(dir)) continue
-    const set = dirProviders.get(dir)!
+  for (const dirLc of dirsByDepth) {
+    if (underJunction(dirLc)) continue
+    const set = dirProviders.get(dirLc)!
     if (set.size !== 1) continue
-    const parent = parentDir(dir)
+    const parent = parentDir(dirLc)
     const parentMixed = parent === '' || (dirProviders.get(parent)?.size ?? 0) > 1
     if (!parentMixed) continue
     const mod = [...set][0]
-    junctions.push({ dir, src: `${mod.rootDir}/${dir}`, mod: mod.name })
-    junctionDirs.push(dir)
+    const dir = dirCanon.get(dirLc) ?? dirLc
+    // Sorgente dalla ROOT EFFICACE della mod (include l'eventuale wrapper Data/ tolto).
+    junctions.push({ dir, src: `${rootOf.get(mod) ?? mod.rootDir}/${dir}`, mod: mod.name })
+    junctionDirsLc.push(dirLc)
   }
 
   // Everything not covered by a junction is an individual hardlink.
@@ -209,7 +240,7 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
     const rel = canon.get(key)!
     const mod = provider.get(key)!
     const dir = parentDir(rel)
-    if (!underJunction(dir === '' ? rel : dir)) {
+    if (!underJunction((dir === '' ? rel : dir).toLowerCase())) {
       hardlinks.push({ rel, src: srcOf.get(key)!, mod: mod.name })
     }
     // Plugins live at the Data root (no directory component).

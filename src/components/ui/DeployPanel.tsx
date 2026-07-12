@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link2, Trash2, Loader } from 'lucide-react'
+import { Link2, Trash2, Loader, FolderSync } from 'lucide-react'
 import { toast } from '@/lib/toast'
 
 // Pannello Deployment (hardlink engine): consuma deploy:run / deploy:purge / deploy:progress.
@@ -33,6 +33,19 @@ interface DeployApi {
   }
 }
 
+interface SyncRegisterApi {
+  sync?: {
+    registerInstalled?: () => Promise<{
+      ok: boolean
+      found?: number
+      inserted?: number
+      updated?: number
+      unchanged?: number
+      error?: string
+    }>
+  }
+}
+
 const STAGE_LABEL: Record<string, string> = {
   scanning: 'Scansione mod',
   cleaning: 'Pulizia deploy precedente',
@@ -43,7 +56,7 @@ const STAGE_LABEL: Record<string, string> = {
 }
 
 export function DeployPanel({ profileId, onLog }: { profileId: number | null; onLog: (msg: string, level?: string) => void }) {
-  const [busy, setBusy] = useState<'deploy' | 'purge' | null>(null)
+  const [busy, setBusy] = useState<'deploy' | 'purge' | 'register' | null>(null)
   const [progress, setProgress] = useState<{ stage: string; percent?: number; detail?: string } | null>(null)
   const [summary, setSummary] = useState<string | null>(null)
   const api = (window.api as unknown as DeployApi).deploy
@@ -91,6 +104,28 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
     }
   }
 
+  // Ponte StockGame → mods: registra le estrazioni esistenti come installate, così il Deploy le
+  // vede. Utile una-tantum per le estrazioni storiche; i sync futuri registrano da soli.
+  const registerApi = (window.api as unknown as SyncRegisterApi).sync?.registerInstalled
+  const runRegister = async () => {
+    if (busy || !registerApi) return
+    setBusy('register')
+    try {
+      const r = await registerApi()
+      if (r.ok) {
+        const line = `Registrate estrazioni StockGame: ${r.found} trovate → ${r.inserted} nuove, ${r.updated} aggiornate, ${r.unchanged} già presenti`
+        onLog(line, 'success')
+        toast.success('Estrazioni registrate', `${r.found} mod pronte per il Deploy`)
+      } else {
+        toast.error('Registrazione fallita', r.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Registrazione fallita', (e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const runPurge = async () => {
     if (profileId == null || busy) return
     if (
@@ -129,6 +164,17 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {registerApi && (
+            <button
+              onClick={runRegister}
+              disabled={busy != null || profileId == null}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Registra le mod già estratte nello StockGame come installate (le rende visibili al Deploy)"
+            >
+              {busy === 'register' ? <Loader size={12} className="animate-spin" /> : <FolderSync size={12} />}{' '}
+              Registra estratte
+            </button>
+          )}
           <button
             onClick={runPurge}
             disabled={busy != null || profileId == null}

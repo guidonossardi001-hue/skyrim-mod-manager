@@ -230,6 +230,9 @@ contextBridge.exposeInMainWorld('api', {
     cancel: () => invoke('sync:cancel'),
     status: () => invoke('sync:status'),
     preflight: (opts?: { limit?: number }) => invoke('sync:preflight', opts),
+    // Ponte StockGame → tabella mods: registra le estrazioni esistenti come mod installate
+    // del profilo attivo (rende il Deploy esercitabile senza rifare il sync).
+    registerInstalled: () => invoke('sync:register-installed'),
   },
 
   // Incremental (delta) update engine — signed-manifest ingest + gated apply

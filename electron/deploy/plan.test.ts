@@ -173,6 +173,41 @@ describe('buildPluginsTxt', () => {
   })
 })
 
+describe('computeDeployPlan — normalizzazione wrapper Data/ e casing', () => {
+  it('una mod incapsulata in Data/ deploya alla root (plugin incluso) con sorgenti dentro Data/', () => {
+    const plan = computeDeployPlan([
+      mod('MCM Helper', 1, ['Data/MCM/settings.ini', 'Data/MCMHelper.esp', 'Data/SKSE/Plugins/MCMHelper.dll']),
+    ])
+    // Niente Data/Data: i percorsi sono Data-relative.
+    expect(plan.hardlinks.every((h) => !h.rel.toLowerCase().startsWith('data/'))).toBe(true)
+    expect(plan.junctions.every((j) => !j.dir.toLowerCase().startsWith('data/'))).toBe(true)
+    // Il plugin annidato sotto Data/ ora è alla root ed entra nel load order.
+    expect(plan.plugins.map((p) => p.name)).toEqual(['MCMHelper.esp'])
+    // Le sorgenti puntano DENTRO la cartella Data della mod.
+    const all = [...plan.hardlinks.map((h) => h.src), ...plan.junctions.map((j) => j.src)]
+    expect(all.every((s) => s.includes('/mods/MCM Helper/Data/'))).toBe(true)
+  })
+
+  it('mod mista (solo ALCUNI file sotto Data/) NON viene riscritta (wrapper solo se uniforme)', () => {
+    const plan = computeDeployPlan([mod('Mixed', 1, ['Data/x.dds', 'root.esp'])])
+    // Il prefisso Data/ resta (albero non uniforme): la dir diventa una normale junction
+    // single-provider e il file di root un hardlink — nessuno strip parziale.
+    expect(plan.junctions.map((j) => j.dir)).toEqual(['Data'])
+    expect(plan.hardlinks.map((h) => h.rel)).toEqual(['root.esp'])
+  })
+
+  it('stessa directory con casing diverso da due mod → un solo owner per file, MAI due junction in collisione', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['MCM/config/a.json']),
+      mod('B', 2, ['mcm/config/b.json']),
+    ])
+    // Directory condivisa (case-insensitive) → niente junction sulla radice contesa…
+    expect(plan.junctions.filter((j) => j.dir.toLowerCase() === 'mcm')).toHaveLength(0)
+    // …e i file distinti coesistono come hardlink singoli.
+    expect(plan.hardlinks).toHaveLength(2)
+  })
+})
+
 describe('orderPluginsByDependencies — load order sul grafo requires', () => {
   const pe = (name: string, modName: string, priority: number): PluginEntry => ({
     name,
