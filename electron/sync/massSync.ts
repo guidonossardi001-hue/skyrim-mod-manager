@@ -88,6 +88,9 @@ export interface MassSyncDeps {
   exists(p: string): boolean
   ensureDir(p: string): void
   remove(p: string): void // file OR dir (rmSync recursive/force) — archive cleanup + partial-extract cleanup
+  // Small text-file writer (marker files). Optional: without it the ITA marker is simply not
+  // persisted and a completed overlay may be re-applied on a resumed run (idempotent, just wasteful).
+  writeFile?(p: string, data: string): void
   freeSpace(path: string): Promise<number> // bytes free on the volume containing `path`
   // Total real bytes under an extracted mod dir (statSync-summed). 0 ⇒ empty/corrupt
   // partial folder that resume must DISCARD and re-extract rather than skip. Optional:
@@ -157,6 +160,11 @@ export function modDestDir(modsDir: string, m: SyncMod): string {
   return join(modsDir, `${m.modId}-${sanitize(m.name)}`)
 }
 
+/** Marker file written inside a mod dir once its ITA overlay (Phase B) has been applied. Lets a
+ *  resumed run tell "base extracted but overlay missing" (cancel/crash between phases) from "fully
+ *  done" — without it the skip path silently left such mods in English forever. */
+export const ITA_MARKER = '.smm-ita.json'
+
 // ── Aggregate disk pre-flight (PRECHECK-01) ──────────────────────────────────
 
 /** Extracted output is estimated as pendingBytes × extractionOverhead. */
@@ -221,8 +229,10 @@ export function computeDiskPreflight(p: {
     freeBytes: p.freeBytes,
     minFreeMarginBytes: MIN_FREE_MARGIN_BYTES,
     marginBytes,
-    // NO-GO unless the projected residual free space stays at/above the 15 GB floor.
-    ok: marginBytes >= MIN_FREE_MARGIN_BYTES,
+    // NO-GO unless the projected residual free space stays at/above the 15 GB floor. Non-finite free
+    // (getFreeSpace returns Infinity when a volume can't be probed) is UNKNOWN, not "infinite room" —
+    // it must BLOCK, so guard isFinite here instead of letting Infinity − required ≥ floor pass.
+    ok: Number.isFinite(p.freeBytes) && marginBytes >= MIN_FREE_MARGIN_BYTES,
   }
 }
 
@@ -326,12 +336,17 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     }
   }
 
+  // Bytes a slot ALREADY earned in a previous phase of the same mod (Phase-A base download, settled
+  // before the slot counter is reused for the Phase-B translation). Keyed by slot so the live sum
+  // stays byte-monotonic across the phase switch; folded into completedBytes when the mod finishes.
+  const settled = new Map<ActiveItem, number>()
+
   let lastEmit = 0
   const emit = (force = false, msg?: string) => {
     if (msg) state.lastMessage = msg
-    // byte-precise: completed + the live bytes of every in-flight download
+    // byte-precise: completed + the live bytes of every in-flight download (+ its settled phases)
     let live = completedBytes
-    for (const s of slots) live += s.downloaded
+    for (const s of slots) live += s.downloaded + (settled.get(s) ?? 0)
     state.bytesDownloaded = Math.min(state.bytesTotal || live, live)
     sample()
     state.throughputMBps = emaBps / (1024 * 1024)
@@ -345,6 +360,72 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
   }
   emit(true)
 
+  // ── Phase B: best-effort ITA translation override (SAME slot, sequential) ─────────────────────
+  // Download the ITA patch and extract it OVER the base mod (overwrite matching files, keep the
+  // rest). Idempotent via the ITA_MARKER file. FAIL-SOFT: any error leaves the base install intact
+  // and the mod still counts — it NEVER aborts the run, except a real user cancel (signal.aborted),
+  // which must propagate. Same worker slot ⇒ no extra concurrency, no base/translation race.
+  const applyTranslation = async (m: SyncMod, slot: ActiveItem, destDir: string): Promise<void> => {
+    if (cfg.enableAutoTranslate === false || !cfg.translationOf || !deps.extractOverlay) return
+    const tr = cfg.translationOf(m.modId)
+    if (!tr || !tr.file_id) return
+    const marker = join(destDir, ITA_MARKER)
+    if (deps.exists(marker)) return // overlay already applied on a previous (or this) run
+    try {
+      // Settle the bytes this slot earned so far (the Phase-A base download) BEFORE reusing the
+      // counter: the overall bar is byte-MONOTONIC — resetting slot.downloaded without folding it
+      // into the live sum made the bar visibly regress by the base archive's size, and the final
+      // credit then lost those bytes entirely (translation bytes were credited instead).
+      settled.set(slot, (settled.get(slot) ?? 0) + slot.downloaded)
+      slot.phase = 'downloading'
+      slot.downloaded = 0
+      slot.percent = 0
+      emit(true)
+      const turl = await deps.resolveLink(tr.nexus_id, tr.file_id)
+      const tArchive = join(
+        cfg.downloadsDir,
+        sanitize(filenameFromUrl(turl, `trans_${tr.nexus_id}_${tr.file_id}.7z`)),
+      )
+      await deps.streamDownload(
+        turl,
+        tArchive,
+        (d, t) => {
+          slot.downloaded = d
+          slot.total = t || slot.total
+          slot.percent = t > 0 ? Math.round((d / t) * 100) : 0
+          emit()
+        },
+        cfg.signal,
+      )
+      if (cfg.signal.aborted) throw new Error('annullato')
+      if (tr.md5) {
+        slot.phase = 'verifying'
+        emit(true)
+        const got = await deps.md5(tArchive)
+        if (got.toLowerCase() !== tr.md5.toLowerCase())
+          throw new Error(`md5 traduzione non combacia (atteso ${tr.md5.slice(0, 12)}…)`)
+      }
+      slot.phase = 'extracting'
+      slot.percent = 0
+      emit(true)
+      await deps.extractOverlay(
+        tArchive,
+        destDir,
+        (p) => {
+          slot.percent = p
+          emit()
+        },
+        cfg.signal,
+      )
+      deps.writeFile?.(marker, JSON.stringify({ nexus_id: tr.nexus_id, file_id: tr.file_id }))
+      cfg.onLog?.(`✔ traduzione ITA applicata: ${m.name}`)
+    } catch (e) {
+      if (cfg.signal.aborted) throw e // a genuine user cancel must still stop the run
+      // FAIL-SOFT: base stays installed (English); the mod still counts.
+      cfg.onLog?.(`⚠ traduzione ITA non applicata a ${m.name} (fail-soft): ${(e as Error).message}`)
+    }
+  }
+
   const processOne = async (m: SyncMod, slot: ActiveItem): Promise<'done' | 'skipped'> => {
     const destDir = modDestDir(modsDir, m)
     if (!isPathInside(cfg.stockGameDir, destDir))
@@ -354,7 +435,13 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
     // dirBytes (statSync-summed) and DISCARD it so it gets re-extracted, not skipped.
     if (deps.exists(destDir)) {
       const bytes = deps.dirBytes ? deps.dirBytes(destDir) : 1
-      if (bytes > 0) return 'skipped'
+      if (bytes > 0) {
+        // Base already extracted — but the ITA overlay may still be missing (cancel/crash BETWEEN
+        // Phase A and Phase B on a previous run, or auto-translate enabled later). The marker file
+        // decides; applyTranslation is a no-op when the overlay was already applied.
+        await applyTranslation(m, slot, destDir)
+        return 'skipped'
+      }
       deps.remove(destDir) // empty/corrupt partial → wipe and fall through to re-download+extract
     }
 
@@ -416,64 +503,8 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
       cfg.signal,
     )
 
-    // ── Phase B: best-effort ITA translation override (SAME slot, sequential) ───────────────────
-    // If auto-translate is on and a mapping exists, download the ITA patch and extract it OVER the
-    // base mod (overwrite matching files, keep the rest). FAIL-SOFT: any error here leaves the base
-    // install intact and the mod still counts as 'done' — it NEVER aborts the run, except on a real
-    // user cancel (cfg.signal.aborted), which must propagate. Same worker slot ⇒ no extra
-    // concurrency, no race between base and its translation.
-    if (cfg.enableAutoTranslate !== false && cfg.translationOf && deps.extractOverlay) {
-      const tr = cfg.translationOf(m.modId)
-      if (tr && tr.file_id) {
-        try {
-          slot.phase = 'downloading'
-          slot.downloaded = 0
-          slot.percent = 0
-          emit(true)
-          const turl = await deps.resolveLink(tr.nexus_id, tr.file_id)
-          const tArchive = join(
-            cfg.downloadsDir,
-            sanitize(filenameFromUrl(turl, `trans_${tr.nexus_id}_${tr.file_id}.7z`)),
-          )
-          await deps.streamDownload(
-            turl,
-            tArchive,
-            (d, t) => {
-              slot.downloaded = d
-              slot.total = t || slot.total
-              slot.percent = t > 0 ? Math.round((d / t) * 100) : 0
-              emit()
-            },
-            cfg.signal,
-          )
-          if (cfg.signal.aborted) throw new Error('annullato')
-          if (tr.md5) {
-            slot.phase = 'verifying'
-            emit(true)
-            const got = await deps.md5(tArchive)
-            if (got.toLowerCase() !== tr.md5.toLowerCase())
-              throw new Error(`md5 traduzione non combacia (atteso ${tr.md5.slice(0, 12)}…)`)
-          }
-          slot.phase = 'extracting'
-          slot.percent = 0
-          emit(true)
-          await deps.extractOverlay(
-            tArchive,
-            destDir,
-            (p) => {
-              slot.percent = p
-              emit()
-            },
-            cfg.signal,
-          )
-          cfg.onLog?.(`✔ traduzione ITA applicata: ${m.name}`)
-        } catch (e) {
-          if (cfg.signal.aborted) throw e // a genuine user cancel must still stop the run
-          // FAIL-SOFT: base stays installed (English); the mod is still 'done'.
-          cfg.onLog?.(`⚠ traduzione ITA non applicata a ${m.name} (fail-soft): ${(e as Error).message}`)
-        }
-      }
-    }
+    // Phase B: ITA translation overlay (marker-gated, fail-soft — see applyTranslation).
+    await applyTranslation(m, slot, destDir)
     return 'done'
   }
 
@@ -494,18 +525,24 @@ export async function runMassSync(deps: MassSyncDeps, cfg: MassSyncConfig): Prom
       emit(true)
       try {
         const r = await processOne(m, slot)
+        // Bytes this slot really moved: settled phases (base download before a Phase-B reuse) plus
+        // whatever the counter holds now (base OR translation bytes, whichever phase ran last).
+        const earnedBytes = (settled.get(slot) ?? 0) + slot.downloaded
         if (r === 'skipped') {
+          // Already-present mod: credit its nominal size, plus any overlay bytes downloaded now.
           state.modsSkipped++
-          completedBytes += m.fileSize ?? 0
+          completedBytes += (m.fileSize ?? 0) + earnedBytes
         } else {
           state.modsDone++
-          completedBytes += slot.downloaded || (m.fileSize ?? 0)
+          completedBytes += earnedBytes || (m.fileSize ?? 0)
         }
         breaker.recordSuccess()
         slots.delete(slot)
+        settled.delete(slot)
         emit(true, `✓ ${m.name}`)
       } catch (e) {
         slots.delete(slot)
+        settled.delete(slot)
         if (cfg.signal.aborted) {
           emit(true)
           return

@@ -13,6 +13,8 @@ const EVENT_CHANNELS = new Set([
   'install:complete',
   'install:error',
   'sync:progress',
+  'sync:disk-error',
+  'sync:plugin-budget',
   'stockgame:progress',
   'deploy:progress',
   'launch:progress',

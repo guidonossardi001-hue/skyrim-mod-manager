@@ -48,21 +48,23 @@ import {
 import {
   buildVariants,
   isTextureProfile,
+  resolveMods,
   DEFAULT_TEXTURE_PROFILE,
   type TextureProfile,
 } from './sync/textureProfile'
 import { pairBackupTranslations, saveTranslations, resolveTranslation } from './sync/translationResolver'
-import { scanPluginBudget } from './install/pluginBudget'
+import { scanPluginBudget, VANILLA_FULL_MASTERS } from './install/pluginBudget'
 import {
   runMassSync,
   stockGameModsDir,
   modDestDir,
-  diskPreflight,
   type MassSyncDeps,
   type SyncMod,
   type SyncProgress,
 } from './sync/massSync'
+import { computeRequiredSpace, decideDiskGate } from './sync/diskGatekeeper'
 import { getFreeSpace } from './install/diskSpace'
+import { sameVolume } from './install/stockGame'
 import { sanitizePathSegment } from './util/paths'
 import { validateSettingWrite } from './util/settingsGuard'
 import {
@@ -914,21 +916,28 @@ app.whenReady().then(() => {
       } catch {
         /* best effort */
       }
-      const r = await extractArchive(archive, tmp, {
-        bundled7zaPath: bundled7zaPath(),
-        full7zPath: resolveRar7z(store.get('sevenZipPath') as string | undefined) ?? undefined,
-        onProgress,
-        signal,
-      })
-      cpSync(tmp, destDir, { recursive: true, force: true }) // overlay over the base
+      // finally-cleanup: the tmp dir lives INSIDE StockGame/mods — leaked on a cpSync/extract
+      // failure it would look like a mod dir to every scan (plugin budget, deploy). Phase B is
+      // fail-soft, so without this the leak was PERMANENT (the mod never re-runs).
       try {
-        rmSync(tmp, { recursive: true, force: true })
-      } catch {
-        /* best effort */
+        const r = await extractArchive(archive, tmp, {
+          bundled7zaPath: bundled7zaPath(),
+          full7zPath: resolveRar7z(store.get('sevenZipPath') as string | undefined) ?? undefined,
+          onProgress,
+          signal,
+        })
+        cpSync(tmp, destDir, { recursive: true, force: true }) // overlay over the base
+        return { method: r.method }
+      } finally {
+        try {
+          rmSync(tmp, { recursive: true, force: true })
+        } catch {
+          /* best effort */
+        }
       }
-      return { method: r.method }
     },
     exists: existsSync,
+    writeFile: (p, data) => writeFileSync(p, data, 'utf8'),
     ensureDir: (p) => {
       if (!existsSync(p)) mkdirSync(p, { recursive: true })
     },
@@ -944,11 +953,16 @@ app.whenReady().then(() => {
     // a completed mod from an empty/corrupt partial and re-extract the latter.
     dirBytes: (p) => dirBytesSync(p),
   })
+  // The disk-gate factors are a SAFETY feature: clamp them to sane floors so a (possibly
+  // renderer-written) setting can never weaken the gate below reality (e.g. overhead 0.01 would
+  // certify a run that fills the disk). Range: overhead [1..5], cross-disk headroom [1..3].
+  const clampFactor = (v: unknown, lo: number, hi: number): number | undefined => {
+    const n = Number(v)
+    return Number.isFinite(n) && n > 0 ? Math.min(hi, Math.max(lo, n)) : undefined
+  }
   const syncFactors = () => ({
-    extractionOverhead:
-      Number(store.get('extractionOverhead')) > 0 ? Number(store.get('extractionOverhead')) : undefined,
-    safetyFactor:
-      Number(store.get('diskSafetyFactor')) > 0 ? Number(store.get('diskSafetyFactor')) : undefined,
+    extractionOverhead: clampFactor(store.get('extractionOverhead'), 1, 5),
+    safetyFactor: clampFactor(store.get('diskSafetyFactor'), 1, 3),
   })
   // Global texture quality profile (2K/4K). Validated; unknown/unset → default 4K.
   const syncTextureProfile = (): TextureProfile => {
@@ -958,14 +972,23 @@ app.whenReady().then(() => {
   // ESL/254 budget scan over the installed StockGame/mods. Walks the tree for plugin files and
   // reads each one's 12-byte TES4 header (to detect an ESL-FLAGGED .esp/.esm, not just .esl ext).
   const readPluginHead = (p: string): Uint8Array | null => {
+    let fd: number | null = null
     try {
-      const fd = openSync(p, 'r')
+      fd = openSync(p, 'r')
       const buf = Buffer.alloc(12)
       readSync(fd, buf, 0, 12, 0)
-      closeSync(fd)
       return new Uint8Array(buf)
     } catch {
       return null
+    } finally {
+      // close in finally: a readSync throw must not leak the descriptor (locks the file on Windows)
+      if (fd !== null) {
+        try {
+          closeSync(fd)
+        } catch {
+          /* already closed */
+        }
+      }
     }
   }
   const scanInstalledPluginBudget = (modsDir: string) => {
@@ -979,12 +1002,16 @@ app.whenReady().then(() => {
       }
       for (const e of entries) {
         const full = join(dir, e.name)
-        if (e.isDirectory()) walk(full)
-        else if (/\.(esp|esm|esl)$/i.test(e.name)) paths.push(full)
+        // Skip in-flight/leaked temp dirs (`<mod>.tmp` from extractArchive, `<mod>.trans.tmp` from
+        // the ITA overlay): they are not installed mods and would double-count plugins.
+        if (e.isDirectory()) {
+          if (!/\.tmp$/i.test(e.name)) walk(full)
+        } else if (/\.(esp|esm|esl)$/i.test(e.name)) paths.push(full)
       }
     }
     walk(modsDir)
-    return scanPluginBudget(paths, readPluginHead)
+    // Reserve the 5 vanilla full masters: they occupy load-order slots the mods can't use.
+    return scanPluginBudget(paths, readPluginHead, undefined, VANILLA_FULL_MASTERS)
   }
   // Source of truth: the persisted backup (survives a Vortex wipe); fallback to a live scan.
   const loadSyncMods = (): SyncMod[] => {
@@ -1056,15 +1083,80 @@ app.whenReady().then(() => {
 
   // Selezione del blocco Run-Prog: senza limit → tutta la lista; con limit → le
   // prossime N mod il cui dir di estrazione non esiste ancora (progressione reale).
+  // NB: va chiamata su una lista già PROFILE-RESOLVED — i dir di estrazione derivano dal nome della
+  // variante scelta (2K/4K), quindi il check sul nome raw ri-selezionerebbe per sempre le mod
+  // variante già installate (Run-Prog non progredirebbe mai oltre quelle).
   const selectSyncBlock = (all: SyncMod[], stockDir: string, limit?: number): SyncMod[] => {
-    if (!limit || limit <= 0) return all
+    const lim = Math.floor(Number(limit)) // sanitize: NaN/frazioni/negativi dal renderer → lista intera
+    if (!Number.isFinite(lim) || lim <= 0) return all
     const modsDir = stockGameModsDir(stockDir)
-    return all.filter((m) => !existsSync(modDestDir(modsDir, m))).slice(0, limit)
+    return all.filter((m) => !existsSync(modDestDir(modsDir, m))).slice(0, lim)
+  }
+
+  // Pipeline di pianificazione CONDIVISA tra sync:start e sync:preflight: stessa base list
+  // (traduzioni escluse), stessa selezione del blocco su nomi profile-resolved, stessa stima
+  // dipendenze-espansa e stessa decisione fail-closed. La card GO/NO-GO e il gate di avvio non
+  // possono più divergere su numeri o verdetto. Preflight resta READ-ONLY (persistTranslations
+  // solo su un avvio reale); la mappa in-memory delle coppie tiene i due percorsi identici.
+  const buildSyncPlan = async (limit?: number, o?: { persistTranslations?: boolean }) => {
+    const stockDir = resolveStockTarget()
+    const all = loadSyncMods()
+    const profile = syncTextureProfile()
+    const enableAutoTranslate = store.get('enableAutoTranslate') !== false // default ON
+    const translationByBase = new Map<number, number>()
+    const translationIds = new Set<number>()
+    if (enableAutoTranslate && all.length) {
+      try {
+        const pairs = pairBackupTranslations(
+          all.map((m) => ({ modId: m.modId, name: m.name, fileId: m.fileId, md5: m.md5 })),
+        )
+        if (o?.persistTranslations && pairs.length) {
+          saveTranslations(requireDb(), pairs, 'backup')
+          logger.info('sync', `traduzioni ITA mappate dal backup: ${pairs.length} (escluse dalla lista base)`)
+        }
+        for (const p of pairs) {
+          translationIds.add(p.translation_nexus_id)
+          translationByBase.set(p.base_nexus_id, p.translation_nexus_id)
+        }
+      } catch (e) {
+        logger.warn('sync', `mappatura traduzioni fallita (proseguo senza): ${(e as Error).message}`)
+      }
+    }
+    const baseList = translationIds.size ? all.filter((m) => !translationIds.has(m.modId)) : all
+    // Run-Prog: con un limit il blocco è composto dalle prossime N mod NON ancora presenti nello
+    // StockGame (non le prime N della lista, che dopo il primo run sarebbero tutte skip).
+    const mods = selectSyncBlock(resolveMods(baseList, profile), stockDir, limit)
+    const downloadsDir = join(app.getPath('userData'), 'downloads')
+    const translationIdOf = enableAutoTranslate
+      ? (baseId: number) => translationByBase.get(baseId) ?? null
+      : undefined
+    const req = computeRequiredSpace({
+      db: db ? requireDb() : null,
+      mods: all, // full backup list ⇒ pulled-in dependencies (and translations) can still be sized
+      targetIds: mods.map((m) => m.modId),
+      stockGameDir: stockDir,
+      exists: existsSync,
+      profile,
+      translationIdOf,
+    })
+    const freeBytes = await getFreeSpace(stockDir)
+    const sameDisk = sameVolume(downloadsDir, stockDir)
+    // Cross-disk: anche il volume della cache download deve reggere gli archivi (che vengono
+    // RITENUTI per tutto il run) — altrimenti il gate passa sul disco StockGame e C: si riempie.
+    const downloadsFreeBytes = sameDisk ? null : await getFreeSpace(downloadsDir)
+    const decision = decideDiskGate({
+      required: req,
+      freeBytes,
+      sameDisk,
+      downloadsFreeBytes,
+      ...syncFactors(),
+    })
+    return { stockDir, all, mods, profile, enableAutoTranslate, req, freeBytes, sameDisk, downloadsDir, decision }
   }
 
   let syncAbort: AbortController | null = null
   let syncState: SyncProgress | null = null
-  ipcMain.handle('sync:start', (_e, opts?: { concurrency?: number; limit?: number }) => {
+  ipcMain.handle('sync:start', async (_e, opts?: { concurrency?: number; limit?: number }) => {
     if (syncAbort) return { ok: false, error: 'Sincronizzazione già in corso' }
     if (!nexusEnabled() || !(readSecret('nexusApiKey') || '').trim()) {
       return {
@@ -1073,37 +1165,99 @@ app.whenReady().then(() => {
           'Nexus non attivo: inserisci la chiave Premium e abilita il download reale nelle Impostazioni.',
       }
     }
-    const stockDir = resolveStockTarget()
-    const steam = resolveGameSource()
-    const all = loadSyncMods()
-    if (!all.length) return { ok: false, error: 'Nessun mod da sincronizzare (backup e scan Vortex vuoti).' }
-    // Step 2 — populate ITA translation mappings from the backup (heuristic pairing, best-effort).
-    // The paired translation modIds are then REMOVED from the install list: they are not standalone
-    // installs, they get applied as the Phase-B override of their base mod inside the worker.
-    const enableAutoTranslate = store.get('enableAutoTranslate') !== false // default ON
-    const translationIds = new Set<number>()
-    if (enableAutoTranslate) {
-      try {
-        const pairs = pairBackupTranslations(
-          all.map((m) => ({ modId: m.modId, name: m.name, fileId: m.fileId, md5: m.md5 })),
-        )
-        if (pairs.length) saveTranslations(requireDb(), pairs, 'backup')
-        for (const p of pairs) translationIds.add(p.translation_nexus_id)
-        logger.info('sync', `traduzioni ITA mappate dal backup: ${pairs.length} (escluse dalla lista base)`)
-      } catch (e) {
-        logger.warn('sync', `mappatura traduzioni fallita (proseguo senza): ${(e as Error).message}`)
-      }
-    }
-    const baseList = translationIds.size ? all.filter((m) => !translationIds.has(m.modId)) : all
-    // Run-Prog: con un limit il blocco è composto dalle prossime N mod NON ancora
-    // presenti nello StockGame (non le prime N della lista, che dopo il primo run
-    // sarebbero tutte skip). Senza limit: intera lista (lo skip fa da resume).
-    const mods = selectSyncBlock(baseList, stockDir, opts?.limit)
-    if (!mods.length) return { ok: false, error: 'Tutte le mod risultano già sincronizzate nello StockGame.' }
-    const downloadsDir = join(app.getPath('userData'), 'downloads')
-    const concurrency =
-      opts?.concurrency ?? Math.max(1, Math.min(8, Number(store.get('downloadThreads')) || 4))
+    // ── Pre-flight disk gatekeeper (PRECHECK-02) — FAIL-CLOSED, BEFORE the queue starts ──────────
+    // Re-entrancy lock BEFORE the first await: a second sync:start dispatched during qualsiasi await
+    // sotto vede syncAbort non-null e viene rifiutata. Il lock è rilasciato su OGNI uscita che non
+    // avvia la coda — inclusi i throw (altrimenti la sync resterebbe bloccata fino al riavvio).
     syncAbort = new AbortController()
+    let plan: Awaited<ReturnType<typeof buildSyncPlan>>
+    try {
+      plan = await buildSyncPlan(opts?.limit, { persistTranslations: true })
+    } catch (e) {
+      syncAbort = null
+      const emsg = (e as Error).message
+      logger.error('sync', `pre-flight sync fallito: ${emsg}`)
+      return { ok: false, error: `Pre-flight non riuscito: ${emsg}` }
+    }
+    const { stockDir, all, mods, profile, enableAutoTranslate, req, freeBytes, sameDisk, downloadsDir, decision } =
+      plan
+    if (!all.length) {
+      syncAbort = null
+      return { ok: false, error: 'Nessun mod da sincronizzare (backup e scan Vortex vuoti).' }
+    }
+    if (!mods.length) {
+      syncAbort = null
+      return { ok: false, error: 'Tutte le mod risultano già sincronizzate nello StockGame.' }
+    }
+    if (db && !req.usedDependencyGraph) {
+      logger.warn('sync', 'catalogo dipendenze non usabile: stima spazio sul solo blocco (nessuna espansione deps)')
+    }
+    const steam = resolveGameSource()
+    // Clamp ANCHE il valore dal renderer (non solo il default dallo store): il renderer è untrusted
+    // e 999 worker sarebbero un resource-exhaustion, non una preferenza.
+    const requestedConc = Math.floor(Number(opts?.concurrency))
+    const concurrency = Math.max(
+      1,
+      Math.min(
+        8,
+        Number.isFinite(requestedConc) && requestedConc > 0
+          ? requestedConc
+          : Number(store.get('downloadThreads')) || 4,
+      ),
+    )
+    // '—' per non-finito: getFreeSpace ritorna Infinity su volume non sondabile — mai stampare
+    // "liberi Infinity GB" in log/toast.
+    const gb = (b: number) => (Number.isFinite(b) ? (b / 1024 ** 3).toFixed(1) : '—')
+    if (!decision.ok) {
+      syncAbort = null // the queue never started — free the lock so a corrected retry can run
+      // Se il volume StockGame ha passato entrambi i modelli, il blocco viene dal SECONDO volume
+      // (cache download cross-disk): il messaggio deve puntare al disco giusto.
+      const cacheBlocked =
+        decision.downloadsFreeBytes != null && decision.gate.ok && decision.preflight.ok
+      const diskError = {
+        reason: decision.reason,
+        requiredBytes: decision.requiredBytes,
+        requiredWithBufferBytes: decision.gate.requiredWithBuffer,
+        freeBytes,
+        missingBytes: decision.missingBytes,
+        savingBytes: req.savingBytes,
+        requiredGB: gb(decision.requiredBytes),
+        freeGB: gb(freeBytes),
+        missingGB: gb(decision.missingBytes),
+        profile,
+        pendingMods: req.plannedIds.length,
+        extraDeps: req.extraDepIds.length,
+        unsizedCount: decision.unsizedTargets.length,
+        sameDisk,
+        cacheDisk: cacheBlocked,
+        downloadsFreeBytes: decision.downloadsFreeBytes,
+        downloadsRequiredBytes: decision.downloadsRequiredBytes,
+      }
+      const msg =
+        decision.reason === 'unsized'
+          ? `Impossibile verificare lo spazio: ${decision.unsizedTargets.length} mod senza dimensione nota nel backup. Rigenera il backup delle collezioni (o riduci il blocco con Run-Prog) prima di avviare il mass-install.`
+          : decision.reason === 'unreadable'
+            ? `Impossibile leggere lo spazio libero sul volume ${cacheBlocked ? `della cache download (${downloadsDir})` : `dello StockGame (${stockGameModsDir(stockDir)})`}. Verifica che il disco sia connesso e accessibile, poi riprova.`
+            : cacheBlocked
+              ? `Spazio insufficiente sul volume della cache download (${downloadsDir}): gli archivi del run occupano ~${gb(decision.downloadsRequiredBytes)} GB (incluso margine), liberi ${gb(decision.downloadsFreeBytes ?? 0)} GB → mancano ${gb(decision.missingBytes)} GB su quel volume. Libera spazio lì o sposta la cartella download.`
+              : `Spazio su disco insufficiente: servono ~${diskError.requiredGB} GB (download ${gb(req.requiredBytes)} GB + margine estrazione${sameDisk ? ', stesso disco' : ''}), liberi ${diskError.freeGB} GB → mancano ${diskError.missingGB} GB. Libera spazio, sposta lo StockGame su un volume più capiente${profile === '4K' ? ' o passa al profilo texture 2K' : ''}.`
+      logger.error('sync', msg)
+      // Pre-flight block: nothing started, so DON'T drive the progress 'error' card (that reads as an
+      // interrupted run and leaves a stale error in syncState). The dedicated sync:disk-error channel
+      // and the return value carry the block instead — same payload on both so the banner text is
+      // identical whichever the renderer sees first.
+      const diskPayload = { ...diskError, error: msg }
+      mainWindow?.webContents.send('sync:disk-error', diskPayload)
+      return { ok: false, error: msg, disk: diskPayload }
+    }
+    logger.info(
+      'sync',
+      `Gatekeeper disco OK: download ~${gb(req.requiredBytes)} GB (richiesti ${gb(decision.requiredBytes)} GB col margine), liberi ${gb(freeBytes)} GB` +
+        `${req.translationBytes > 0 ? ` · traduzioni ITA ${gb(req.translationBytes)} GB` : ''}` +
+        `${req.savingBytes > 0 ? ` · profilo ${profile} risparmia ${gb(req.savingBytes)} GB vs 4K` : ''}` +
+        `${req.extraDepIds.length ? ` · ${req.extraDepIds.length} dipendenze incluse` : ''}`,
+    )
+
     logger.info(
       'sync',
       `avvio mass-sync: ${mods.length} mod → ${stockGameModsDir(stockDir)} (concorrenza ${concurrency})`,
@@ -1117,7 +1271,10 @@ app.whenReady().then(() => {
       signal: syncAbort.signal,
       maxRetries: Math.max(0, Math.min(10, Number(store.get('downloadRetries') ?? 3))),
       errorThreshold: Math.max(1, Number(store.get('errorThreshold')) || 50),
-      textureProfile: syncTextureProfile(),
+      textureProfile: profile,
+      // NB: the main gate above already fail-closed on the dependency-EXPANDED footprint (a superset
+      // of this selection), so runMassSync's own pre-flight can only ever agree — we keep it ON as a
+      // second, independent fail-closed layer (defense-in-depth) rather than skipping it.
       // Step 3 — two-phase install: when a base mod has an ITA mapping, the worker downloads and
       // overlays the translation into the same dir on the SAME queue slot (fail-soft if it errors).
       enableAutoTranslate,
@@ -1142,18 +1299,21 @@ app.whenReady().then(() => {
           `mass-sync terminato: ${final.phase} (ok ${final.modsDone}, skip ${final.modsSkipped}, fail ${final.modsFailed})`,
         )
         // Step 3 — post-list ESL/254 scan. Skyrim won't launch with >254 FULL plugins; ESL /
-        // ESL-flagged plugins are free. Log the budget; escalate to error if the limit is blown.
+        // ESL-flagged plugins are free. The verdict is SENT TO THE RENDERER on a dedicated channel:
+        // a log-file-only escalation defeated the feature's whole purpose (the user saw a green
+        // success toast while the game could not launch).
         try {
           const budget = scanInstalledPluginBudget(stockGameModsDir(stockDir))
-          const line = `plugin budget: ${budget.full}/${budget.limit} full + ${budget.light} light (ESL) = ${budget.total} totali`
+          const line = `plugin budget: ${budget.full} mod + ${budget.reservedSlots} vanilla su ${budget.limit} full · ${budget.light} light (ESL) liberi`
           if (budget.overBudget) {
             logger.error(
               'sync',
-              `⚠ LIMITE PLUGIN SUPERATO — ${line}. Skyrim non partirà: converti in ESL o rimuovi ${budget.full - budget.limit} plugin full.`,
+              `⚠ LIMITE PLUGIN SUPERATO — ${line}. Skyrim non partirà: converti in ESL o rimuovi ${-budget.remaining} plugin full.`,
             )
           } else {
             logger.info('sync', `${line} — entro il limite (${budget.remaining} slot full liberi)`)
           }
+          mainWindow?.webContents.send('sync:plugin-budget', budget)
         } catch (e) {
           logger.warn('sync', `scan plugin budget fallita: ${(e as Error).message}`)
         }
@@ -1187,28 +1347,36 @@ app.whenReady().then(() => {
   })
   ipcMain.handle('sync:status', () => syncState)
   // Aggregate disk pre-flight WITHOUT starting the sync — for the Dashboard GO/NO-GO readout.
-  // Con un limit valuta lo spazio del SOLO blocco pianificato (Run-Prog), così la
-  // card riflette il run che verrà davvero lanciato, non l'intera modlist.
+  // STESSA pipeline di sync:start (buildSyncPlan, read-only): base list senza traduzioni, blocco
+  // profile-resolved, footprint dipendenze-espanso e decisione fail-closed identica. La card non
+  // può più mostrare "✓ GO" mentre il click viene bloccato dal gate con numeri diversi.
   ipcMain.handle('sync:preflight', async (_e, opts?: { limit?: number }) => {
-    const stockDir = resolveStockTarget()
-    const all = loadSyncMods()
-    const mods = selectSyncBlock(all, stockDir, opts?.limit)
-    const pf = await diskPreflight(
-      { exists: existsSync, freeSpace: getFreeSpace },
-      {
-        mods,
-        stockGameDir: stockDir,
-        downloadsDir: join(app.getPath('userData'), 'downloads'),
-        textureProfile: syncTextureProfile(),
-        ...syncFactors(),
-      },
-    )
+    const plan = await buildSyncPlan(opts?.limit)
+    const d = plan.decision
+    const pf = d.preflight
     return {
-      ...pf,
-      stockGameDir: stockDir,
-      modsTotal: all.length,
-      modsSelected: mods.length,
-      textureProfile: syncTextureProfile(),
+      // Campi storici della card, ora derivati dalla STESSA decisione del gate di avvio.
+      pendingBytes: pf.pendingBytes,
+      extractionOverhead: pf.extractionOverhead,
+      safetyFactor: pf.safetyFactor,
+      sameDisk: pf.sameDisk,
+      requiredBytes: d.requiredBytes, // requisito vincolante (identico al banner del gate)
+      freeBytes: d.freeBytes,
+      minFreeMarginBytes: pf.minFreeMarginBytes,
+      marginBytes: (Number.isFinite(d.freeBytes) ? d.freeBytes : 0) - d.requiredBytes,
+      ok: d.ok,
+      stockGameDir: plan.stockDir,
+      modsTotal: plan.all.length,
+      modsSelected: plan.mods.length,
+      textureProfile: plan.profile,
+      // Verdetto unificato del gate (nuovo): la card può spiegare PERCHÉ, come il banner.
+      reason: d.reason,
+      missingBytes: d.missingBytes,
+      unsizedCount: d.unsizedTargets.length,
+      extraDeps: plan.req.extraDepIds.length,
+      savingBytes: plan.req.savingBytes,
+      translationBytes: plan.req.translationBytes,
+      cacheDisk: d.downloadsFreeBytes != null && d.gate.ok && d.preflight.ok && !d.ok,
     }
   })
 

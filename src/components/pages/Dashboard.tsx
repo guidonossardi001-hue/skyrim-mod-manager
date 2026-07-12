@@ -24,9 +24,14 @@ import { runPreflight, preflightSummary } from '@/lib/preflight'
 import { LaunchPreflight } from '@/components/ui/LaunchPreflight'
 import { StockGamePanel } from '@/components/ui/StockGamePanel'
 import type { LogLine } from '@/store/appStore'
-import type { SyncProgressUI, DiskPreflightUI } from '@/types'
+import type { SyncProgressUI, DiskPreflightUI, DiskErrorUI, PluginBudgetUI } from '@/types'
 
 const DISK_TARGET_GB = 300 // Nolvus-scale modlist target
+
+// GB formatter safe per valori non-finiti: getFreeSpace ritorna Infinity su un volume non
+// sondabile — mai renderizzare "Infinity GB" / "-Infinity GB" all'utente.
+const fmtGB = (b: number | undefined | null): string =>
+  typeof b === 'number' && Number.isFinite(b) ? (b / 1024 ** 3).toFixed(1) : '—'
 
 // Human ETA: 45s / 12m 30s / 2h 05m
 function fmtEta(sec: number): string {
@@ -77,6 +82,8 @@ export default function Dashboard() {
   const [syncing, setSyncing] = useState(false)
   const [syncProgress, setSyncProgress] = useState<SyncProgressUI | null>(null)
   const [diskPf, setDiskPf] = useState<DiskPreflightUI | null>(null)
+  const [diskError, setDiskError] = useState<DiskErrorUI | null>(null)
+  const [pluginBudget, setPluginBudget] = useState<PluginBudgetUI | null>(null)
   const [pandora, setPandora] = useState<{
     exeFound: boolean
     exePath: string | null
@@ -100,11 +107,36 @@ export default function Dashboard() {
             start(o?: {
               concurrency?: number
               limit?: number
-            }): Promise<{ ok: boolean; total?: number; stockGameDir?: string; error?: string }>
+            }): Promise<{
+              ok: boolean
+              total?: number
+              stockGameDir?: string
+              error?: string
+              disk?: DiskErrorUI
+            }>
             cancel(): Promise<{ ok: boolean }>
           }
         })
       : null
+
+  // Aggregate disk pre-flight (PRECHECK-01, ora unificato col gate PRECHECK-02): fetch del
+  // GO/NO-GO per il run PIANIFICATO — con un blocco Run-Prog valuta il solo blocco. Definita PRIMA
+  // di runSync perché il branch di blocco la richiama per riallineare la card al banner.
+  const refreshPreflight = useCallback(() => {
+    const api = syncBridge() as unknown as {
+      sync?: { preflight?: (o?: { limit?: number }) => Promise<DiskPreflightUI> }
+    }
+    api?.sync
+      ?.preflight?.(blockSize > 0 ? { limit: blockSize } : undefined)
+      .then(setDiskPf)
+      .catch(() => setDiskPf(null))
+  }, [blockSize])
+  useEffect(() => {
+    refreshPreflight()
+    // Il banner di blocco è calcolato per un blocco specifico: cambiare Run-Prog lo rende stale
+    // (card verde nuova sotto banner rosso vecchio) — via anche il banner.
+    setDiskError(null)
+  }, [refreshPreflight])
 
   const runSync = useCallback(
     async (auto = false) => {
@@ -131,6 +163,7 @@ export default function Dashboard() {
         return
       setSyncing(true)
       setSyncProgress(null)
+      setDiskError(null)
       pushLog(
         blockSize > 0
           ? `Avvio Run-Prog: blocco di ${blockSize} mod nello StockGame isolato…`
@@ -140,8 +173,30 @@ export default function Dashboard() {
       try {
         const r = await api.sync.start(blockSize > 0 ? { limit: blockSize } : undefined)
         if (!r.ok) {
-          pushLog(`Sincronizzazione non avviata: ${r.error}`, 'error')
-          toast.error('Sincronizzazione non avviata', r.error ?? '')
+          // Disk gatekeeper NO-GO: surface a persistent, actionable disk banner (not just a toast).
+          // Toast e log DEVONO seguire la reason: "mancano 0.0 GB" su un blocco 'unsized' (o
+          // "liberi Infinity GB" su volume non leggibile) contraddicono il problema reale.
+          if (r.disk) {
+            const d = r.disk as DiskErrorUI
+            setDiskError(d)
+            if (d.reason === 'unsized') {
+              pushLog(`Blocco pre-flight: ${d.unsizedCount} mod senza dimensione nota nel backup`, 'error')
+              toast.error('Mass-install bloccato', `${d.unsizedCount} mod senza dimensione nota — rigenera il backup`)
+            } else if (d.reason === 'unreadable') {
+              pushLog('Blocco pre-flight: spazio su disco non leggibile (volume scollegato?)', 'error')
+              toast.error('Mass-install bloccato', 'Spazio su disco non leggibile: verifica il volume')
+            } else {
+              pushLog(
+                `Blocco pre-flight disco${d.cacheDisk ? ' (volume cache download)' : ''}: mancano ${d.missingGB} GB (servono ${d.requiredGB} GB, liberi ${d.freeGB} GB)`,
+                'error',
+              )
+              toast.error('Spazio su disco insufficiente', `Mancano ~${d.missingGB} GB per avviare`)
+            }
+            refreshPreflight() // riallinea la card GO/NO-GO allo stesso verdetto del banner
+          } else {
+            pushLog(`Sincronizzazione non avviata: ${r.error}`, 'error')
+            toast.error('Sincronizzazione non avviata', r.error ?? '')
+          }
           setSyncing(false)
           return
         }
@@ -153,7 +208,7 @@ export default function Dashboard() {
         setSyncing(false)
       }
     },
-    [syncing, pushLog, blockSize],
+    [syncing, pushLog, blockSize, refreshPreflight],
   )
 
   const cancelSync = useCallback(() => {
@@ -183,26 +238,40 @@ export default function Dashboard() {
         else pushLog(`Sincronizzazione interrotta: ${s.lastMessage}`, 'error')
       }
     }
+    // Dedicated disk-gatekeeper block (also returned synchronously by sync.start; the channel is the
+    // belt-and-suspenders path so the banner still appears if the block arrives out-of-band).
+    const diskHandler = (p: unknown) => {
+      setDiskError(p as DiskErrorUI)
+      setSyncing(false)
+    }
+    // Verdetto ESL/254 post-run: PRIMA viveva solo nel log file — successo verde a schermo con
+    // gioco non avviabile. Ora il main lo manda sul canale dedicato e l'over-budget diventa
+    // banner + toast d'errore.
+    const budgetHandler = (p: unknown) => {
+      const b = p as PluginBudgetUI
+      setPluginBudget(b)
+      if (b.overBudget) {
+        pushLog(
+          `⚠ LIMITE PLUGIN SUPERATO: ${b.full} plugin full + ${b.reservedSlots} master vanilla su ${b.limit} — Skyrim non partirà. Converti in ESL o rimuovi ${-b.remaining} plugin full.`,
+          'error',
+        )
+        toast.error('Limite plugin superato', `Rimuovi o converti ${-b.remaining} plugin full: Skyrim non partirà`)
+      } else {
+        pushLog(
+          `Plugin budget OK: ${b.full} full + ${b.reservedSlots} vanilla su ${b.limit} (${b.remaining} slot liberi, ${b.light} ESL)`,
+          'info',
+        )
+      }
+    }
     const w = api.on('sync:progress', handler as (...a: unknown[]) => void)
+    const wDisk = api.on('sync:disk-error', diskHandler as (...a: unknown[]) => void)
+    const wBudget = api.on('sync:plugin-budget', budgetHandler as (...a: unknown[]) => void)
     return () => {
       if (w) api.off?.('sync:progress', w)
+      if (wDisk) api.off?.('sync:disk-error', wDisk)
+      if (wBudget) api.off?.('sync:plugin-budget', wBudget)
     }
   }, [pushLog])
-
-  // Aggregate disk pre-flight (PRECHECK-01): fetch the GO/NO-GO readout for the
-  // run PIANIFICATO — con un blocco Run-Prog valuta lo spazio del solo blocco.
-  const refreshPreflight = useCallback(() => {
-    const api = syncBridge() as unknown as {
-      sync?: { preflight?: (o?: { limit?: number }) => Promise<DiskPreflightUI> }
-    }
-    api?.sync
-      ?.preflight?.(blockSize > 0 ? { limit: blockSize } : undefined)
-      .then(setDiskPf)
-      .catch(() => setDiskPf(null))
-  }, [blockSize])
-  useEffect(() => {
-    refreshPreflight()
-  }, [refreshPreflight])
 
   // Pandora detection (PANDORA-REGISTER-01): read-only presence check (never runs Pandora).
   useEffect(() => {
@@ -662,6 +731,84 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Disk gatekeeper NO-GO (PRECHECK-02) — the run was BLOCKED before the queue could start */}
+      {diskError && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <HardDrive size={18} className="text-red-400 mt-0.5 shrink-0" />
+              <div>
+                <div
+                  className="text-sm font-bold text-red-200"
+                  style={{ fontFamily: 'Cinzel, serif' }}
+                >
+                  {diskError.reason === 'unsized'
+                    ? 'Mass-install bloccato · dimensioni mod sconosciute'
+                    : diskError.reason === 'unreadable'
+                      ? 'Mass-install bloccato · spazio su disco non leggibile'
+                      : 'Mass-install bloccato · spazio su disco insufficiente'}
+                </div>
+                {diskError.reason === 'insufficient' && !diskError.cacheDisk ? (
+                  <>
+                    <p className="text-xs text-red-200/80 mt-1 leading-relaxed">
+                      Servono ~<strong>{diskError.requiredGB} GB</strong> (download{' '}
+                      {(diskError.requiredBytes / 1024 ** 3).toFixed(1)} GB + margine estrazione
+                      {diskError.sameDisk ? ', stesso disco' : ''}), ma sono liberi solo{' '}
+                      <strong>{diskError.freeGB} GB</strong> → mancano{' '}
+                      <strong className="text-red-300">{diskError.missingGB} GB</strong>.
+                    </p>
+                    <p className="text-xs text-red-200/70 mt-1">
+                      Libera spazio, sposta lo StockGame su un volume più capiente
+                      {diskError.profile === '4K'
+                        ? ' o passa al profilo texture 2K nelle Impostazioni.'
+                        : '.'}
+                      {diskError.extraDeps > 0 &&
+                        ` (${diskError.extraDeps} dipendenze incluse nella stima)`}
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-red-200/80 mt-1 leading-relaxed">{diskError.error}</p>
+                )}
+              </div>
+            </div>
+            <button
+              onClick={() => setDiskError(null)}
+              className="text-xs text-red-300/70 hover:text-red-200 px-2 py-1 rounded shrink-0"
+            >
+              Chiudi
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Verdetto ESL/254 post-run: oltre il limite il gioco NON parte — deve urlare, non stare nel log file */}
+      {pluginBudget?.overBudget && (
+        <div className="rounded-xl border border-red-500/40 bg-red-500/10 p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2">
+              <AlertTriangle size={18} className="text-red-400 mt-0.5 shrink-0" />
+              <div>
+                <div className="text-sm font-bold text-red-200" style={{ fontFamily: 'Cinzel, serif' }}>
+                  Limite plugin superato · Skyrim non partirà
+                </div>
+                <p className="text-xs text-red-200/80 mt-1 leading-relaxed">
+                  {pluginBudget.full} plugin full installati + {pluginBudget.reservedSlots} master vanilla
+                  superano il limite di {pluginBudget.limit} slot. Converti in ESL o rimuovi{' '}
+                  <strong className="text-red-300">{-pluginBudget.remaining}</strong> plugin full prima di
+                  avviare il gioco ({pluginBudget.light} plugin light ESL non contano).
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={() => setPluginBudget(null)}
+              className="text-xs text-red-300/70 hover:text-red-200 px-2 py-1 rounded shrink-0"
+            >
+              Chiudi
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Disk pre-flight (PRECHECK-01) — GO/NO-GO before any download */}
       {diskPf && diskPf.modsTotal > 0 && !syncing && (
         <div
@@ -688,21 +835,43 @@ export default function Dashboard() {
           <div className="grid grid-cols-3 gap-3 text-xs">
             <PfStat
               label="Richiesto"
-              value={`${(diskPf.requiredBytes / 1024 ** 3).toFixed(1)} GB`}
+              value={`${fmtGB(diskPf.requiredBytes)} GB`}
               sub={`${diskPf.modsSelected ?? diskPf.modsTotal} mod × ${diskPf.extractionOverhead} × ${diskPf.safetyFactor}`}
             />
-            <PfStat label="Disponibile" value={`${(diskPf.freeBytes / 1024 ** 3).toFixed(1)} GB`} />
+            <PfStat
+              label="Disponibile"
+              value={Number.isFinite(diskPf.freeBytes) ? `${fmtGB(diskPf.freeBytes)} GB` : '—'}
+            />
             <PfStat
               label="Margine"
-              value={`${diskPf.marginBytes >= 0 ? '+' : ''}${(diskPf.marginBytes / 1024 ** 3).toFixed(1)} GB`}
+              value={
+                Number.isFinite(diskPf.freeBytes)
+                  ? `${diskPf.marginBytes >= 0 ? '+' : ''}${fmtGB(diskPf.marginBytes)} GB`
+                  : '—'
+              }
               danger={!diskPf.ok}
             />
           </div>
           {!diskPf.ok && (
             <p className="text-xs text-red-300/90 mt-2">
-              Spazio insufficiente: mancano ~{(-diskPf.marginBytes / 1024 ** 3).toFixed(1)} GB. La
-              sincronizzazione verrà <b>bloccata</b> finché non liberi spazio o sposti lo StockGame su un
-              volume più capiente.
+              {diskPf.reason === 'unreadable' || !Number.isFinite(diskPf.freeBytes) ? (
+                <>
+                  Spazio su disco <b>non leggibile</b>: verifica che il volume dello StockGame sia
+                  connesso e accessibile.
+                </>
+              ) : diskPf.reason === 'unsized' ? (
+                <>
+                  {diskPf.unsizedCount ?? 0} mod senza dimensione nota nel backup: rigenera il backup
+                  delle collezioni o riduci il blocco Run-Prog.
+                </>
+              ) : (
+                <>
+                  Spazio insufficiente{diskPf.cacheDisk ? ' sul volume della cache download' : ''}:
+                  mancano ~{fmtGB(diskPf.missingBytes ?? -diskPf.marginBytes)} GB. La sincronizzazione
+                  verrà <b>bloccata</b> finché non liberi spazio o sposti lo StockGame su un volume più
+                  capiente.
+                </>
+              )}
             </p>
           )}
         </div>

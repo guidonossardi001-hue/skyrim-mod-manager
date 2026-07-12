@@ -47,6 +47,7 @@ function mkDeps(over: Partial<MassSyncDeps> = {}, rec: Rec = { active: 0, maxAct
     extract: [] as string[],
     overlay: [] as string[],
     removed: [] as string[],
+    markers: [] as string[],
     existing: new Set<string>(),
   }
   const deps: MassSyncDeps = {
@@ -76,6 +77,7 @@ function mkDeps(over: Partial<MassSyncDeps> = {}, rec: Rec = { active: 0, maxAct
       return { method: '7z' }
     }),
     exists: vi.fn((p: string) => calls.existing.has(p.replace(/\\/g, '/'))),
+    writeFile: vi.fn((p: string) => calls.markers.push(p.replace(/\\/g, '/'))),
     ensureDir: vi.fn(),
     remove: vi.fn((p: string) => calls.removed.push(p.replace(/\\/g, '/'))),
     freeSpace: vi.fn(async () => 1e12), // 1 TB free by default → disk check passes
@@ -197,6 +199,64 @@ describe('massSync: orchestration', () => {
     expect(res.modsFailed).toBe(0)
     expect(calls.extract.length).toBe(3) // every base extracted
     expect(logs.some((l) => /fail-soft/.test(l))).toBe(true) // logged, not thrown
+  })
+
+  it('two-phase BYTES: the overall counter is monotonic across the phase switch and credits the base bytes', async () => {
+    // Base of mod 1 weighs 200, its ITA translation 10: distinguishable amounts, so a credit of the
+    // translation INSTEAD OF the base (the old bug) is visible in the final tally, and the Phase-B
+    // slot reset would show up as a backwards jump in the emitted byte sequence.
+    const { deps } = mkDeps({
+      streamDownload: vi.fn(async (url: string, _dest, onP) => {
+        const bytes = url.includes('/9001.7z') ? 10 : url.includes('/1.7z') ? 200 : 100
+        onP(Math.floor(bytes / 2), bytes)
+        await new Promise((r) => setTimeout(r, 2))
+        onP(bytes, bytes)
+        return { bytes }
+      }),
+    })
+    const seen: number[] = []
+    const mods: SyncMod[] = [
+      { modId: 1, fileId: 11, name: 'Alpha', md5: 'abc123', fileSize: 200 },
+      { modId: 2, fileId: 22, name: 'Beta', md5: 'abc123', fileSize: 100 },
+      { modId: 3, fileId: 33, name: 'Gamma', md5: 'abc123', fileSize: 100 },
+    ]
+    const translationOf = (modId: number) =>
+      modId === 1 ? { nexus_id: 9001, file_id: 500, md5: 'abc123' } : null
+    const res = await runMassSync(
+      deps,
+      cfg(mods, {
+        enableAutoTranslate: true,
+        translationOf,
+        concurrency: 1, // sequenziale: la sequenza di byte emessa è deterministica
+        onProgress: (s) => seen.push(s.bytesDownloaded),
+      }),
+    )
+    expect(res.phase).toBe('done')
+    // Monotonic: nessuna emissione può regredire (la Phase B azzerava lo slot senza saldare la base).
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1])
+    // Credito finale = base 200 + traduzione 10 + 100 + 100, cappato al bytesTotal (400).
+    // Col bug il credito di mod 1 era SOLO la traduzione (10) → totale 210.
+    expect(res.bytesDownloaded).toBe(400)
+  })
+
+  it('two-phase MARKER: overlay writes the ITA marker; a skipped base without marker gets the overlay applied', async () => {
+    const { deps, calls } = mkDeps()
+    const translationOf = (modId: number) =>
+      modId === 1 ? { nexus_id: 9001, file_id: 500, md5: 'abc123' } : null
+    // Mod 1 già estratta (es. cancel del run precedente TRA Phase A e Phase B): niente marker.
+    calls.existing.add('D:/SG/mods/1-Alpha')
+    const res = await runMassSync(deps, cfg(MODS, { enableAutoTranslate: true, translationOf }))
+    expect(res.modsSkipped).toBe(1)
+    // L'overlay è stato applicato ANCHE sul percorso skip (prima restava in inglese per sempre)…
+    expect(calls.overlay).toEqual(['D:/SG/mods/1-Alpha'])
+    // …e il marker è stato scritto per renderlo idempotente.
+    expect(calls.markers).toEqual(['D:/SG/mods/1-Alpha/.smm-ita.json'])
+    // Secondo run con marker presente: overlay NON riapplicato.
+    const second = mkDeps()
+    second.calls.existing.add('D:/SG/mods/1-Alpha')
+    second.calls.existing.add('D:/SG/mods/1-Alpha/.smm-ita.json')
+    await runMassSync(second.deps, cfg(MODS, { enableAutoTranslate: true, translationOf }))
+    expect(second.calls.overlay).toEqual([])
   })
 
   it('respects enableAutoTranslate=false: no translation phase', async () => {

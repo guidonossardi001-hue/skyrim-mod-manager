@@ -13,6 +13,11 @@ export const TES4_LIGHT_FLAG = 0x0200
 export const TES4_MASTER_FLAG = 0x0001
 /** Max FULL plugins the engine loads (index 0x00..0xFD). ESL/light live in the shared 0xFE slot. */
 export const FULL_PLUGIN_LIMIT = 254
+/** Vanilla FULL masters always present in the load order (Skyrim, Update, Dawnguard, HearthFires,
+ *  Dragonborn .esm). They occupy real slots, so a mods-only scan must reserve them — otherwise a
+ *  count of 252 mod plugins reads "entro il limite" while the actual load order is 257 and the game
+ *  will not launch. (AE Creation Club content is ESL-flagged and does not consume full slots.) */
+export const VANILLA_FULL_MASTERS = 5
 
 const PLUGIN_EXT = /\.(esp|esm|esl)$/i
 
@@ -45,18 +50,21 @@ export function classifyPlugin(fileName: string, head?: Uint8Array | null): Plug
 }
 
 export interface PluginBudget {
-  full: number // count against the 254 limit
+  full: number // scanned FULL plugins counting against the limit (mods only, excludes reserved)
   light: number // ESL / light-flagged (free)
   total: number // full + light
   limit: number
-  overBudget: boolean
-  remaining: number // limit - full (may be negative)
+  reservedSlots: number // full slots already taken outside the scan (vanilla masters)
+  overBudget: boolean // full + reservedSlots > limit
+  remaining: number // limit - full - reservedSlots (may be negative)
 }
 
-/** Aggregate a classified plugin list into the launchability budget. */
+/** Aggregate a classified plugin list into the launchability budget. `reservedSlots` accounts for
+ *  full plugins that exist outside the scanned set (the 5 vanilla masters) yet still burn slots. */
 export function computePluginBudget(
   plugins: Array<{ name: string; kind: PluginKind }>,
   limit: number = FULL_PLUGIN_LIMIT,
+  reservedSlots: number = 0,
 ): PluginBudget {
   let full = 0
   let light = 0
@@ -64,7 +72,16 @@ export function computePluginBudget(
     if (p.kind === 'full') full++
     else if (p.kind === 'light') light++
   }
-  return { full, light, total: full + light, limit, overBudget: full > limit, remaining: limit - full }
+  const used = full + reservedSlots
+  return {
+    full,
+    light,
+    total: full + light,
+    limit,
+    reservedSlots,
+    overBudget: used > limit,
+    remaining: limit - used,
+  }
 }
 
 /**
@@ -77,7 +94,8 @@ export function scanPluginBudget(
   pluginPaths: string[],
   readHead: (path: string) => Uint8Array | null,
   limit: number = FULL_PLUGIN_LIMIT,
+  reservedSlots: number = 0,
 ): PluginBudget {
   const classified = pluginPaths.map((p) => ({ name: p, kind: classifyPlugin(p, readHead(p)) }))
-  return computePluginBudget(classified, limit)
+  return computePluginBudget(classified, limit, reservedSlots)
 }

@@ -424,7 +424,13 @@ declare global {
         start(opts?: {
           concurrency?: number
           limit?: number
-        }): Promise<{ ok: boolean; total?: number; stockGameDir?: string; error?: string }>
+        }): Promise<{
+          ok: boolean
+          total?: number
+          stockGameDir?: string
+          error?: string
+          disk?: DiskErrorUI // present when the pre-flight gatekeeper blocked the run
+        }>
         cancel(): Promise<{ ok: boolean }>
         status(): Promise<SyncProgressUI | null>
         preflight(opts?: { limit?: number }): Promise<DiskPreflightUI>
@@ -433,7 +439,9 @@ declare global {
   }
 }
 
-// Aggregate disk pre-flight (PRECHECK-01) result for the Dashboard GO/NO-GO readout.
+// Aggregate disk pre-flight result for the Dashboard GO/NO-GO readout. Since the PRECHECK-02
+// unification this is computed by the SAME pipeline as the start gate (dependency-expanded,
+// translation-aware, fail-closed), so the card and the gate banner always agree.
 export interface DiskPreflightUI {
   pendingBytes: number
   extractionOverhead: number
@@ -446,6 +454,51 @@ export interface DiskPreflightUI {
   modsTotal: number
   /** Mod effettivamente selezionate per il run pianificato (blocco Run-Prog). */
   modsSelected?: number
+  /** Verdetto unificato del gate: perché è NO-GO (assente su risposte di build vecchie). */
+  reason?: 'ok' | 'insufficient' | 'unsized' | 'unreadable'
+  missingBytes?: number
+  unsizedCount?: number
+  extraDeps?: number
+  savingBytes?: number
+  translationBytes?: number
+  /** true quando il blocco viene dal volume della cache download (cross-disk), non dallo StockGame. */
+  cacheDisk?: boolean
+}
+
+// Emitted on 'sync:disk-error' (and returned by sync.start as `disk`) when the pre-flight
+// gatekeeper blocks the run because free space can't hold the dependency-expanded footprint.
+export interface DiskErrorUI {
+  reason: 'insufficient' | 'unsized' | 'unreadable'
+  requiredBytes: number
+  requiredWithBufferBytes: number
+  freeBytes: number
+  missingBytes: number
+  savingBytes: number
+  requiredGB: string
+  freeGB: string
+  missingGB: string
+  profile: '2K' | '4K'
+  pendingMods: number
+  extraDeps: number
+  unsizedCount: number
+  sameDisk: boolean
+  /** true = il blocco viene dal volume della cache download (cross-disk), non dallo StockGame. */
+  cacheDisk?: boolean
+  downloadsFreeBytes?: number | null
+  downloadsRequiredBytes?: number
+  error?: string // human-readable message (also the sync.start return `error`)
+}
+
+// Emitted on 'sync:plugin-budget' after a mass-sync run: ESL/254 launchability verdict over the
+// installed StockGame/mods tree (+ the 5 vanilla full masters reserved outside the scan).
+export interface PluginBudgetUI {
+  full: number
+  light: number
+  total: number
+  limit: number
+  reservedSlots: number
+  overBudget: boolean
+  remaining: number
 }
 
 // Live mass-sync progress pushed on the 'sync:progress' channel.

@@ -109,4 +109,15 @@ describe('scanPluginBudget (injected header reader)', () => {
     expect(b.full).toBe(1) // X.esp with no header → full
     expect(b.light).toBe(1) // Y.esl → light regardless
   })
+
+  it('reservedSlots (vanilla masters) consume budget: 250 mod full + 5 vanilla = over the 254 limit', () => {
+    const plugins = Array.from({ length: 250 }, (_, i) => ({ name: `M${i}.esp`, kind: 'full' as const }))
+    const b = computePluginBudget(plugins, 254, 5)
+    expect(b.overBudget).toBe(true) // 250 + 5 = 255 > 254 — prima leggeva "entro il limite"
+    expect(b.remaining).toBe(-1)
+    expect(b.reservedSlots).toBe(5)
+    const ok = computePluginBudget(plugins.slice(0, 249), 254, 5)
+    expect(ok.overBudget).toBe(false)
+    expect(ok.remaining).toBe(0)
+  })
 })
