@@ -676,6 +676,25 @@ export const mockApi = {
     // Preview stub: no Vortex backup on disk in the browser mock.
     importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
     dedupe: async () => ({ success: true as const, removed: 0, total: catalog.length }),
+    // Preview stub: il pruning richiede il backup raw su disco (solo app desktop).
+    pruneCollection: async () => ({
+      ok: false as const,
+      error: 'Pruning collezioni disponibile solo nell’app desktop (serve il backup Vortex)',
+    }),
+    // Preview stub: dati seed sempre validi — il report riflette la forma reale.
+    validateDownloads: async () => ({
+      ok: true as const,
+      backfilled: 0,
+      queue: {
+        total: catalog.length,
+        valid: catalog.length,
+        invalidCount: 0,
+        warningCount: 0,
+        invalid: [],
+        warnings: [],
+      },
+      catalog: { checked: catalog.length, ok: catalog.length, missingUrlCount: 0, badModIdCount: 0, missingUrl: [] },
+    }),
     // Preview stub: the real backend fetches a signed remote catalog and replaces
     // modlist_catalog wholesale. Here there is no signed endpoint, so mirror the
     // real "URL non configurato" no-throw failure the packaged app returns when

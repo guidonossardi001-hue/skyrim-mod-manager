@@ -213,6 +213,43 @@ declare global {
         }>
         // Remove cross-source name duplicates from the catalog. Never rejects.
         dedupe(): Promise<{ success: boolean; removed?: number; total?: number; error?: string }>
+        // Piano/esecuzione pruning collezione (dry-run senza apply=true). Rimuove solo le mod
+        // ESCLUSIVE della collezione, tenendo quelle richieste dai superstiti (no missing masters).
+        pruneCollection(
+          query: string,
+          apply?: boolean,
+        ): Promise<{
+          ok: boolean
+          applied?: boolean
+          collection?: string
+          exclusive?: number
+          shared?: number
+          keptAsDependency?: number
+          pruned?: number
+          catalogRowsDeleted?: number
+          downloadsDeleted?: number
+          error?: string
+        }>
+        // Data-integrity check dello schema download (fail-safe: flagga, non cancella).
+        validateDownloads(): Promise<{
+          ok: boolean
+          backfilled?: number
+          queue?: {
+            total: number
+            valid: number
+            invalidCount: number
+            warningCount: number
+            invalid: Array<{ modId: number | null; name: string; issues: string[] }>
+            warnings: Array<{ modId: number | null; name: string; issues: string[] }>
+          } | null
+          catalog?: {
+            checked: number
+            ok: number
+            missingUrlCount: number
+            badModIdCount: number
+            missingUrl: Array<{ nexus_id: number | null; name: string }>
+          } | null
+        }>
         // Fetch + verify + atomically replace the reference catalog from the
         // signed remote source. url is optional (main process falls back to its
         // configured default). Never rejects — inspect success/errorKind.

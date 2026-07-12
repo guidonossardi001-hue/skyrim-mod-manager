@@ -52,6 +52,8 @@ export default function Catalog() {
   const [updatingCatalog, setUpdatingCatalog] = useState(false)
   const [importingVortex, setImportingVortex] = useState(false)
   const [deduping, setDeduping] = useState(false)
+  const [pruning, setPruning] = useState(false)
+  const [validating, setValidating] = useState(false)
   // Multi-select for the dependency resolver. Kept as a stable Set reference across
   // renders (updated only on toggle) so the resolver drawer never resets spuriously.
   const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
@@ -286,6 +288,65 @@ export default function Catalog() {
     }
   }
 
+  // Pruning collezione "DOMAIN": dry-run → conferma con i numeri reali → apply. Rimuove solo le
+  // mod ESCLUSIVE della collezione (quelle richieste dai superstiti restano: no missing masters).
+  const pruneDomain = async () => {
+    setPruning(true)
+    try {
+      const plan = await window.api.catalog.pruneCollection('DOMAIN')
+      if (!plan.ok) {
+        toast.error('Pruning non disponibile', plan.error ?? 'errore sconosciuto')
+        return
+      }
+      const msg =
+        `Rimuovere la collezione "${plan.collection}"?\n\n` +
+        `· ${plan.pruned} mod esclusive verranno rimosse da catalogo, coda e mass-install\n` +
+        `· ${plan.keptAsDependency} esclusive restano perché richieste da altre mod (dipendenze)\n` +
+        `· ${plan.shared} condivise con altre collezioni restano\n\n` +
+        `Reversibile: "Importa modlist Vortex" le ripristina.`
+      if (!window.confirm(msg)) return
+      const res = await window.api.catalog.pruneCollection('DOMAIN', true)
+      if (res.ok) {
+        await loadCatalog()
+        toast.success(
+          'Collezione rimossa',
+          `${res.pruned} mod escluse · ${res.catalogRowsDeleted} righe catalogo · ${res.downloadsDeleted} download annullati`,
+        )
+      } else {
+        toast.error('Pruning fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Pruning fallito', (e as Error).message)
+    } finally {
+      setPruning(false)
+    }
+  }
+
+  // Data-integrity check dello schema download (fail-safe: flagga nei log, non cancella).
+  const validateDownloads = async () => {
+    setValidating(true)
+    try {
+      const res = await window.api.catalog.validateDownloads()
+      if (!res.ok) {
+        toast.error('Validazione fallita', 'errore sconosciuto')
+        return
+      }
+      const q = res.queue
+      const c = res.catalog
+      const bad = (q?.invalidCount ?? 0) + (c?.missingUrlCount ?? 0) + (c?.badModIdCount ?? 0)
+      const detail =
+        `Coda: ${q ? `${q.valid}/${q.total} valide (${q.invalidCount} invalid, ${q.warningCount} warning)` : 'n/d'} · ` +
+        `Catalogo: ${c ? `${c.ok}/${c.checked} con link derivabile (${c.missingUrlCount} missing-url)` : 'n/d'}` +
+        (res.backfilled ? ` · ${res.backfilled} file_id recuperati dal backup` : '')
+      if (bad) toast.warning('Validazione download: anomalie', detail)
+      else toast.success('Validazione download OK', detail)
+    } catch (e) {
+      toast.error('Validazione fallita', (e as Error).message)
+    } finally {
+      setValidating(false)
+    }
+  }
+
   const installAllFiltered = async () => {
     const missing = filtered.filter((m) => !installedSet.has(m.nexus_id))
     if (missing.length === 0) {
@@ -351,6 +412,38 @@ export default function Catalog() {
               ) : (
                 <>
                   <X size={12} /> Rimuovi doppioni
+                </>
+              )}
+            </button>
+            <button
+              onClick={pruneDomain}
+              disabled={pruning}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Rimuovi le mod esclusive della collezione DOMAIN (le dipendenze dei superstiti restano)"
+            >
+              {pruning ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Pruning...
+                </>
+              ) : (
+                <>
+                  <X size={12} /> Rimuovi DOMAIN
+                </>
+              )}
+            </button>
+            <button
+              onClick={validateDownloads}
+              disabled={validating}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Verifica lo schema dei metadati di download (mod_id + link diretto derivabile)"
+            >
+              {validating ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Verifica...
+                </>
+              ) : (
+                <>
+                  <RefreshCw size={12} /> Verifica download
                 </>
               )}
             </button>

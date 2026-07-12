@@ -22,6 +22,9 @@ export interface VortexBackupMod {
 
 export interface CatalogRow {
   nexus_id: number
+  /** fileId dal backup: rende derivabile il download link diretto (download_link.json) senza
+   *  round-trip API; senza, la riga viene flaggata missing-url dalla validazione schema. */
+  nexus_file_id: number | null
   name: string
   category: string // NOT NULL in modlist_catalog
   subcategory: string | null
@@ -58,6 +61,8 @@ export function buildCatalogRowsFromBackup(backup: unknown): CatalogRow[] {
     const sizeBytes = typeof m.fileSize === 'number' && m.fileSize > 0 ? m.fileSize : 0
     rows.push({
       nexus_id: id,
+      nexus_file_id:
+        typeof m.fileId === 'number' && Number.isInteger(m.fileId) && m.fileId > 0 ? m.fileId : null,
       name: m.name.trim().slice(0, 300),
       category: (typeof m.collection === 'string' && m.collection.trim()) || 'Vortex',
       subcategory: null,

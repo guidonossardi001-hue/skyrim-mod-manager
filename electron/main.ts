@@ -63,6 +63,8 @@ import {
   type SyncProgress,
 } from './sync/massSync'
 import { computeRequiredSpace, decideDiskGate } from './sync/diskGatekeeper'
+import { computePrunePlan, isPruneError, type BackupCollectionsLike } from './catalog/collectionPrune'
+import { validateDownloadSchema, validateCatalogLinks, summarizeInvalid } from './catalog/downloadSchema'
 import { getFreeSpace } from './install/diskSpace'
 import { sameVolume } from './install/stockGame'
 import { sanitizePathSegment } from './util/paths'
@@ -1013,8 +1015,9 @@ app.whenReady().then(() => {
     // Reserve the 5 vanilla full masters: they occupy load-order slots the mods can't use.
     return scanPluginBudget(paths, readPluginHead, undefined, VANILLA_FULL_MASTERS)
   }
-  // Source of truth: the persisted backup (survives a Vortex wipe); fallback to a live scan.
-  const loadSyncMods = (): SyncMod[] => {
+  // ── Sorgente sync: backup persistito → scan live, con sanificazione fail-safe ───────────────
+  /** Primo backup collezioni parseabile tra i percorsi noti (settings → userData → cwd/data). */
+  const readBackupRaw = (): { backup: BackupCollectionsLike & { deduped?: unknown[] }; path: string } | null => {
     const candidates = [
       store.get('collectionsBackupPath') as string | undefined,
       join(app.getPath('userData'), 'vortex-collections-backup.json'),
@@ -1023,43 +1026,132 @@ app.whenReady().then(() => {
     for (const p of candidates) {
       try {
         if (!existsSync(p)) continue
-        const b = JSON.parse(readFileSync(p, 'utf8'))
-        const arr = (b.deduped ?? []) as Array<{
-          modId: number
-          fileId: number
-          name: string
-          md5?: string
-          fileSize?: number
-        }>
-        // Reconstruct resolution VARIANTS from the raw per-collection files: `deduped` keeps one
-        // file per modId, but the raw collections may hold the same mod in 2K AND 4K.
-        const rawByMod = new Map<number, Array<{ fileId: number; name: string; md5?: string; fileSize?: number }>>()
-        for (const c of (b.collections ?? []) as Array<{
-          mods?: Array<{ modId: number; fileId: number; name: string; md5?: string; fileSize?: number }>
-        }>) {
-          for (const rm of c.mods ?? []) {
-            if (!rm?.modId || !rm?.fileId) continue
-            const list = rawByMod.get(rm.modId) ?? []
-            list.push({ fileId: rm.fileId, name: rm.name, md5: rm.md5, fileSize: rm.fileSize })
-            rawByMod.set(rm.modId, list)
-          }
-        }
-        const mods = arr
-          .filter((m) => m.modId && m.fileId)
-          .map((m) => {
-            const variants = buildVariants(rawByMod.get(m.modId) ?? [])
-            // Attach only when there's a REAL choice (≥2 resolutions); a single tagged file is not
-            // an alternative worth switching to.
-            return variants.length > 1
-              ? { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize, variants }
-              : { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize }
-          })
-        if (mods.length) {
-          logger.info('sync', `sorgente: backup ${p} (${mods.length} mod)`)
-          return mods
-        }
+        return { backup: JSON.parse(readFileSync(p, 'utf8')), path: p }
       } catch {
         /* try next */
+      }
+    }
+    return null
+  }
+
+  /** Mappa il backup grezzo nella lista SyncMod (con ricostruzione varianti 2K/4K dalle raw). */
+  const backupToSyncMods = (b: BackupCollectionsLike & { deduped?: unknown[] }): SyncMod[] => {
+    const arr = (b.deduped ?? []) as Array<{
+      modId: number
+      fileId: number
+      name: string
+      md5?: string
+      fileSize?: number
+    }>
+    // Reconstruct resolution VARIANTS from the raw per-collection files: `deduped` keeps one
+    // file per modId, but the raw collections may hold the same mod in 2K AND 4K.
+    const rawByMod = new Map<number, Array<{ fileId: number; name: string; md5?: string; fileSize?: number }>>()
+    for (const c of (b.collections ?? []) as Array<{
+      mods?: Array<{ modId: number; fileId: number; name: string; md5?: string; fileSize?: number }>
+    }>) {
+      for (const rm of c.mods ?? []) {
+        if (!rm?.modId || !rm?.fileId) continue
+        const list = rawByMod.get(rm.modId) ?? []
+        list.push({ fileId: rm.fileId, name: rm.name, md5: rm.md5, fileSize: rm.fileSize })
+        rawByMod.set(rm.modId, list)
+      }
+    }
+    // NB: niente pre-filtro silenzioso su modId/fileId — le entry malformate le scarta (e le
+    // RIPORTA) validateDownloadSchema in sanitizeSyncSource, così il log dice cosa manca e perché.
+    return arr.map((m) => {
+      const variants = buildVariants(rawByMod.get(m.modId) ?? [])
+      // Attach only when there's a REAL choice (≥2 resolutions).
+      return variants.length > 1
+        ? { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize, variants }
+        : { modId: m.modId, fileId: m.fileId, name: m.name, md5: m.md5, fileSize: m.fileSize }
+    })
+  }
+
+  /** Collezioni marcate come potate (persistite dal comando catalog:prune-collection). */
+  const readPrunedCollections = (): string[] => {
+    const v = store.get('prunedCollections')
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string' && !!x.trim()) : []
+  }
+
+  /** Grafo `requires` del catalogo (nexus_id → deps). Vuoto se DB assente o righe malformate. */
+  const catalogRequiresMap = (): Map<number, number[]> => {
+    const map = new Map<number, number[]>()
+    try {
+      if (!db) return map
+      const rows = getRawDb().prepare('SELECT nexus_id, requires FROM modlist_catalog').all() as Array<{
+        nexus_id: number
+        requires: string | null
+      }>
+      for (const r of rows) {
+        try {
+          const arr = JSON.parse(r.requires ?? '[]')
+          if (Array.isArray(arr)) {
+            const deps = arr.map(Number).filter((n) => Number.isInteger(n) && n > 0)
+            if (deps.length) map.set(r.nexus_id, deps)
+          }
+        } catch {
+          /* riga malformata: nessuna dipendenza dichiarata */
+        }
+      }
+    } catch {
+      /* DB non pronto: il chiamante degrada in fail-safe */
+    }
+    return map
+  }
+
+  /**
+   * Sanificazione fail-safe della sorgente sync:
+   *  1) schema download (validateDownloadSchema): entry senza modId/fileId o con md5 malformato
+   *     vengono FLAGGATE nei log ed ESCLUSE dalla coda (un fetch senza link diretto derivabile
+   *     finirebbe in timeout/retry a vuoto);
+   *  2) collezioni potate (prunedCollections): il piano viene RICALCOLATO a ogni load sul backup
+   *     corrente (esclusività raw + dependency-keep sul grafo requires) — niente id hardcoded.
+   */
+  const sanitizeSyncSource = (
+    mods: SyncMod[],
+    backup: BackupCollectionsLike | null,
+  ): SyncMod[] => {
+    const { valid, invalid, warnings } = validateDownloadSchema(mods)
+    if (invalid.length)
+      logger.warn(
+        'sync',
+        `schema download: ${invalid.length} entry invalide escluse dalla coda — ${summarizeInvalid(invalid)}`,
+      )
+    if (warnings.length)
+      logger.warn('sync', `schema download: ${warnings.length} entry con anomalie soft — ${summarizeInvalid(warnings)}`)
+    let out = valid
+    const pruned = readPrunedCollections()
+    if (pruned.length && backup) {
+      const requires = catalogRequiresMap()
+      for (const q of pruned) {
+        const plan = computePrunePlan(backup, q, requires)
+        if (isPruneError(plan)) {
+          logger.warn('sync', `pruning "${q}" saltato (fail-safe): ${plan.error}`)
+          continue
+        }
+        const drop = new Set(plan.prunedIds)
+        const before = out.length
+        out = out.filter((m) => !drop.has(m.modId))
+        logger.info(
+          'sync',
+          `pruning collezione "${plan.collection}": ${before - out.length} mod escluse (${plan.keptAsDependencyIds.length} tenute come dipendenze, ${plan.sharedIds.length} condivise con altre collezioni)`,
+        )
+      }
+    } else if (pruned.length) {
+      logger.warn('sync', 'pruning collezioni saltato (fail-safe): backup raw non disponibile')
+    }
+    return out
+  }
+
+  // Source of truth: the persisted backup (survives a Vortex wipe); fallback to a live scan.
+  const loadSyncMods = (): SyncMod[] => {
+    const raw = readBackupRaw()
+    if (raw) {
+      const mods = backupToSyncMods(raw.backup)
+      if (mods.length) {
+        const out = sanitizeSyncSource(mods, raw.backup)
+        logger.info('sync', `sorgente: backup ${raw.path} (${out.length} mod)`)
+        return out
       }
     }
     // fallback: live Vortex scan (no variant reconstruction — a live scan has one file per mod)
@@ -1075,8 +1167,9 @@ app.whenReady().then(() => {
           md5: m.md5,
           fileSize: m.fileSize,
         }))
-      logger.info('sync', `sorgente: scan Vortex (${mods.length} mod)`)
-      return mods
+      const out = sanitizeSyncSource(mods, null)
+      logger.info('sync', `sorgente: scan Vortex (${out.length} mod)`)
+      return out
     }
     return []
   }
@@ -1378,6 +1471,145 @@ app.whenReady().then(() => {
       translationBytes: plan.req.translationBytes,
       cacheDisk: d.downloadsFreeBytes != null && d.gate.ok && d.preflight.ok && !d.ok,
     }
+  })
+
+  // ── Sanificazione catalogo: pruning collezione + validazione schema download ────────────────
+  // Piano di potatura di una collezione (es. "DOMAIN"): dry-run di default, `apply=true` esegue.
+  // Regole nel modulo puro collectionPrune.ts: rimozione SOLO delle mod esclusive della collezione,
+  // con dependency-keep transitivo sul grafo requires (niente missing masters tra i superstiti).
+  ipcMain.handle('catalog:prune-collection', (_e, query: unknown, apply?: unknown) => {
+    const q = typeof query === 'string' ? query.trim() : ''
+    if (!q) return { ok: false, error: 'Nome collezione mancante' }
+    const raw = readBackupRaw()
+    if (!raw)
+      return { ok: false, error: 'Backup collezioni non trovato: impossibile calcolare il piano in sicurezza.' }
+    const plan = computePrunePlan(raw.backup, q, catalogRequiresMap())
+    if (isPruneError(plan)) return { ok: false, error: plan.error }
+    let catalogRowsDeleted = 0
+    let downloadsDeleted = 0
+    if (apply === true && plan.prunedIds.length) {
+      try {
+        const rdb = getRawDb()
+        const CHUNK = 500 // sotto il limite di 999 variabili SQLite
+        const tx = rdb.transaction(() => {
+          for (let i = 0; i < plan.prunedIds.length; i += CHUNK) {
+            const ch = plan.prunedIds.slice(i, i + CHUNK)
+            const ph = ch.map(() => '?').join(',')
+            // Solo le righe importate di QUELLA collezione: una voce curata resta anche a pari id.
+            catalogRowsDeleted += rdb
+              .prepare(`DELETE FROM modlist_catalog WHERE category = ? AND nexus_id IN (${ph})`)
+              .run(plan.collection, ...ch).changes
+            // Coda download: si annullano solo gli stati non ancora attivi (mai un run in corso).
+            downloadsDeleted += rdb
+              .prepare(`DELETE FROM downloads WHERE status IN ('queued','pending') AND nexus_id IN (${ph})`)
+              .run(...ch).changes
+          }
+        })
+        tx()
+      } catch (e) {
+        return { ok: false, error: `Pulizia DB fallita: ${(e as Error).message}` }
+      }
+      // Persisti la scelta: loadSyncMods ricalcola ed esclude a ogni load (reversibile svuotando
+      // il setting; le righe catalogo tornano col bottone "Importa modlist Vortex").
+      const cur = readPrunedCollections()
+      if (!cur.includes(plan.collection)) store.set('prunedCollections', [...cur, plan.collection])
+      logger.info(
+        'catalog',
+        `pruning "${plan.collection}": ${plan.prunedIds.length} mod escluse dalla sync, ${catalogRowsDeleted} righe catalogo rimosse, ${downloadsDeleted} download in coda annullati; ${plan.keptAsDependencyIds.length} esclusive tenute come dipendenze, ${plan.sharedIds.length} condivise`,
+      )
+    }
+    return {
+      ok: true,
+      applied: apply === true,
+      collection: plan.collection,
+      exclusive: plan.exclusiveIds.length,
+      shared: plan.sharedIds.length,
+      keptAsDependency: plan.keptAsDependencyIds.length,
+      pruned: plan.prunedIds.length,
+      catalogRowsDeleted,
+      downloadsDeleted,
+    }
+  })
+
+  // Data-integrity check dello schema download su coda residua + catalogo. Fail-safe: flagga e
+  // riporta, non cancella mai. Backfill idempotente di nexus_file_id dal backup (la colonna
+  // esisteva dalla migrazione 3 ma l'import Vortex non la popolava → senza, ogni riga importata
+  // risulterebbe missing-url pur avendo il fileId nel backup).
+  ipcMain.handle('catalog:validate-downloads', () => {
+    const raw = readBackupRaw()
+    let queue: {
+      total: number
+      valid: number
+      invalidCount: number
+      warningCount: number
+      invalid: unknown[]
+      warnings: unknown[]
+    } | null = null
+    if (raw) {
+      const all = backupToSyncMods(raw.backup)
+      const v = validateDownloadSchema(all)
+      queue = {
+        total: all.length,
+        valid: v.valid.length,
+        invalidCount: v.invalid.length,
+        warningCount: v.warnings.length,
+        invalid: v.invalid.slice(0, 50),
+        warnings: v.warnings.slice(0, 50),
+      }
+      if (v.invalid.length)
+        logger.warn('catalog', `validazione coda: ${v.invalid.length} entry invalid/missing-url — ${summarizeInvalid(v.invalid)}`)
+    }
+    let backfilled = 0
+    let catalog: {
+      checked: number
+      ok: number
+      missingUrlCount: number
+      badModIdCount: number
+      missingUrl: unknown[]
+    } | null = null
+    try {
+      const rdb = getRawDb()
+      if (raw) {
+        const fileIdOf = new Map<number, number>()
+        for (const m of (raw.backup.deduped ?? []) as Array<{ modId?: number; fileId?: number }>) {
+          const id = Number(m?.modId)
+          const fid = Number(m?.fileId)
+          if (Number.isInteger(id) && id > 0 && Number.isInteger(fid) && fid > 0) fileIdOf.set(id, fid)
+        }
+        const upd = rdb.prepare(
+          'UPDATE modlist_catalog SET nexus_file_id = ? WHERE nexus_id = ? AND (nexus_file_id IS NULL OR nexus_file_id <= 0)',
+        )
+        const tx = rdb.transaction(() => {
+          for (const [id, fid] of fileIdOf) backfilled += upd.run(fid, id).changes
+        })
+        tx()
+      }
+      const rows = rdb
+        .prepare('SELECT nexus_id, name, nexus_file_id, nexus_download_url FROM modlist_catalog')
+        .all() as Array<{
+        nexus_id: number | null
+        name: string | null
+        nexus_file_id: number | null
+        nexus_download_url: string | null
+      }>
+      const rep = validateCatalogLinks(rows)
+      catalog = {
+        checked: rep.checked,
+        ok: rep.ok,
+        missingUrlCount: rep.missingUrl.length,
+        badModIdCount: rep.badModId.length,
+        missingUrl: rep.missingUrl.slice(0, 50),
+      }
+      if (rep.missingUrl.length)
+        logger.warn(
+          'catalog',
+          `validazione catalogo: ${rep.missingUrl.length}/${rep.checked} righe flaggate missing-url (né nexus_file_id né nexus_download_url)`,
+        )
+      if (backfilled) logger.info('catalog', `backfill nexus_file_id dal backup: ${backfilled} righe aggiornate`)
+    } catch (e) {
+      logger.warn('catalog', `validazione catalogo fallita (fail-safe, solo report): ${(e as Error).message}`)
+    }
+    return { ok: true, backfilled, queue, catalog }
   })
 
   // ── Vortex importer ────────────────────────────────────────────────────────
@@ -1784,8 +2016,8 @@ ipcMain.handle('catalog:import-vortex', () => {
   const before = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
   const insert = db.prepare(`
     INSERT OR IGNORE INTO modlist_catalog
-    (nexus_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
-    VALUES (@nexus_id, @name, @category, @subcategory, @priority_order, @required, @description, @author, @tags, @size_mb, @has_it_translation, @notes, @conflicts_with, @requires)
+    (nexus_id, nexus_file_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
+    VALUES (@nexus_id, @nexus_file_id, @name, @category, @subcategory, @priority_order, @required, @description, @author, @tags, @size_mb, @has_it_translation, @notes, @conflicts_with, @requires)
   `)
   const tx = db.transaction((rs: ReturnType<typeof buildCatalogRowsFromBackup>) => {
     for (const r of rs) insert.run(r as unknown as Record<string, unknown>)
