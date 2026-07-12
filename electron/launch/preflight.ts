@@ -5,6 +5,7 @@ import { app } from 'electron'
 import type Database from 'better-sqlite3'
 import type Store from 'electron-store'
 import { detectSteamEnv, detectSkse } from '../steam/detect'
+import { isAddressLibraryBin, addressLibraryMatchesVersion } from './addressLibrary'
 import { resolveMo2Plugins } from '../steam/mo2'
 import { runLaunchWorkflow, type LaunchEnv, type LaunchReport } from '../../src/lib/launchWorkflow'
 import { resolveActiveProfileId } from '../util/activeProfile'
@@ -25,12 +26,15 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     gameVersionSupported: skseInfo.gameVersionSupported,
   }
   const ssePlugins = gamePath ? join(gamePath, 'Data', 'SKSE', 'Plugins') : null
+  // Address Library: accetta ENTRAMBI i naming reali (SE `version-…bin`, AE `versionlib-…bin`).
+  // Il vecchio pattern solo-SE marcava "mancante" un'installazione AE corretta e bloccava il
+  // gate di avvio. Quando conosciamo la versione del runtime verifichiamo anche che esista il
+  // .bin corrispondente (null = non verificabile, mai blocco spurio).
+  const addressBins =
+    ssePlugins && existsSync(ssePlugins) ? readdirSync(ssePlugins).filter(isAddressLibraryBin) : []
   const addressLibrary = {
-    present:
-      !!ssePlugins &&
-      existsSync(ssePlugins) &&
-      readdirSync(ssePlugins).some((n) => /^version-[\d-]+\.bin$/i.test(n)),
-    correctForVersion: null as boolean | null,
+    present: addressBins.length > 0,
+    correctForVersion: addressLibraryMatchesVersion(addressBins, skyrim.version ?? null),
   }
 
   // MO2 target + real plugins.txt from the active profile (T3).

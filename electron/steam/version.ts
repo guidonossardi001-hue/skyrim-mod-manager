@@ -4,9 +4,12 @@
 // the game build it targets (skse64_1_6_1170.dll). A match on the first three
 // components means SKSE is compatible with the installed runtime.
 
-/** "version-1-6-1170-0.bin" → "1.6.1170.0" */
+/** "version-1-6-1170-0.bin" / "versionlib-1-6-1170-0.bin" → "1.6.1170.0" */
 export function parseAddressLibVersion(filename: string): string | null {
-  const m = filename.match(/^version-([\d-]+)\.bin$/i)
+  // Naming reale: SE `version-…bin`, AE `versionlib-…bin`. Il pattern solo-SE rendeva la
+  // versione runtime IGNOTA su installazioni AE corrette (e a cascata falsava i check
+  // SKSE/AddressLibrary del gate di avvio).
+  const m = filename.match(/^version(?:lib)?-([\d-]+)\.bin$/i)
   return m ? m[1].replace(/-/g, '.') : null
 }
 

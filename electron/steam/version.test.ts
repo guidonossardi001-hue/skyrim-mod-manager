@@ -2,13 +2,16 @@ import { describe, it, expect } from 'vitest'
 import { parseAddressLibVersion, parseSkseRuntimeVersion, gameVersionSupported } from './version'
 
 describe('parseAddressLibVersion', () => {
-  it('decodes the Address Library bin filename', () => {
+  it('decodes the Address Library bin filename (SE and AE naming)', () => {
     expect(parseAddressLibVersion('version-1-6-1170-0.bin')).toBe('1.6.1170.0')
     expect(parseAddressLibVersion('version-1-5-97-0.bin')).toBe('1.5.97.0')
+    // Naming AE reale (era codificato come "non-matching": il falso negativo bloccava l'avvio).
+    expect(parseAddressLibVersion('versionlib-1-6-1170-0.bin')).toBe('1.6.1170.0')
   })
   it('returns null for non-matching names', () => {
     expect(parseAddressLibVersion('readme.txt')).toBeNull()
-    expect(parseAddressLibVersion('versionlib-1-6.bin')).toBeNull()
+    expect(parseAddressLibVersion('myversionlib-1-6-1170-0.bin')).toBeNull()
+    expect(parseAddressLibVersion('versionlib-.bin')).toBeNull()
   })
 })
 
