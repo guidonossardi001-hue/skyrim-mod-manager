@@ -29,6 +29,7 @@ import { getLoadOrder, saveLoadOrder } from './pluginManager'
 import type { LoadOrderEntry } from '../src/types'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
+import { initCrashEngine } from './launch/crashEngine'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
 import { checkForLauncherUpdate } from './launch/launcherUpdate'
 import {
@@ -89,7 +90,9 @@ import {
   buildCatalogRowsFromCollection,
   type CollectionRevisionResult,
 } from './nexus/collections'
-import { axiosGet, axiosJson, axiosPostJson } from './http/axiosAdapters'
+import { axiosGet, axiosJson, axiosPostJson, axiosText } from './http/axiosAdapters'
+import { initMasterlistEngine } from './plugins/masterlistEngine'
+import { MASTERLIST_CACHE_FILE } from './plugins/masterlistCache'
 import { extractArchive } from './install/extract'
 import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash, randomUUID } from 'crypto'
@@ -628,8 +631,22 @@ app.whenReady().then(() => {
     // Masterlist-lite LOOT-like (regole "after" soft): file opzionale in userData,
     // editabile dall'utente; assente → zero regole, nessun errore.
     resolveMasterlistPath: () => join(app.getPath('userData'), 'masterlist.json'),
+    // Cache del masterlist LOOT reale (masterlist:refresh la scrive; qui la si legge soltanto).
+    resolveLootMasterlistCachePath: () => join(app.getPath('userData'), MASTERLIST_CACHE_FILE),
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
+
+  // Masterlist LOOT reale: refresh ESPLICITO (mai automatico al boot) + status dalla cache locale.
+  initMasterlistEngine({
+    resolveCachePath: () => join(app.getPath('userData'), MASTERLIST_CACHE_FILE),
+    http: axiosText,
+    nowIso: () => new Date().toISOString(),
+    log: (level, msg) => (level === 'warn' ? logger.warn('masterlist', msg) : logger.info('masterlist', msg)),
+  })
+
+  // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura, nessuna azione
+  // sul gioco. Legge dalla cartella SKSE standard o da un file scelto manualmente.
+  initCrashEngine()
 
   // Steam detection + launch pre-flight (companion mode: read-only, gated launch).
   ipcMain.handle('steam:detect', () => detectSteamEnv())

@@ -431,11 +431,14 @@ declare global {
           pluginsPath?: string
           systemPluginsPath?: string
           ccFilesLinked?: number
+          conflictsResolved?: number
+          dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[]
           errorKind?:
             | 'no-mods'
             | 'cross-volume'
             | 'source-missing'
             | 'dependency-cycle'
+            | 'missing-master'
             | 'cleanup'
             | 'link'
             | 'db'
@@ -465,6 +468,58 @@ declare global {
             percent?: number
           }) => void,
         ): () => void
+      }
+      // Masterlist LOOT reale (community-curata): regole "after", rank di gruppo, CRC dirty-plugin.
+      // Never rejects — inspect ok.
+      masterlist: {
+        // Fetch ESPLICITO dal repo pubblico loot/skyrimse (mai automatico al boot).
+        refresh(): Promise<{
+          ok: boolean
+          pluginCount?: number
+          groupCount?: number
+          ruleCount?: number
+          dirtyCount?: number
+          fetchedAt?: string
+          error?: string
+        }>
+        // Legge SOLO la cache locale (mai la rete).
+        status(): Promise<{
+          ok: boolean
+          cached: boolean
+          pluginCount?: number
+          groupCount?: number
+          ruleCount?: number
+          dirtyCount?: number
+          fetchedAt?: string
+        }>
+      }
+      // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura.
+      crash: {
+        listRecent(): Promise<{
+          ok: boolean
+          dir?: string
+          entries?: { name: string; path: string; mtimeMs: number; size: number }[]
+          error?: string
+        }>
+        analyze(filePath: string): Promise<{
+          ok: boolean
+          report?: {
+            gameVersion: string | null
+            crashLoggerVersion: string | null
+            exceptionType: string | null
+            exceptionModule: string | null
+            callStack: { index: number; address: string; module: string; offset: string; instruction: string | null }[]
+            ssePlugins: { name: string; version: string | null }[]
+            plugins: string[]
+            recognized: boolean
+          }
+          analysis?: {
+            culprit: { index: number; address: string; module: string; offset: string; instruction: string | null } | null
+            suggestions: string[]
+          }
+          rawExcerpt?: string
+          error?: string
+        }>
       }
       // Incremental (delta) update engine — signed-manifest ingest + gated apply.
       delta: {

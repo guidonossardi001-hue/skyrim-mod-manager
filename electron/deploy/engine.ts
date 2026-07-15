@@ -18,6 +18,8 @@ export interface DeployEngineOptions {
   resolveSystemPluginsDir?: () => string | null | undefined
   // Path del masterlist.json (regole "after" LOOT-like, soft). Opzionale: assente → zero regole.
   resolveMasterlistPath?: () => string | null | undefined
+  // Path della cache locale del masterlist LOOT reale (fetch esplicita via masterlist:refresh).
+  resolveLootMasterlistCachePath?: () => string | null | undefined
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -45,6 +47,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
         systemPluginsDir: opts.resolveSystemPluginsDir?.() ?? undefined,
         masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
+        lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
         log: opts.log,
         onProgress: (p) => {
           try {

@@ -21,6 +21,10 @@ export interface LootPlugin {
   masters: string[] | null
   /** Edges soft dal grafo catalogo (nomi plugin), usati SOLO quando masters == null. */
   fallbackAfter?: string[]
+  /** Posizione del gruppo LOOT reale (rank topologico, 0 = primo). Assente = nessun dato:
+   *  tutti i plugin senza rank sono a pari merito e il tie-break ricade su (priority, nome)
+   *  esattamente come prima di questo campo — additivo, non cambia il comportamento esistente. */
+  groupRank?: number
 }
 
 /** Regola masterlist-lite: `plugin` va caricato dopo OGNUNO di `after` (edges soft). */
@@ -102,7 +106,13 @@ export function lootSort(
     for (const a of r.after) addEdge(a, target, true, 'una regola "after"')
   }
 
-  // ── Kahn per partizione, stabile su (priority, nome) ────────────────────────────
+  // groupRank assente = pari merito (Infinity): il confronto ricade su (priority, nome)
+  // esattamente come prima dell'introduzione del rank di gruppo LOOT.
+  const rankOf = (p: LootPlugin) => p.groupRank ?? Number.POSITIVE_INFINITY
+  const compare = (a: LootPlugin, b: LootPlugin) =>
+    rankOf(a) - rankOf(b) || a.priority - b.priority || a.name.localeCompare(b.name)
+
+  // ── Kahn per partizione, stabile su (groupRank, priority, nome) ─────────────────
   const runKahn = (useSoft: boolean): { order: string[] } | { cycle: string[] } => {
     const active = edges.filter((e) => !e.soft || useSoft)
     const indegree = new Map<string, number>()
@@ -120,7 +130,7 @@ export function lootSort(
     for (const wantMaster of [true, false]) {
       const ready = plugins
         .filter((p) => p.masterSpace === wantMaster && (indegree.get(p.name.toLowerCase()) ?? 0) === 0)
-        .sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
+        .sort(compare)
       while (ready.length) {
         const cur = ready.shift()!
         order.push(cur.name)
@@ -130,10 +140,8 @@ export function lootSort(
           if (left === 0) {
             const p = byLower.get(dep)!
             if (p.masterSpace !== wantMaster) continue // uscirà nella sua passata
-            // Inserimento ordinato: mantiene il ready-set stabile su (priority, nome).
-            const at = ready.findIndex(
-              (q) => q.priority > p.priority || (q.priority === p.priority && q.name.localeCompare(p.name) > 0),
-            )
+            // Inserimento ordinato: mantiene il ready-set stabile su (groupRank, priority, nome).
+            const at = ready.findIndex((q) => compare(q, p) > 0)
             ready.splice(at === -1 ? ready.length : at, 0, p)
           }
         }

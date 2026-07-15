@@ -782,6 +782,16 @@ export const mockApi = {
     onProgress: (_cb: unknown) => () => {},
   },
 
+  masterlist: {
+    refresh: async () => ({ ok: false as const, error: 'Masterlist LOOT disponibile solo nell’app desktop' }),
+    status: async () => ({ ok: true as const, cached: false as const }),
+  },
+
+  crash: {
+    listRecent: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
+    analyze: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
+  },
+
   downloads: {
     list: async (profileId: number) => {
       tickDownloads()

@@ -95,6 +95,15 @@ describe('lootSort', () => {
     if (r.ok) expect(r.warnings.some((w) => w.includes('non applicabile'))).toBe(true)
   })
 
+  it('groupRank (LOOT reale) vince sulla priorità utente come tie-break; assente = pari merito (in coda)', () => {
+    const r = lootSort([
+      P('HighPriorityButLateGroup.esp', 1, { groupRank: 5 }),
+      P('LowPriorityButEarlyGroup.esp', 9, { groupRank: 1 }),
+      P('NoGroupData.esp', 3), // groupRank assente -> Infinity, dopo qualunque rank noto
+    ])
+    expect(r.ok && r.order).toEqual(['LowPriorityButEarlyGroup.esp', 'HighPriorityButLateGroup.esp', 'NoGroupData.esp'])
+  })
+
   it('ciclo tra master reali: blocco con la catena concreta', () => {
     const r = lootSort([
       P('A.esm', 1, { masters: ['B.esm'] }),

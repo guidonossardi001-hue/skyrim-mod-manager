@@ -94,6 +94,26 @@ describe('orderPluginsLoot', () => {
     }
   })
 
+  it('groupRankByPattern (masterlist LOOT reale) guida l’ordine, anche coi pattern regex', () => {
+    const plugins = [entry('LatePatch.esp', 'L', 1), entry('EarlyFix.esp', 'E', 9)]
+    const headers: Record<string, PluginHeader> = {
+      'X:/mods/L/LatePatch.esp': header([]),
+      'X:/mods/E/EarlyFix.esp': header([]),
+    }
+    const r = orderPluginsLoot(plugins, new Map(), new Map(), {
+      readHeader: (p) => headers[p] ?? null,
+      groupRankByPattern: [
+        { pluginPattern: 'LatePatch\\.esp', rank: 9 }, // regex (escape letterale)
+        { pluginPattern: 'EarlyFix.esp', rank: 1 }, // match letterale case-insensitive
+      ],
+    })
+    expect(r.ok).toBe(true)
+    if (r.ok) {
+      const seq = new Map(r.plugins.map((p) => [p.name, p.priority]))
+      expect(seq.get('EarlyFix.esp')!).toBeLessThan(seq.get('LatePatch.esp')!)
+    }
+  })
+
   it('ciclo tra header reali → dependency-cycle (stessa shape gestita dal deployer)', () => {
     const plugins = [entry('A.esp', 'MA', 1), entry('B.esp', 'MB', 2)]
     const headers: Record<string, PluginHeader> = {

@@ -223,6 +223,20 @@ contextBridge.exposeInMainWorld('api', {
     },
   },
 
+  // Masterlist LOOT reale (community-curata): regole "after", rank di gruppo, CRC dirty-plugin.
+  masterlist: {
+    // Fetch ESPLICITO dal repo pubblico loot/skyrimse — mai automatico.
+    refresh: () => invoke('masterlist:refresh'),
+    // Legge SOLO la cache locale (mai la rete).
+    status: () => invoke('masterlist:status'),
+  },
+
+  // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura.
+  crash: {
+    listRecent: () => invoke('crash:list-recent'),
+    analyze: (filePath: string) => invoke('crash:analyze', filePath),
+  },
+
   // StockGame builder (isolated vanilla copy; companion-safe, read-only on source)
   stockGame: {
     detect: () => invoke('stockgame:detect'),

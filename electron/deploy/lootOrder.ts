@@ -8,6 +8,7 @@
 
 import { readPluginHeader, isMasterSpace, type PluginHeader } from '../plugins/espParser'
 import { lootSort, type LootPlugin, type LootRule } from '../plugins/lootSort'
+import { matchesPluginPattern } from '../plugins/lootMasterlist'
 import { BASE_MASTERS, type PluginEntry } from './plan'
 
 export type LootOrderResult =
@@ -26,7 +27,10 @@ export function orderPluginsLoot(
   requires: Map<number, number[]>, // grafo requires del catalogo (nexus_id → deps)
   opts: {
     externalMasters?: string[] // plugin fuori dal deploy (Creation Club dello StockGame)
-    rules?: LootRule[] // masterlist-lite opzionale
+    rules?: LootRule[] // masterlist-lite (locale + regole "after" dal masterlist LOOT reale)
+    // Rank di gruppo dal masterlist LOOT reale (posizione topologica, 0 = primo). name/pattern
+    // può essere una regex (varianti di nome coperte dal masterlist community).
+    groupRankByPattern?: { pluginPattern: string; rank: number }[]
     readHeader?: (path: string) => PluginHeader | null // iniettabile nei test
   } = {},
 ): LootOrderResult {
@@ -53,6 +57,11 @@ export function orderPluginsLoot(
     return names
   }
 
+  // Prima entry che combacia (letterale o regex) vince: il masterlist LOOT reale ha ~200
+  // pattern, un lookup lineare per plugin (decine per deploy) è trascurabile.
+  const groupRankOf = (name: string): number | undefined =>
+    opts.groupRankByPattern?.find((g) => matchesPluginPattern(g.pluginPattern, name))?.rank
+
   const headerOf = new Map<string, PluginHeader | null>()
   const lootPlugins: LootPlugin[] = planPlugins.map((p) => {
     const header = p.src ? read(p.src) : null
@@ -63,6 +72,7 @@ export function orderPluginsLoot(
       masterSpace: isMasterSpace(p.name, header),
       masters: header?.masters ?? null,
       fallbackAfter: header ? undefined : fallbackAfterOf(p.mod),
+      groupRank: groupRankOf(p.name),
     }
   })
 

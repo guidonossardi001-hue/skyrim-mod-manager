@@ -16,6 +16,7 @@ interface DeployApi {
       systemPluginsPath?: string
       ccFilesLinked?: number
       conflictsResolved?: number
+      dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[]
       errorKind?: string
       error?: string
     }>
@@ -89,6 +90,11 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
         setSummary(line)
         onLog(line, 'success')
         toast.success('Deploy completato', `${r.filesHardlinked} hardlink, ${r.pluginsWritten} plugin nel load order`)
+        if (r.dirtyPlugins?.length) {
+          const names = r.dirtyPlugins.map((d) => `${d.plugin} (${d.itm} ITM, ${d.udr} UDR)`).join(', ')
+          onLog(`Plugin da pulire con SSEEdit: ${names}`, 'error')
+          toast.warning(`${r.dirtyPlugins.length} plugin da pulire`, names)
+        }
       } else if (r.errorKind === 'dependency-cycle') {
         onLog(`Deploy bloccato: ${r.error}`, 'error')
         toast.error('Ciclo di dipendenze nei plugin', r.error ?? 'deploy bloccato per sicurezza')

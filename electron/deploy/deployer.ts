@@ -28,6 +28,8 @@ import {
 } from './plan'
 import { orderPluginsLoot } from './lootOrder'
 import { loadMasterlist } from '../plugins/masterlist'
+import { loadMasterlistCache } from '../plugins/masterlistCache'
+import { scanDirtyPlugins } from '../plugins/dirtyPluginCheck'
 import { applyIniSettings, mergeIniMaps, managedFileCount, type IniFileMap } from '../ini/iniService'
 import { resolveIniTemplate, MOD_REQUIRED_OVERRIDES } from '../ini/templates'
 import { detectCreationClub, ccFiles, ccPluginOrder } from './ccHandler'
@@ -63,6 +65,7 @@ export interface DeployResult {
   iniFilesWritten?: number
   ccFilesLinked?: number // Creation Club "System DLC" files hardlinked into the instance
   conflictsResolved?: number // file collisions auto-risolte dal planner (audit nel log)
+  dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[] // vedi dirtyPluginCheck
   errorKind?: DeployErrorKind
   error?: string
 }
@@ -91,6 +94,10 @@ export interface DeployOptions {
   // Masterlist-lite opzionale (regole "after" LOOT-like): path del masterlist.json in userData.
   // Regole SOFT: ordinano quando possibile, scartate con warning su ciclo, mai un blocco.
   masterlistPath?: string
+  // Cache del masterlist LOOT reale (fetch esplicita via masterlist:refresh, mai automatica —
+  // il deploy legge SOLO questa cache locale, mai la rete). Assente = nessuna regola/rank/dirty
+  // aggiuntivi, comportamento identico a prima dell'integrazione LOOT.
+  lootMasterlistCachePath?: string
 }
 
 // Throttle the linking phase so a 100k-file deploy doesn't flood the IPC channel:
@@ -429,9 +436,13 @@ export async function deployInstance(
     for (const r of rows)
       if (typeof r.nexus_id === 'number' && Number.isInteger(r.nexus_id) && r.nexus_id > 0)
         nexusIdOf.set(r.name, r.nexus_id)
+    // Masterlist LOOT reale (cache locale, mai un fetch di rete qui) + regole locali: entrambe
+    // SOFT, si sommano senza conflitto (lootSort le tratta identicamente).
+    const lootCache = loadMasterlistCache(opts.lootMasterlistCachePath)
     const orderedPlugins = orderPluginsLoot(plan.plugins, nexusIdOf, catalogRequires(db), {
       externalMasters: ccPluginOrder(ccPackages),
-      rules: loadMasterlist(opts.masterlistPath),
+      rules: [...loadMasterlist(opts.masterlistPath), ...(lootCache?.rules ?? [])],
+      groupRankByPattern: lootCache?.groupRankByPattern,
     })
     for (const w of orderedPlugins.warnings) log('warn', `load order: ${w}`)
     if (!orderedPlugins.ok) {
@@ -596,6 +607,22 @@ export async function deployInstance(
       }
     }
 
+    // 7.5) Dirty-plugin check (ITM/UDR via CRC32 contro il masterlist LOOT reale): PURAMENTE
+    // informativo, mai un blocco — la pulizia stessa richiede xEdit (fuori scope). Salta subito
+    // se non c'è una cache masterlist (nessuna rete qui, mai: vedi lootMasterlistCachePath).
+    let dirtyPlugins: DeployResult['dirtyPlugins']
+    if (lootCache?.dirty.length) {
+      const candidates = plan.plugins.filter((p) => p.src).map((p) => ({ name: p.name, path: p.src! }))
+      const found = await scanDirtyPlugins(candidates, lootCache.dirty)
+      if (found.length) {
+        dirtyPlugins = found.map((f) => ({ plugin: f.plugin, itm: f.itm, udr: f.udr, nav: f.nav, util: f.util }))
+        log(
+          'warn',
+          `plugin da pulire (ITM/UDR, masterlist LOOT): ${found.map((f) => `${f.plugin} (${f.itm} ITM, ${f.udr} UDR, ${f.nav} NAV — ${f.util})`).join('; ')}`,
+        )
+      }
+    }
+
     emit({ stage: 'done', processedItems: totalLinks, totalItems: totalLinks, percent: 100 })
     log(
       'info',
@@ -613,6 +640,7 @@ export async function deployInstance(
       iniFilesWritten,
       ccFilesLinked,
       conflictsResolved: plan.resolvedConflicts.length,
+      dirtyPlugins,
     }
   } catch (e) {
     return { success: false, errorKind: 'db', error: (e as Error).message }

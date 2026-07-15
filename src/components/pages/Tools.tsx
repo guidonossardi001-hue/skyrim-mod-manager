@@ -1,4 +1,4 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import {
   Play,
   ExternalLink,
@@ -16,6 +16,7 @@ import {
   RefreshCw,
   Database,
   Activity,
+  AlertTriangle,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { clsx } from 'clsx'
@@ -43,6 +44,77 @@ export default function Tools() {
   // Vortex importer (read-only scan; catalog build + Pandora are explicit one-click steps)
   const [vortexScan, setVortexScan] = useState<VortexScanResult | null>(null)
   const [vortexBusy, setVortexBusy] = useState<'scan' | 'catalog' | 'pandora' | null>(null)
+
+  // Masterlist LOOT reale: la status legge SOLO la cache locale (mai la rete) — sicuro da
+  // chiamare al mount. Il refresh è invece sempre un'azione esplicita dell'utente.
+  const [masterlistStatus, setMasterlistStatus] = useState<{
+    ok: boolean
+    cached: boolean
+    pluginCount?: number
+    groupCount?: number
+    ruleCount?: number
+    dirtyCount?: number
+    fetchedAt?: string
+  } | null>(null)
+  const [masterlistRefreshing, setMasterlistRefreshing] = useState(false)
+
+  useEffect(() => {
+    window.api.masterlist.status().then(setMasterlistStatus)
+  }, [])
+
+  // Analizzatore crash log: sola lettura, nessuna azione sul gioco.
+  const [crashEntries, setCrashEntries] = useState<{ name: string; path: string; mtimeMs: number; size: number }[]>([])
+  const [crashDir, setCrashDir] = useState<string>('')
+  const [crashBusy, setCrashBusy] = useState(false)
+  const [crashResult, setCrashResult] = useState<Awaited<ReturnType<typeof window.api.crash.analyze>> | null>(null)
+
+  useEffect(() => {
+    window.api.crash.listRecent().then((r) => {
+      if (r.ok) {
+        setCrashEntries(r.entries ?? [])
+        setCrashDir(r.dir ?? '')
+      }
+    })
+  }, [])
+
+  const analyzeCrash = async (path: string) => {
+    setCrashBusy(true)
+    setCrashResult(null)
+    try {
+      const res = await window.api.crash.analyze(path)
+      setCrashResult(res)
+      if (!res.ok) toast.error('Analisi crash log fallita', res.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Analisi crash log fallita', (e as Error).message)
+    } finally {
+      setCrashBusy(false)
+    }
+  }
+
+  const pickAndAnalyzeCrash = async () => {
+    const path = await window.api.fs.pickFile('Seleziona crash log', [{ name: 'Log', extensions: ['log', 'txt'] }])
+    if (path) await analyzeCrash(path)
+  }
+
+  const refreshMasterlist = async () => {
+    setMasterlistRefreshing(true)
+    try {
+      const res = await window.api.masterlist.refresh()
+      if (res.ok) {
+        setMasterlistStatus({ ...res, cached: true })
+        toast.success(
+          'Masterlist LOOT aggiornato',
+          `${res.pluginCount ?? 0} plugin · ${res.ruleCount ?? 0} regole · ${res.dirtyCount ?? 0} entry dirty`,
+        )
+      } else {
+        toast.error('Aggiornamento masterlist fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Aggiornamento masterlist fallito', (e as Error).message)
+    } finally {
+      setMasterlistRefreshing(false)
+    }
+  }
 
   const runVortexScan = async () => {
     setVortexBusy('scan')
@@ -501,6 +573,122 @@ export default function Tools() {
           La scansione gira anche automaticamente all'avvio (read-only). Download/estrazione e Pandora restano
           azioni esplicite: l'app non scarica né modifica il gioco senza il tuo consenso.
         </div>
+      </div>
+
+      {/* Masterlist LOOT reale: regole after community-curate + rank di gruppo + CRC dirty-plugin,
+          usate dal deploy per il load order e per segnalare i plugin da pulire con SSEEdit. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Zap size={15} className="text-blue-400" /> Masterlist LOOT
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Scarica il masterlist ufficiale (<code className="text-void-400">loot/skyrimse</code>): migliaia di
+          regole di ordinamento e firme CRC dei plugin "sporchi" (ITM/UDR). Il deploy le legge SOLO dalla cache
+          locale — mai una richiesta di rete durante il deploy stesso.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={refreshMasterlist}
+            disabled={masterlistRefreshing}
+            className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={masterlistRefreshing ? 'animate-spin' : ''} />
+            {masterlistRefreshing ? 'Aggiornamento…' : 'Aggiorna masterlist'}
+          </button>
+        </div>
+        {masterlistStatus?.cached ? (
+          <div className="mt-4 grid grid-cols-4 gap-3 text-xs">
+            <Stat label="Plugin" value={masterlistStatus.pluginCount ?? 0} />
+            <Stat label="Gruppi" value={masterlistStatus.groupCount ?? 0} />
+            <Stat label="Regole after" value={masterlistStatus.ruleCount ?? 0} />
+            <Stat label="Firme dirty" value={masterlistStatus.dirtyCount ?? 0} />
+          </div>
+        ) : (
+          masterlistStatus && <p className="mt-3 text-xs text-dark-500">Nessuna cache: premi "Aggiorna masterlist".</p>
+        )}
+        {masterlistStatus?.fetchedAt && (
+          <p className="mt-2 text-[11px] text-dark-500">
+            Ultimo aggiornamento: {new Date(masterlistStatus.fetchedAt).toLocaleString('it-IT')}
+          </p>
+        )}
+      </div>
+
+      {/* Analizzatore crash log: sola lettura, nessuna azione sul gioco. Euristica piccola e
+          onesta (modulo colpevole dalla call stack) — non un database di pattern noti come
+          Phostwood's Crash Log Analyzer, sempre affiancata dal report strutturato completo. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <AlertTriangle size={15} className="text-red-400" /> Analizza crash log
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Legge un crash log (Crash Logger SSE/AE/VR o Trainwreck) e prova a indicare il modulo
+          probabilmente coinvolto dalla call stack. Sola lettura: nessuna modifica al gioco.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={pickAndAnalyzeCrash} disabled={crashBusy} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+            <FileCode size={14} /> Sfoglia file…
+          </button>
+          {crashEntries.length > 0 && (
+            <select
+              disabled={crashBusy}
+              defaultValue=""
+              onChange={(e) => {
+                if (e.target.value) analyzeCrash(e.target.value)
+                e.target.value = ''
+              }}
+              className="input-field text-xs py-1.5"
+            >
+              <option value="" disabled>
+                Recenti in {crashDir}…
+              </option>
+              {crashEntries.map((c) => (
+                <option key={c.path} value={c.path}>
+                  {c.name} — {new Date(c.mtimeMs).toLocaleString('it-IT')}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {crashBusy && <p className="mt-4 text-xs text-dark-500">Analisi in corso…</p>}
+
+        {crashResult && !crashResult.ok && (
+          <p className="mt-4 text-xs text-red-400">{crashResult.error}</p>
+        )}
+
+        {crashResult?.ok && crashResult.report && (
+          <div className="mt-4 space-y-3 text-xs">
+            {!crashResult.report.recognized && (
+              <p className="text-orange-400">File non riconosciuto come crash log Skyrim: mostro solo l'estratto grezzo.</p>
+            )}
+            <div className="grid grid-cols-3 gap-3">
+              <Stat label="Plugin SKSE" value={crashResult.report.ssePlugins.length} />
+              <Stat label="Plugin caricati" value={crashResult.report.plugins.length} />
+              <Stat label="Frame call stack" value={crashResult.report.callStack.length} />
+            </div>
+            {crashResult.report.exceptionType && (
+              <p className="text-dark-300">
+                Eccezione: <span className="text-white/90">{crashResult.report.exceptionType}</span> in{' '}
+                <span className="text-white/90">{crashResult.report.exceptionModule}</span>
+                {crashResult.report.gameVersion && <> · {crashResult.report.gameVersion}</>}
+              </p>
+            )}
+            {crashResult.analysis?.suggestions.map((s, i) => (
+              <div key={i} className="flex items-start gap-2 rounded-lg bg-orange-900/20 border border-orange-900/40 px-3 py-2">
+                <AlertTriangle size={14} className="flex-shrink-0 mt-0.5 text-orange-400" />
+                <span className="text-dark-200">{s}</span>
+              </div>
+            ))}
+            {crashResult.rawExcerpt && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-dark-400 hover:text-white/80">Estratto grezzo (prime righe)</summary>
+                <pre className="mt-2 whitespace-pre-wrap break-all text-[10px] text-dark-400 bg-dark-900/60 rounded-lg p-3 max-h-64 overflow-y-auto">
+                  {crashResult.rawExcerpt}
+                </pre>
+              </details>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Workflow guide */}
