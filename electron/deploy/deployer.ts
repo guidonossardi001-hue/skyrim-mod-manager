@@ -25,6 +25,7 @@ import {
   parseDeployManifest,
   DEPLOY_MANIFEST_FILE,
   VANILLA_BACKUP_SUFFIX,
+  BASE_MASTERS,
   type DeployManifest,
   type DeployMod,
 } from './plan'
@@ -51,6 +52,7 @@ export type DeployErrorKind =
   | 'source-missing'
   | 'dependency-cycle' // ciclo nel grafo requires dei plugin → deploy BLOCCATO prima di toccare file
   | 'missing-master' // un plugin richiede un master (header TES4) né deployato né vanilla/CC → crash al load
+  | 'plugin-limit' // slot FULL (ESM/ESP non-light) oltre il limite motore 254 → crash garantito al load
   | 'cleanup'
   | 'link'
   | 'db'
@@ -68,6 +70,7 @@ export interface DeployResult {
   ccFilesLinked?: number // Creation Club "System DLC" files hardlinked into the instance
   conflictsResolved?: number // file collisions auto-risolte dal planner (audit nel log)
   dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[] // vedi dirtyPluginCheck
+  pluginBudget?: { full: number; light: number; maxFull: number } // occupazione slot motore (base+CC+mod)
   errorKind?: DeployErrorKind
   error?: string
 }
@@ -484,6 +487,28 @@ export async function deployInstance(
       }
     }
 
+    // 3.6) Budget slot del motore — PRIMA di ogni scrittura. Il gioco ha 254 slot FULL
+    // (ESM/ESP non-light, base game INCLUSO) e 4096 light (FE). Oltre il limite full il
+    // load crasha: BLOCCO. Vicino al limite: warn. Conteggio: 5 master base + CC per
+    // estensione (.esl light, .esm/.esp full) + mod dai FLAG REALI degli header TES4.
+    const MAX_FULL = 254
+    const ccNames = ccPluginOrder(ccPackages)
+    const ccFull = ccNames.filter((n) => !n.toLowerCase().endsWith('.esl')).length
+    const fullTotal = BASE_MASTERS.length + ccFull + orderedPlugins.slots.full
+    const lightTotal = ccNames.length - ccFull + orderedPlugins.slots.light
+    const pluginBudget = { full: fullTotal, light: lightTotal, maxFull: MAX_FULL }
+    if (fullTotal > MAX_FULL) {
+      log('warn', `deploy BLOCCATO: ${fullTotal} plugin FULL > limite motore ${MAX_FULL}`)
+      return {
+        success: false,
+        errorKind: 'plugin-limit',
+        pluginBudget,
+        error: `Troppi plugin FULL: ${fullTotal} su un massimo di ${MAX_FULL} (base ${BASE_MASTERS.length} + CC ${ccFull} + mod ${orderedPlugins.slots.full}). Il gioco crasherebbe al caricamento: disabilita alcune mod ESP/ESM o usa versioni ESL-flagged, poi riprova. I ${lightTotal} plugin light non contano in questo limite.`,
+      }
+    }
+    if (fullTotal > MAX_FULL - 14)
+      log('warn', `budget plugin quasi esaurito: ${fullTotal}/${MAX_FULL} slot FULL occupati (light: ${lightTotal})`)
+
     // 4) Purge del deploy precedente. MANIFEST-first (rimozione esatta di ciò che ABBIAMO creato);
     // solo in sua assenza si ricade sull'euristica nlink — sicura su un'istanza dedicata, MAI da
     // usare su un target che contiene vanilla hardlinkato (StockGame: BSA con nlink>1 verso Steam).
@@ -703,6 +728,7 @@ export async function deployInstance(
       ccFilesLinked,
       conflictsResolved: plan.resolvedConflicts.length,
       dirtyPlugins,
+      pluginBudget,
     }
   } catch (e) {
     return { success: false, errorKind: 'db', error: (e as Error).message }

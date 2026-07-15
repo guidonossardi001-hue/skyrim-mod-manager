@@ -792,6 +792,12 @@ export const mockApi = {
     analyze: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
   },
 
+  enb: {
+    scan: async () => ({ ok: true as const, presets: [] }),
+    apply: async () => ({ ok: false as const, error: 'Gestione ENB disponibile solo nell’app desktop' }),
+    remove: async () => ({ ok: true as const, removed: 0, restored: 0 }),
+  },
+
   downloads: {
     list: async (profileId: number) => {
       tickDownloads()
@@ -824,6 +830,18 @@ export const mockApi = {
         if (extra) Object.assign(dl, extra)
         persist()
       }
+    },
+    retryFailed: async () => {
+      let retried = 0
+      for (const dl of state.downloads) {
+        if (dl.status === 'failed') {
+          dl.status = 'pending'
+          dl.error = null
+          retried++
+        }
+      }
+      persist()
+      return { retried }
     },
   },
 

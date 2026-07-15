@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback, useMemo, memo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useAppStore } from '@/store/appStore'
-import { Download, Pause, X, Play, FolderOpen, CheckCircle, AlertCircle, Clock } from 'lucide-react'
+import { Download, Pause, X, Play, FolderOpen, CheckCircle, AlertCircle, Clock, RefreshCw } from 'lucide-react'
 import type { Download as DL } from '@/types'
 import { clsx } from 'clsx'
+import { toast } from '@/lib/toast'
 
 interface DownloadProgress {
   id: number
@@ -139,6 +140,19 @@ export default function Downloads() {
             <span className="text-green-400">{completedCount} completati</span>
             <span>·</span>
             <span>{grouped.failed.length} falliti</span>
+            {grouped.failed.length > 0 && (
+              <button
+                onClick={async () => {
+                  const r = await window.api.downloads.retryFailed()
+                  toast.success('Riprova avviata', `${r.retried} download ri-accodati`)
+                  loadDownloads()
+                }}
+                className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-orange-900/30 text-orange-300 hover:bg-orange-900/50 transition-all"
+                title="Rimette in coda tutti i falliti (gli archivi già scaricati vengono riusati)"
+              >
+                <RefreshCw size={11} /> Riprova falliti
+              </button>
+            )}
           </div>
         </div>
 
@@ -313,7 +327,7 @@ const DownloadRow = memo(function DownloadRow({
                 : 'bg-dark-700',
         )}
       >
-        {dl.status === 'downloading' && <Download size={16} className="text-blue-400 animate-bounce" />}
+        {dl.status === 'downloading' && <Download size={16} className="text-blue-400 animate-pulse" />}
         {dl.status === 'completed' && <CheckCircle size={16} className="text-green-400" />}
         {dl.status === 'failed' && <AlertCircle size={16} className="text-red-400" />}
         {dl.status === 'paused' && <Pause size={16} className="text-yellow-400" />}

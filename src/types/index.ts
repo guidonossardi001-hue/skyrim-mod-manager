@@ -324,6 +324,8 @@ declare global {
         list(profileId: number): Promise<Download[]>
         add(data: Partial<Download>): Promise<number>
         updateStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<void>
+        // Riprova in blocco tutti i download falliti (la cache archivi viene riusata).
+        retryFailed(): Promise<{ retried: number }>
       }
       nexus: {
         // The API key lives ONLY in the main process (encrypted secret store);
@@ -492,6 +494,25 @@ declare global {
           dirtyCount?: number
           fetchedAt?: string
         }>
+      }
+      // Preset ENB: scan nelle mod estratte, apply/remove nella ROOT del gioco. Never rejects.
+      enb: {
+        scan(): Promise<{
+          ok: boolean
+          presets: { modName: string; presetDir: string; label: string; files: number; hasCoreDll: boolean }[]
+        }>
+        apply(
+          presetDir: string,
+          label: string,
+        ): Promise<{
+          ok: boolean
+          applied?: number
+          backedUp?: number
+          coreDllPresent?: boolean
+          removedPrevious?: boolean
+          error?: string
+        }>
+        remove(): Promise<{ ok: boolean; removed: number; restored: number; error?: string }>
       }
       // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura.
       crash: {

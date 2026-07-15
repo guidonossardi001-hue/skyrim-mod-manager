@@ -98,6 +98,9 @@ contextBridge.exposeInMainWorld('api', {
     add: (data: Record<string, unknown>) => invoke('downloads:add', data),
     updateStatus: (id: number, status: string, extra?: Record<string, unknown>) =>
       invoke('downloads:update-status', id, status, extra),
+    // Riprova in blocco tutti i falliti (cache riusata: un fallimento di sola estrazione
+    // non riscarica). Resolves { retried }.
+    retryFailed: () => invoke('download:retry-failed'),
   },
 
   // Nexus — the API key never travels over this bridge: the main process reads it
@@ -236,6 +239,13 @@ contextBridge.exposeInMainWorld('api', {
   crash: {
     listRecent: () => invoke('crash:list-recent'),
     analyze: (filePath: string) => invoke('crash:analyze', filePath),
+  },
+
+  // Preset ENB: scan nelle mod estratte, apply/remove nella ROOT del gioco (backup+manifest).
+  enb: {
+    scan: () => invoke('enb:scan'),
+    apply: (presetDir: string, label: string) => invoke('enb:apply', presetDir, label),
+    remove: () => invoke('enb:remove'),
   },
 
   // StockGame builder (isolated vanilla copy; companion-safe, read-only on source)

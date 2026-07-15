@@ -469,6 +469,24 @@ export function initDownloadManager(
     enqueue(downloadId)
   })
 
+  // Riprova in blocco TUTTI i falliti: reset breaker/attempt, stato pending, errore
+  // azzerato, ri-accodati. Gli archivi in cache NON vengono toccati: un fallimento di
+  // estrazione (es. RAR mascherato da .7z, ora sniffato dai magic byte) riusa l'archivio
+  // già scaricato e rifà SOLO l'estrazione; un download corrotto ha già rimosso i suoi
+  // artifact al momento del fallimento terminale.
+  ipcMain.handle('download:retry-failed', () => {
+    resetBreaker()
+    const rows = db.prepare("SELECT id FROM downloads WHERE status='failed'").all() as { id: number }[]
+    const upd = db.prepare("UPDATE downloads SET status='pending', error=NULL WHERE id=?")
+    for (const r of rows) {
+      attempts.delete(r.id)
+      upd.run(r.id)
+      enqueue(r.id)
+    }
+    logger.info('download', `riprova falliti: ${rows.length} download ri-accodati`)
+    return { retried: rows.length }
+  })
+
   // Delete every on-disk artifact for this download (final archive AND any .part), so
   // a cancel can never leave a stale partial that a same-named download would resume.
   // Matches EXACT candidate names (base+ext / base+ext.part), never a bare prefix:

@@ -30,6 +30,7 @@ import type { LoadOrderEntry } from '../src/types'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
 import { initCrashEngine, armCrashWatch } from './launch/crashEngine'
+import { initEnbEngine } from './enb/engine'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
 import { checkForLauncherUpdate } from './launch/launcherUpdate'
 import {
@@ -681,6 +682,16 @@ app.whenReady().then(() => {
   // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura, nessuna azione
   // sul gioco. Legge dalla cartella SKSE standard o da un file scelto manualmente.
   initCrashEngine()
+
+  // Preset ENB: scan nelle mod estratte, apply/remove nella ROOT del gioco (fuori Data,
+  // il deploy non li copre) con backup e manifest dedicato. Il core (d3d11.dll) resta
+  // un download manuale da enbdev.com (non ridistribuibile nelle collection).
+  initEnbEngine({
+    resolveModsRoot: () => (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'),
+    resolveGameRoot: () =>
+      detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null,
+    log: (level, msg) => (level === 'warn' ? logger.warn('enb', msg) : logger.info('enb', msg)),
+  })
 
   // Auto-analisi post-lancio: al primo crash-*.log NUOVO dopo un GIOCA riuscito, il main
   // analizza da solo e notifica il renderer (toast con modulo probabile colpevole).

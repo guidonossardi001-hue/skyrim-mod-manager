@@ -16,6 +16,8 @@ import {
   Database,
   Activity,
   AlertTriangle,
+  Palette,
+  X,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { clsx } from 'clsx'
@@ -84,6 +86,67 @@ export default function Tools() {
   const pickAndAnalyzeCrash = async () => {
     const path = await window.api.fs.pickFile('Seleziona crash log', [{ name: 'Log', extensions: ['log', 'txt'] }])
     if (path) await analyzeCrash(path)
+  }
+
+  // Preset ENB REALI: scan nelle mod estratte, apply nella root del gioco (backup+manifest).
+  const [enbPresets, setEnbPresets] = useState<
+    { modName: string; presetDir: string; label: string; files: number; hasCoreDll: boolean }[] | null
+  >(null)
+  const [enbBusy, setEnbBusy] = useState<'scan' | 'apply' | 'remove' | null>(null)
+
+  const scanEnb = async () => {
+    setEnbBusy('scan')
+    try {
+      const r = await window.api.enb.scan()
+      setEnbPresets(r.presets)
+      if (!r.presets.length) toast.info('Nessun preset ENB', 'Nessuna mod estratta contiene enbseries.ini/enblocal.ini')
+      else toast.success(`${r.presets.length} preset ENB trovati`, 'Scegli quale applicare alla root del gioco')
+    } catch (e) {
+      toast.error('Scan ENB fallito', (e as Error).message)
+    } finally {
+      setEnbBusy(null)
+    }
+  }
+
+  const applyEnb = async (presetDir: string, label: string) => {
+    if (
+      !window.confirm(
+        `Applicare il preset ENB "${label}" alla root del gioco?\n\nGli originali preesistenti vengono salvati (.smm-enb-bak) e "Rimuovi preset ENB" ripristina tutto.`,
+      )
+    )
+      return
+    setEnbBusy('apply')
+    try {
+      const r = await window.api.enb.apply(presetDir, label)
+      if (r.ok) {
+        toast.success(
+          'Preset ENB applicato',
+          `${r.applied} file nella root del gioco · ${r.backedUp} originali salvati${r.removedPrevious ? ' · preset precedente rimosso' : ''}`,
+        )
+        if (!r.coreDllPresent)
+          toast.warning(
+            'Core ENB assente (d3d11.dll)',
+            'Il preset non ha effetto senza il core: scaricalo da enbdev.com e metti d3d11.dll + d3dcompiler_46e.dll nella cartella del gioco',
+          )
+      } else toast.error('Apply ENB fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Apply ENB fallito', (e as Error).message)
+    } finally {
+      setEnbBusy(null)
+    }
+  }
+
+  const removeEnb = async () => {
+    setEnbBusy('remove')
+    try {
+      const r = await window.api.enb.remove()
+      if (r.ok) toast.success('Preset ENB rimosso', `${r.removed} file rimossi · ${r.restored} originali ripristinati`)
+      else toast.error('Rimozione ENB fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Rimozione ENB fallita', (e as Error).message)
+    } finally {
+      setEnbBusy(null)
+    }
   }
 
   const refreshMasterlist = async () => {
@@ -388,9 +451,56 @@ export default function Tools() {
         </div>
       </div>
 
-      {/* ENB Preset Manager RIMOSSO: mostrava una lista MOCK (Rudy/Pi-Cho/…) mai collegata a
-          nulla di reale — dati finti in produzione sono peggio dell'assenza della feature.
-          Se/quando servirà: scan reale di enbseries.ini + preset dir nella cartella gioco. */}
+      {/* Preset ENB REALI (sostituisce il vecchio mock): scan nelle mod estratte, apply nella
+          ROOT del gioco con backup+manifest — il deploy non copre i file fuori da Data. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Palette size={15} className="text-void-400" /> Preset ENB
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Cerca i preset ENB dentro le mod estratte e applicali alla <b>root del gioco</b> (enbseries.ini,
+          enblocal.ini, cartelle enbseries/). Originali salvati e ripristinabili. Il core ENB
+          (d3d11.dll) va scaricato a parte da enbdev.com.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={scanEnb} disabled={enbBusy !== null} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+            <Palette size={14} className={enbBusy === 'scan' ? 'animate-pulse' : ''} />
+            {enbBusy === 'scan' ? 'Ricerca…' : 'Cerca preset ENB'}
+          </button>
+          <button
+            onClick={removeEnb}
+            disabled={enbBusy !== null}
+            className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg bg-red-950/40 text-red-300 hover:bg-red-900/50 transition-all disabled:opacity-50"
+            title="Rimuove il preset applicato e ripristina gli originali dal manifest"
+          >
+            <X size={14} /> Rimuovi preset ENB
+          </button>
+        </div>
+        {enbPresets && enbPresets.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {enbPresets.map((p) => (
+              <div
+                key={p.presetDir}
+                className="flex items-center gap-3 p-2.5 rounded-lg border border-dark-800 hover:border-dark-600 transition-all"
+              >
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm text-white/85 font-medium truncate">{p.label}</p>
+                  <p className="text-xs text-dark-400">
+                    {p.files} file{p.hasCoreDll ? ' · include d3d11.dll' : ''}
+                  </p>
+                </div>
+                <button
+                  onClick={() => applyEnb(p.presetDir, p.label)}
+                  disabled={enbBusy !== null}
+                  className="text-xs px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50"
+                >
+                  Applica
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       {/* Check all updates */}
       <div className="card p-5">

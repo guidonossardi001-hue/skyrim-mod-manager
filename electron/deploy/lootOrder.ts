@@ -11,8 +11,15 @@ import { lootSort, type LootPlugin, type LootRule } from '../plugins/lootSort'
 import { matchesPluginPattern } from '../plugins/lootMasterlist'
 import { BASE_MASTERS, type PluginEntry } from './plan'
 
+/** Occupazione slot del motore: gli slot FULL (ESM/ESP non-light) sono max 254 TOTALI
+ *  (base game incluso); i light (.esl o flag light) vivono nello slot FE (max 4096). */
+export interface PluginSlotStats {
+  full: number
+  light: number
+}
+
 export type LootOrderResult =
-  | { ok: true; plugins: PluginEntry[]; warnings: string[] }
+  | { ok: true; plugins: PluginEntry[]; warnings: string[]; slots: PluginSlotStats }
   | { ok: false; kind: 'dependency-cycle'; cycle: string[]; warnings: string[] }
   | {
       ok: false
@@ -34,7 +41,7 @@ export function orderPluginsLoot(
     readHeader?: (path: string) => PluginHeader | null // iniettabile nei test
   } = {},
 ): LootOrderResult {
-  if (!planPlugins.length) return { ok: true, plugins: [], warnings: [] }
+  if (!planPlugins.length) return { ok: true, plugins: [], warnings: [], slots: { full: 0, light: 0 } }
   const read = opts.readHeader ?? readPluginHeader
 
   // Fallback catalogo a livello MOD: dep nexus_id → mod interne al deploy → i loro plugin.
@@ -102,9 +109,21 @@ export function orderPluginsLoot(
         warnings.push(`"${p.name}" (.esm) ha come master "${m}" (.esl): plugins.txt li elenca ESM-prima per convenzione`)
     }
   }
+  // Slot del motore: light = estensione .esl (sempre light per l'engine) O flag light
+  // nell'header; tutto il resto occupa uno slot FULL. Header illeggibile: si va per
+  // estensione (un .esp light-flagged non riconosciuto conta full — prudente, mai ottimista).
+  const slots: PluginSlotStats = { full: 0, light: 0 }
+  for (const p of planPlugins) {
+    const header = headerOf.get(p.name)
+    const isLightSlot = p.name.toLowerCase().endsWith('.esl') || header?.isLight === true
+    if (isLightSlot) slots.light++
+    else slots.full++
+  }
+
   return {
     ok: true,
     plugins: planPlugins.map((p) => ({ ...p, priority: seq.get(p.name.toLowerCase()) ?? p.priority })),
     warnings,
+    slots,
   }
 }

@@ -1,4 +1,15 @@
-import { createReadStream, existsSync, mkdirSync, statSync, rmSync, renameSync, readdirSync } from 'fs'
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  statSync,
+  rmSync,
+  renameSync,
+  readdirSync,
+  openSync,
+  readSync,
+  closeSync,
+} from 'fs'
 import { createHash } from 'crypto'
 import { spawn } from 'child_process'
 import { resolve, relative, isAbsolute, extname, join } from 'path'
@@ -14,6 +25,29 @@ import { resolve, relative, isAbsolute, extname, join } from 'path'
 
 export function toLongPath(p: string): string {
   return process.platform === 'win32' && !p.startsWith('\\\\?\\') ? '\\\\?\\' + resolve(p) : p
+}
+
+/**
+ * Formato REALE dell'archivio dai magic byte — l'estensione MENTE: Nexus serve archivi
+ * RAR con nome .7z (caso reale: 12/14 falliti della collection Opoal, "Rar!" dentro un
+ * file .7z → il bundled 7za, senza codec Rar, moriva con "Cannot open the file as
+ * archive"). Errore I/O o firma ignota → 'unknown' (si ricade sull'estensione).
+ */
+export function sniffArchiveKind(archivePath: string): 'rar' | '7z' | 'zip' | 'unknown' {
+  let fd: number | null = null
+  try {
+    fd = openSync(toLongPath(archivePath), 'r')
+    const b = Buffer.alloc(8)
+    if (readSync(fd, b, 0, 8, 0) < 4) return 'unknown'
+    if (b.toString('latin1', 0, 4) === 'Rar!') return 'rar'
+    if (b[0] === 0x37 && b[1] === 0x7a && b[2] === 0xbc && b[3] === 0xaf) return '7z'
+    if (b[0] === 0x50 && b[1] === 0x4b) return 'zip'
+    return 'unknown'
+  } catch {
+    return 'unknown'
+  } finally {
+    if (fd !== null) closeSync(fd)
+  }
 }
 
 /** Recursive listing of `root`, returning POSIX paths relative to it (files only). */
@@ -221,6 +255,10 @@ export async function extractArchive(
   // would mistake for a completed mod. Any stale .tmp from a previous crash is
   // discarded first, and the .tmp is cleaned up if extraction fails.
   const ext = extname(archivePath).toLowerCase()
+  // Il formato vero viene dai magic byte, l'estensione è solo il fallback: Nexus serve
+  // archivi RAR chiamati .7z e il bundled 7za (senza codec Rar) li rifiuterebbe.
+  const kind = sniffArchiveKind(archivePath)
+  const isRar = kind === 'rar' || (kind === 'unknown' && ext === '.rar')
   const full7z = opts.full7zPath && existsSync(opts.full7zPath) ? opts.full7zPath : null
   const bundled = opts.bundled7zaPath && existsSync(opts.bundled7zaPath) ? opts.bundled7zaPath : null
 
@@ -240,9 +278,9 @@ export async function extractArchive(
 
   let method: '7z' | '7za' | 'zip'
   try {
-    if (ext === '.rar') {
-      // .rar needs the FULL 7-Zip (Rar codec): system install (primary) or the bundled
-      // full 7z (fallback) — both resolved by the caller via resolveRar7z.
+    if (isRar) {
+      // RAR (dal magic o dall'estensione) richiede il FULL 7-Zip (codec Rar): system
+      // install (primary) o il bundled full 7z (fallback) — risolti dal caller (resolveRar7z).
       if (!full7z) {
         throw new Error(
           'Estrazione .rar non disponibile: nessun 7-Zip completo trovato. Installa 7-Zip da 7-zip.org (verrà rilevato automaticamente).',
@@ -257,7 +295,7 @@ export async function extractArchive(
       if (engine) {
         await run7z(engine, archivePath, toLongPath(tmpDir), opts.onProgress, opts.signal, opts.includeFilters)
         method = engine === bundled ? '7za' : '7z'
-      } else if (ext === '.zip') {
+      } else if (ext === '.zip' || kind === 'zip') {
         await extractZipSafely(
           archivePath,
           tmpDir,
