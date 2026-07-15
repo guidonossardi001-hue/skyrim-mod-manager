@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage, Menu } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
 import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync, cpSync, openSync, readSync, closeSync } from 'fs'
 import { readdir, lstat } from 'fs/promises'
@@ -10,7 +10,7 @@ import { initDownloadManager } from './downloadManager'
 import { initInstallManager } from './installManager'
 import { initBackupManager } from './backupManager'
 import { initWabbajack } from './wabbajack'
-import { applyPragmas, integrityCheck, type SqliteDb } from './db/sqlite'
+import { applyPragmas, checkpointOnQuit, integrityCheck, type SqliteDb } from './db/sqlite'
 import { runMigrations } from './db/migrations'
 import { setSecret, getSecret, hasSecret, type SecretCrypto } from './db/secrets'
 import { initDeltaEngine, onDeltaDownloadComplete, onDeltaDownloadFailed } from './delta/engine'
@@ -389,6 +389,9 @@ function createWindow() {
       // run the renderer in the OS sandbox: a renderer compromise no longer has direct
       // Node/OS reach, only the vetted IPC surface. Belt-and-suspenders with contextIsolation.
       sandbox: true,
+      // Launcher senza campi di testo libero: lo spellchecker Chromium (dizionari +
+      // servizio) è solo overhead di memoria/avvio.
+      spellcheck: false,
     },
     icon: resolveAppIcon() ?? join(__dirname, '../resources/icons/icon.ico'),
     show: false,
@@ -396,6 +399,17 @@ function createWindow() {
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
+  })
+  // Fallback anti finestra-fantasma (electronjs.org/docs BrowserWindow, issue #13532):
+  // se il renderer muore prima del primo paint, ready-to-show non scatta MAI e l'app
+  // resterebbe un processo invisibile. Mostrare comunque dopo un tetto massimo.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) mainWindow.show()
+  }, 5000)
+  // Una load fallita in produzione (asset mancante, profilo utente corrotto) senza
+  // handler = finestra nera silenziosa: logghiamo la causa reale.
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    logger.error('main', `did-fail-load ${code} ${desc} su ${url}`)
   })
 
   // Never let the renderer navigate away from the app, and route any window.open
@@ -533,6 +547,11 @@ if (!app.requestSingleInstanceLock()) {
   })
 }
 
+// Nessun menu nativo (UI frameless custom): evita la costruzione del menu di default a
+// ogni avvio/finestra — checklist performance ufficiale Electron, punto 8. Solo in
+// produzione: in dev il menu di default porta gli accelerator DevTools (Ctrl+Shift+I).
+if (!isDev) Menu.setApplicationMenu(null)
+
 app.whenReady().then(() => {
   applySecurityPolicies()
   // Fail closed on a corrupt DB: initDatabase has already shown the error and quit.
@@ -653,18 +672,11 @@ app.whenReady().then(() => {
   ipcMain.handle('launch:preflight', () => runPreflight(getRawDb(), store))
   ipcMain.handle('launch:run', () => executeLaunch(getRawDb(), store))
 
-  // ── Modded game launcher (Nolvus/MO2-style) ──────────────────────────────────
-  // Resolves the SAME target executeLaunch would run (MO2 if configured and valid,
-  // else skse64_loader.exe next to the detected/configured game install) — the
-  // renderer never supplies a path, it only asks to play or to pin a shortcut to
-  // whatever is currently configured. Mirrors buildLaunchEnv's launchTarget logic
-  // in electron/launch/preflight.ts (kept local here to avoid touching that
-  // tested, gated preflight path for an unrelated feature).
+  // ── Modded game launcher ─────────────────────────────────────────────────────
+  // DIRETTIVA: avvio esclusivo via SKSE interno (skse64_loader.exe accanto al gioco).
+  // MO2 non è mai un target di lancio — allineato al registry dei bootstrapper e a
+  // buildLaunchEnv in electron/launch/preflight.ts.
   function resolveGameLaunchTarget(): { exe: string; cwd: string } | null {
-    const mo2Path = store.get('mo2Path') as string | undefined
-    if (mo2Path && existsSync(mo2Path) && /modorganizer\.exe$/i.test(mo2Path)) {
-      return { exe: mo2Path, cwd: dirname(mo2Path) }
-    }
     const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
     if (gamePath) return { exe: join(gamePath, 'skse64_loader.exe'), cwd: gamePath }
     return null
@@ -686,7 +698,7 @@ app.whenReady().then(() => {
   async function fireBootstrap(): Promise<{ success: boolean; pid?: number; error?: string; via?: string }> {
     const target = resolveBootstrapper(bootstrapContext())
     if (!target) {
-      return { success: false, error: 'Nessun metodo di avvio disponibile: configura MO2 o installa SKSE64' }
+      return { success: false, error: 'Nessun metodo di avvio disponibile: installa SKSE64 nella cartella del gioco' }
     }
     if (target.mode === 'protocol' && target.uri) {
       try {
@@ -1803,6 +1815,13 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
+// Igiene WAL alla chiusura (sqlite.org/pragma): checkpoint TRUNCATE + refresh statistiche
+// del planner — il file -wal non resta grande tra le sessioni e l'avvio successivo non
+// paga il recovery. Fail-soft dentro checkpointOnQuit: mai bloccare l'uscita.
+app.on('before-quit', () => {
+  if (db) checkpointOnQuit(db as unknown as SqliteDb)
+})
+
 // ─── Window controls ──────────────────────────────────────────────────────────
 ipcMain.handle('window:minimize', () => mainWindow?.minimize())
 ipcMain.handle('window:maximize', () => {
@@ -2237,16 +2256,20 @@ ipcMain.handle('catalog:dedupe', () => {
 })
 
 // ─── Downloads IPC ────────────────────────────────────────────────────────────
+// Statement preparato UNA volta e riusato: questo è l'unico handler in polling ciclico
+// (la pagina Download lo chiama ogni 3s) — ripreparare a ogni tick paga parse/plan
+// inutili (better-sqlite3 non ha una statement cache implicita). Lazy: la prima
+// chiamata arriva sempre DOPO init+migrazioni, lo schema è definitivo.
+let downloadsListStmt: ReturnType<Database.Database['prepare']> | null = null
 ipcMain.handle('downloads:list', (_e, profileId: number) => {
   // Explicit column list (NOT SELECT *): the nxm_key / nxm_expires non-premium download
   // token is a short-lived secret used only main-side and must never reach the renderer.
-  return getRawDb()
-    .prepare(
-      `SELECT id, mod_id, profile_id, nexus_id, file_id, name, url, file_path,
-              total_size, downloaded_size, status, error, created_at
-       FROM downloads WHERE profile_id = ? ORDER BY created_at DESC`,
-    )
-    .all(profileId)
+  downloadsListStmt ??= getRawDb().prepare(
+    `SELECT id, mod_id, profile_id, nexus_id, file_id, name, url, file_path,
+            total_size, downloaded_size, status, error, created_at
+     FROM downloads WHERE profile_id = ? ORDER BY created_at DESC`,
+  )
+  return downloadsListStmt.all(profileId)
 })
 
 ipcMain.handle('downloads:add', (_e, raw: Record<string, unknown>) => {

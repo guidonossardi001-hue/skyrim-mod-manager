@@ -3,6 +3,7 @@ import {
   resolveBootstrapper,
   listAvailableBootstrappers,
   DEFAULT_BOOTSTRAPPERS,
+  mo2Bootstrapper,
   type BootstrapContext,
 } from './bootstrapper'
 
@@ -13,18 +14,11 @@ const MO2 = 'C:/Tools/MO2/ModOrganizer.exe'
 const existsFrom = (present: string[]) => (p: string) => present.includes(p.replace(/\\/g, '/'))
 
 describe('resolveBootstrapper', () => {
-  it('prefers MO2 when configured and present', () => {
+  it('DIRETTIVA: SKSE è il target anche con MO2 configurato e presente (MO2 fuori dal registry)', () => {
     const ctx: BootstrapContext = { gamePath: G, mo2Path: MO2 }
     const t = resolveBootstrapper(ctx, DEFAULT_BOOTSTRAPPERS, existsFrom([MO2, `${G}/skse64_loader.exe`]))
-    expect(t?.bootstrapperId).toBe('mo2')
-    expect(t?.mode).toBe('exe')
-    expect(t?.exe).toBe(MO2)
-  })
-
-  it('falls back to SKSE when MO2 absent but loader present', () => {
-    const ctx: BootstrapContext = { gamePath: G, mo2Path: null }
-    const t = resolveBootstrapper(ctx, DEFAULT_BOOTSTRAPPERS, existsFrom([`${G}/skse64_loader.exe`]))
     expect(t?.bootstrapperId).toBe('skse')
+    expect(t?.mode).toBe('exe')
     expect(t?.exe?.replace(/\\/g, '/')).toBe(`${G}/skse64_loader.exe`)
     expect(t?.cwd).toBe(G)
   })
@@ -43,36 +37,37 @@ describe('resolveBootstrapper', () => {
     expect(t?.uri).toBe('steam://run/12345')
   })
 
-  it('ignores an MO2 path that is not ModOrganizer.exe', () => {
-    const bogus = 'C:/Tools/MO2/notmo2.exe'
-    const ctx: BootstrapContext = { gamePath: G, mo2Path: bogus }
-    const t = resolveBootstrapper(ctx, DEFAULT_BOOTSTRAPPERS, existsFrom([bogus, `${G}/skse64_loader.exe`]))
-    expect(t?.bootstrapperId).toBe('skse') // MO2 rejected on name, SKSE wins
-  })
-
-  it('returns null when no game is resolved and MO2 is absent', () => {
+  it('returns null when no game is resolved', () => {
     const ctx: BootstrapContext = { gamePath: null, mo2Path: null }
     expect(resolveBootstrapper(ctx, DEFAULT_BOOTSTRAPPERS, existsFrom([]))).toBeNull()
   })
 
-  it('is swappable via a custom registry (order is the swap point)', () => {
-    // Force SKSE-first: DragonLoader only when SKSE truly missing.
+  it('is swappable via a custom registry (order is the swap point): MO2 re-inseribile', () => {
     const ctx: BootstrapContext = { gamePath: G, mo2Path: MO2 }
-    const registry = DEFAULT_BOOTSTRAPPERS.filter((b) => b.id !== 'mo2')
+    const registry = [mo2Bootstrapper, ...DEFAULT_BOOTSTRAPPERS]
     const t = resolveBootstrapper(ctx, registry, existsFrom([MO2, `${G}/skse64_loader.exe`]))
+    expect(t?.bootstrapperId).toBe('mo2')
+    expect(t?.exe).toBe(MO2)
+  })
+
+  it('custom registry: un MO2 path che non è ModOrganizer.exe viene rifiutato sul nome', () => {
+    const bogus = 'C:/Tools/MO2/notmo2.exe'
+    const ctx: BootstrapContext = { gamePath: G, mo2Path: bogus }
+    const registry = [mo2Bootstrapper, ...DEFAULT_BOOTSTRAPPERS]
+    const t = resolveBootstrapper(ctx, registry, existsFrom([bogus, `${G}/skse64_loader.exe`]))
     expect(t?.bootstrapperId).toBe('skse')
   })
 })
 
 describe('listAvailableBootstrappers', () => {
-  it('reports every method available, in priority order', () => {
+  it('registry di default: solo SKSE e DragonLoader, MAI MO2 (anche se configurato)', () => {
     const ctx: BootstrapContext = { gamePath: G, mo2Path: MO2 }
     const ids = listAvailableBootstrappers(
       ctx,
       DEFAULT_BOOTSTRAPPERS,
       existsFrom([MO2, `${G}/skse64_loader.exe`]),
     ).map((b) => b.id)
-    expect(ids).toEqual(['mo2', 'skse', 'dragonloader'])
+    expect(ids).toEqual(['skse', 'dragonloader'])
   })
 
   it('drops methods whose files are missing', () => {

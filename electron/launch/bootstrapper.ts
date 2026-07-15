@@ -116,11 +116,12 @@ export const dragonLoaderBootstrapper: Bootstrapper = {
 
 // Priority order = the swap point. Reorder / replace to change the launch method
 // project-wide without touching the pipeline or the IPC layer.
-export const DEFAULT_BOOTSTRAPPERS: Bootstrapper[] = [
-  mo2Bootstrapper,
-  skseBootstrapper,
-  dragonLoaderBootstrapper,
-]
+//
+// DIRETTIVA DI PROGETTO (2026-07-15): il gioco moddato si avvia ESCLUSIVAMENTE tramite
+// questo launcher col suo SKSE interno — MO2 è rimosso dal registry di default (il suo
+// bootstrapper resta esportato sopra per chi volesse re-inserirlo in un registry custom).
+// DragonLoader resta il fallback sanzionato (steam://run) quando SKSE manca.
+export const DEFAULT_BOOTSTRAPPERS: Bootstrapper[] = [skseBootstrapper, dragonLoaderBootstrapper]
 
 /** All bootstrappers currently available in this environment, in priority order. */
 export function listAvailableBootstrappers(

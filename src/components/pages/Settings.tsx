@@ -272,19 +272,14 @@ export default function Settings() {
           )}
           <span className="text-[11px] text-dark-500 basis-full">
             Legge il registro Steam per la cartella Skyrim e scansiona le posizioni comuni per
-            MO2/LOOT/SSEEdit/DynDOLOD/xLODGen/7-Zip/Pandora. I tool non trovati restano vuoti.
+            LOOT/SSEEdit/DynDOLOD/xLODGen/7-Zip/Pandora. I tool non trovati restano vuoti. Il gioco
+            moddato si avvia SEMPRE da questo launcher col suo SKSE interno — MO2 non serve e viene
+            ignorato dal percorso di avvio.
           </span>
         </div>
         {(
           [
             ['gamePath', 'Cartella Skyrim Anniversary Edition', 'dir', 'Seleziona cartella Skyrim AE'],
-            ['mo2Path', 'Mod Organizer 2 (ModOrganizer.exe)', 'file', 'Seleziona ModOrganizer.exe'],
-            [
-              'modsPath',
-              'Cartella mod (MO2 \\mods) — destinazione installazione',
-              'dir',
-              'Seleziona la cartella mods di MO2',
-            ],
             ['lootPath', 'LOOT (LOOT.exe)', 'file', 'Seleziona LOOT.exe'],
             ['sseeditPath', 'SSEEdit (SSEEdit.exe)', 'file', 'Seleziona SSEEdit.exe'],
             ['dyndolodPath', 'DynDOLOD (DynDOLODx64.exe)', 'file', 'Seleziona DynDOLODx64.exe'],

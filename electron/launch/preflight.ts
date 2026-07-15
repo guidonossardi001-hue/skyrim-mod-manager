@@ -1,6 +1,6 @@
 import { execFile } from 'child_process'
 import { existsSync, readdirSync } from 'fs'
-import { join, dirname } from 'path'
+import { join } from 'path'
 import { app } from 'electron'
 import type Database from 'better-sqlite3'
 import type Store from 'electron-store'
@@ -88,7 +88,9 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     modlist: { complete: missing.length === 0, missing },
     manifest,
     backups: { count: backupCount, lastValid: backupCount > 0 },
-    launchTarget: mo2.valid ? 'mo2' : skse.present ? 'skse' : null,
+    // DIRETTIVA: avvio esclusivo via SKSE interno del launcher — MO2 mai target, anche se
+    // configurato (i campi mo2.* restano informativi per la pipeline di verifica).
+    launchTarget: skse.present ? 'skse' : null,
   }
 }
 
@@ -107,12 +109,11 @@ export async function executeLaunch(db: Database.Database, store: Store): Promis
   const report = runLaunchWorkflow(env)
   if (!report.canLaunch) return { launched: false, report } // companion mode: blocked
 
-  const target =
-    env.launchTarget === 'mo2' && env.mo2.path
-      ? { exe: env.mo2.path, cwd: dirname(env.mo2.path) }
-      : env.skyrim.path
-        ? { exe: join(env.skyrim.path, 'skse64_loader.exe'), cwd: env.skyrim.path }
-        : null
+  // Solo SKSE diretto: il launcher È il mod manager (deploy hardlink + plugins.txt di
+  // sistema già scritti), MO2 non entra mai nel percorso di avvio.
+  const target = env.skyrim.path
+    ? { exe: join(env.skyrim.path, 'skse64_loader.exe'), cwd: env.skyrim.path }
+    : null
   if (!target) return { launched: false, report, error: 'Nessun eseguibile di avvio risolvibile' }
 
   return new Promise<LaunchResult>((resolve) => {

@@ -133,6 +133,7 @@
       "installerHeaderIcon": "assets/dragon_launcher.ico",
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
-    }
+    },
+    "disableAsarIntegrity": true
   }
 }
