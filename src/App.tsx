@@ -177,10 +177,21 @@ export default function App() {
       refresh()
       if (p?.integrity) toast.error('Download rifiutato', p.error ?? 'Verifica di integrità fallita')
     }
+    // Crash del gioco rilevato dal main dopo un GIOCA (watch sui crash-*.log SKSE):
+    // notifica app-wide col modulo probabile colpevole; dettagli completi in Strumenti.
+    const onCrash = (p?: { culpritModule?: string | null; exceptionType?: string | null; suggestions?: string[] }) => {
+      toast.error(
+        'Il gioco è crashato',
+        p?.culpritModule
+          ? `Modulo probabile: ${p.culpritModule} — dettagli in Strumenti → Analizza crash log`
+          : `${p?.exceptionType ?? 'Crash rilevato'} — dettagli in Strumenti → Analizza crash log`,
+      )
+    }
     const subs = [
       ...['download:complete', 'install:complete'].map((ch) => ({ ch, w: api.on!(ch, refresh) })),
       { ch: 'download:error', w: api.on!('download:error', onDownloadError as (...a: unknown[]) => void) },
       { ch: 'nxm:queued', w: api.on!('nxm:queued', onNxm) },
+      { ch: 'crash:detected', w: api.on!('crash:detected', onCrash as (...a: unknown[]) => void) },
     ]
     return () => subs.forEach((s) => api.off?.(s.ch, s.w))
   }, [loadDownloads, loadMods])

@@ -29,7 +29,7 @@ import { getLoadOrder, saveLoadOrder } from './pluginManager'
 import type { LoadOrderEntry } from '../src/types'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
-import { initCrashEngine } from './launch/crashEngine'
+import { initCrashEngine, armCrashWatch } from './launch/crashEngine'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
 import { checkForLauncherUpdate } from './launch/launcherUpdate'
 import {
@@ -667,10 +667,39 @@ app.whenReady().then(() => {
   // sul gioco. Legge dalla cartella SKSE standard o da un file scelto manualmente.
   initCrashEngine()
 
+  // Auto-analisi post-lancio: al primo crash-*.log NUOVO dopo un GIOCA riuscito, il main
+  // analizza da solo e notifica il renderer (toast con modulo probabile colpevole).
+  const armPostLaunchCrashWatch = () => {
+    armCrashWatch({
+      sinceMs: Date.now(),
+      onFound: ({ file, report, analysis }) => {
+        logger.warn(
+          'crash',
+          `crash rilevato dopo il lancio: ${file}${analysis.culprit ? ` — modulo probabile: ${analysis.culprit.module}` : ''}`,
+        )
+        try {
+          if (mainWindow && !mainWindow.isDestroyed())
+            mainWindow.webContents.send('crash:detected', {
+              file,
+              exceptionType: report.exceptionType,
+              culpritModule: analysis.culprit?.module ?? null,
+              suggestions: analysis.suggestions,
+            })
+        } catch {
+          /* finestra chiusa: resta il log */
+        }
+      },
+    })
+  }
+
   // Steam detection + launch pre-flight (companion mode: read-only, gated launch).
   ipcMain.handle('steam:detect', () => detectSteamEnv())
   ipcMain.handle('launch:preflight', () => runPreflight(getRawDb(), store))
-  ipcMain.handle('launch:run', () => executeLaunch(getRawDb(), store))
+  ipcMain.handle('launch:run', async () => {
+    const r = await executeLaunch(getRawDb(), store)
+    if (r.launched) armPostLaunchCrashWatch()
+    return r
+  })
 
   // ── Modded game launcher ─────────────────────────────────────────────────────
   // DIRETTIVA: avvio esclusivo via SKSE interno (skse64_loader.exe accanto al gioco).
@@ -712,8 +741,10 @@ app.whenReady().then(() => {
       }
     }
     const res = launchGame({ exePath: target.exe!, cwd: target.cwd!, args: target.args ?? [] })
-    if (res.success) logger.info('launcher', `gioco avviato via ${target.bootstrapperName}: ${target.exe} (pid ${res.pid})`)
-    else logger.warn('launcher', `avvio via ${target.bootstrapperName} fallito: ${res.error}`)
+    if (res.success) {
+      logger.info('launcher', `gioco avviato via ${target.bootstrapperName}: ${target.exe} (pid ${res.pid})`)
+      armPostLaunchCrashWatch()
+    } else logger.warn('launcher', `avvio via ${target.bootstrapperName} fallito: ${res.error}`)
     return { ...res, via: target.bootstrapperId }
   }
 
@@ -764,6 +795,7 @@ app.whenReady().then(() => {
         }
       },
       recordSuccess: (target) => {
+        armPostLaunchCrashWatch()
         try {
           const profileId = resolveActiveProfileId(getRawDb(), store)
           recordLaunch(kvStore, { bootstrapperId: target.bootstrapperId, profileId }, new Date().toISOString())

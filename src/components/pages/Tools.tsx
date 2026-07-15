@@ -12,7 +12,6 @@ import {
   FileCode,
   Copy,
   Check,
-  Palette,
   RefreshCw,
   Database,
   Activity,
@@ -23,20 +22,11 @@ import { clsx } from 'clsx'
 import { toast } from '@/lib/toast'
 import type { VortexScanResult } from '@/types'
 
-const MOCK_ENB_PRESETS = [
-  { name: 'Rudy ENB - Cathedral', author: 'Rudy102', active: true, performance: 'Pesante' },
-  { name: 'Pi-Cho ENB', author: 'Pi-Cho', active: false, performance: 'Medio' },
-  { name: 'Serio ENB', author: 'prod80', active: false, performance: 'Leggero' },
-  { name: 'Ljoss ENB', author: 'wankingSkeever', active: false, performance: 'Leggero' },
-  { name: 'Cabbage ENB', author: 'Cabbage', active: false, performance: 'Pesante' },
-]
-
 export default function Tools() {
   const { settings, exportLoadOrder, importFromMO2, checkAllUpdates, mods } = useAppStore()
   const [running, setRunning] = useState<string | null>(null)
   const [results, setResults] = useState<Record<string, { success: boolean; message?: string }>>({})
   const [copied, setCopied] = useState<string | null>(null)
-  const [enbPresets, setEnbPresets] = useState(MOCK_ENB_PRESETS)
   const [checkingUpdates, setCheckingUpdates] = useState(false)
   const [updateResult, setUpdateResult] = useState<{ checked: number; updates: number } | null>(null)
   const mo2ImportRef = useRef<HTMLInputElement>(null)
@@ -398,60 +388,9 @@ export default function Tools() {
         </div>
       </div>
 
-      {/* ENB Preset Manager */}
-      <div className="card p-5">
-        <h3 className="font-semibold text-white/80 mb-4 flex items-center gap-2 text-sm">
-          <Palette size={15} className="text-void-400" /> ENB Preset Manager
-        </h3>
-        <div className="space-y-2">
-          {enbPresets.map((preset) => (
-            <div
-              key={preset.name}
-              className={clsx(
-                'flex items-center gap-3 p-2.5 rounded-lg border transition-all',
-                preset.active ? 'border-void-700/60 bg-void-900/20' : 'border-dark-800 hover:border-dark-600',
-              )}
-            >
-              <div
-                className={clsx(
-                  'w-2 h-2 rounded-full flex-shrink-0',
-                  preset.active ? 'bg-green-400' : 'bg-dark-600',
-                )}
-              />
-              <div className="flex-1 min-w-0">
-                <p className="text-sm text-white/85 font-medium">{preset.name}</p>
-                <p className="text-xs text-dark-400">
-                  di {preset.author} · {preset.performance}
-                </p>
-              </div>
-              <span
-                className={clsx(
-                  'text-xs px-2 py-0.5 rounded-full',
-                  preset.performance === 'Pesante'
-                    ? 'bg-red-900/30 text-red-400'
-                    : preset.performance === 'Medio'
-                      ? 'bg-orange-900/30 text-orange-400'
-                      : 'bg-green-900/30 text-green-400',
-                )}
-              >
-                {preset.performance}
-              </span>
-              {!preset.active && (
-                <button
-                  onClick={() => {
-                    setEnbPresets((prev) => prev.map((p) => ({ ...p, active: p.name === preset.name })))
-                    toast.success('Preset ENB attivato', preset.name)
-                  }}
-                  className="text-xs px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all"
-                >
-                  Attiva
-                </button>
-              )}
-              {preset.active && <span className="text-xs text-void-400 font-semibold">ATTIVO</span>}
-            </div>
-          ))}
-        </div>
-      </div>
+      {/* ENB Preset Manager RIMOSSO: mostrava una lista MOCK (Rudy/Pi-Cho/…) mai collegata a
+          nulla di reale — dati finti in produzione sono peggio dell'assenza della feature.
+          Se/quando servirà: scan reale di enbseries.ini + preset dir nella cartella gioco. */}
 
       {/* Check all updates */}
       <div className="card p-5">

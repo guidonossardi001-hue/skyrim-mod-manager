@@ -35,6 +35,58 @@ function listCrashLogs(dir: string, cap: number): CrashLogEntry[] {
   }
 }
 
+// ── Auto-analisi post-lancio ─────────────────────────────────────────────────
+// Il gioco parte DETACHED (sopravvive alla chiusura del launcher): non c'è un exit
+// code da osservare. Rilevamento crash = polling leggero della cartella SKSE per un
+// crash-*.log NUOVO (mtime > istante di lancio). Un solo watch alla volta; si spegne
+// al primo match o al timeout. Fail-soft totale: un errore di lettura non deve mai
+// disturbare né il lancio né la chiusura dell'app.
+let crashWatchTimer: NodeJS.Timeout | null = null
+
+export interface CrashWatchOptions {
+  sinceMs: number // istante del lancio: contano solo log più recenti
+  onFound: (payload: {
+    file: string
+    report: CrashLogReport
+    analysis: CrashAnalysis
+  }) => void
+  intervalMs?: number // default 30s — I/O trascurabile (readdir di una cartella piccola)
+  timeoutMs?: number // default 3h — oltre, la sessione di gioco non è più "questo lancio"
+  dir?: string // iniettabile nei/test; default cartella SKSE standard
+}
+
+export function stopCrashWatch(): void {
+  if (crashWatchTimer) {
+    clearInterval(crashWatchTimer)
+    crashWatchTimer = null
+  }
+}
+
+export function armCrashWatch(opts: CrashWatchOptions): void {
+  stopCrashWatch() // un nuovo lancio sostituisce il watch precedente
+  const dir = opts.dir ?? DEFAULT_CRASH_LOG_DIR()
+  const interval = opts.intervalMs ?? 30_000
+  const deadline = Date.now() + (opts.timeoutMs ?? 3 * 60 * 60 * 1000)
+  crashWatchTimer = setInterval(() => {
+    try {
+      if (Date.now() > deadline) {
+        stopCrashWatch()
+        return
+      }
+      const fresh = listCrashLogs(dir, 5).find((e) => e.mtimeMs > opts.sinceMs)
+      if (!fresh) return
+      stopCrashWatch()
+      const text = readFileSync(fresh.path, 'utf8')
+      const report = parseCrashLog(text)
+      opts.onFound({ file: fresh.path, report, analysis: analyzeCrashLog(report) })
+    } catch {
+      /* cartella assente/log illeggibile: si riprova al prossimo tick */
+    }
+  }, interval)
+  // Il watch non deve tenere vivo il processo alla chiusura dell'app.
+  crashWatchTimer.unref?.()
+}
+
 export function initCrashEngine() {
   ipcMain.handle('crash:list-recent', () => {
     try {

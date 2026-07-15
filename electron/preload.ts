@@ -20,6 +20,7 @@ const EVENT_CHANNELS = new Set([
   'launch:progress',
   'nxm:queued',
   'nxm:confirm-request',
+  'crash:detected',
 ])
 
 // original listener → ipcRenderer wrapper, so off() accepts either one.
