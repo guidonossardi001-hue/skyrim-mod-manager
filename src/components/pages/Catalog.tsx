@@ -42,7 +42,7 @@ const CATEGORY_LABELS: Record<string, string> = {
 }
 
 export default function Catalog() {
-  const { catalog, loadCatalog, mods, activeProfileId } = useAppStore()
+  const { catalog, loadCatalog, loadMods, loadDownloads, mods, activeProfileId } = useAppStore()
   const [search, setSearch] = useState('')
   const [filterCategory, setFilterCategory] = useState('')
   const [showRequired, setShowRequired] = useState(false)
@@ -53,6 +53,7 @@ export default function Catalog() {
   const [importingVortex, setImportingVortex] = useState(false)
   const [deduping, setDeduping] = useState(false)
   const [pruning, setPruning] = useState(false)
+  const [wiping, setWiping] = useState(false)
   const [validating, setValidating] = useState(false)
   // Multi-select for the dependency resolver. Kept as a stable Set reference across
   // renders (updated only on toggle) so the resolver drawer never resets spuriously.
@@ -322,6 +323,36 @@ export default function Catalog() {
     }
   }
 
+  // Svuotamento TOTALE: catalogo + coda download + mods del profilo. Spegne l'auto-seed del
+  // bundle (altrimenti al prossimo mount il catalogo vuoto verrebbe ri-seminato). Reversibile
+  // con "Importa modlist Vortex".
+  const wipeCatalog = async () => {
+    const msg =
+      `Svuotare TUTTO il catalogo?\n\n` +
+      `· ${catalog.length} mod rimosse dal catalogo\n` +
+      `· tutta la coda download annullata\n` +
+      `· tutte le mod del profilo rimosse dalla lista\n\n` +
+      `I file estratti su disco NON vengono toccati. Reversibile con "Importa modlist Vortex".`
+    if (!window.confirm(msg)) return
+    setWiping(true)
+    try {
+      const res = await window.api.catalog.wipe()
+      if (res.ok) {
+        await Promise.all([loadCatalog(), loadMods(), loadDownloads()])
+        toast.success(
+          'Catalogo svuotato',
+          `${res.catalog ?? 0} righe catalogo · ${res.downloads ?? 0} download · ${res.mods ?? 0} mod eliminate`,
+        )
+      } else {
+        toast.error('Svuotamento fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Svuotamento fallito', (e as Error).message)
+    } finally {
+      setWiping(false)
+    }
+  }
+
   // Data-integrity check dello schema download (fail-safe: flagga nei log, non cancella).
   const validateDownloads = async () => {
     setValidating(true)
@@ -428,6 +459,22 @@ export default function Catalog() {
               ) : (
                 <>
                   <X size={12} /> Rimuovi DOMAIN
+                </>
+              )}
+            </button>
+            <button
+              onClick={wipeCatalog}
+              disabled={wiping}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-red-950/40 text-red-300 hover:bg-red-900/50 hover:text-red-200 transition-all disabled:opacity-50"
+              title="Svuota TUTTO: catalogo, coda download e mod del profilo (i file su disco restano)"
+            >
+              {wiping ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Svuotamento...
+                </>
+              ) : (
+                <>
+                  <X size={12} /> Svuota catalogo
                 </>
               )}
             </button>

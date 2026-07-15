@@ -676,6 +676,8 @@ export const mockApi = {
     // Preview stub: no Vortex backup on disk in the browser mock.
     importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
     dedupe: async () => ({ success: true as const, removed: 0, total: catalog.length }),
+    // Preview stub: il wipe agisce sul DB reale (solo app desktop).
+    wipe: async () => ({ ok: false as const, error: 'Svuotamento catalogo disponibile solo nell’app desktop' }),
     // Preview stub: il pruning richiede il backup raw su disco (solo app desktop).
     pruneCollection: async () => ({
       ok: false as const,

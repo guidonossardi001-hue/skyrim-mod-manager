@@ -76,6 +76,8 @@ contextBridge.exposeInMainWorld('api', {
     validateDownloads: () => invoke('catalog:validate-downloads'),
     // Remove cross-source name duplicates (curated placeholder-id row vs the Vortex real-id row).
     dedupe: () => invoke('catalog:dedupe'),
+    // Svuotamento TOTALE: catalogo + coda download + mods del profilo; spegne l'auto-seed.
+    wipe: () => invoke('catalog:wipe'),
     // Fetch the signed reference catalog (URL optional — falls back to the
     // main-process NOLVUS_MOD_CATALOG_URL config) and ingest it. Always resolves
     // to a CatalogIngestResult, never rejects (no-throw boundary end to end).

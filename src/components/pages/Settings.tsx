@@ -193,6 +193,8 @@ export default function Settings() {
             7-Zip di sistema (7z.exe) — opzionale (override per i <code>.rar</code>)
           </label>
           <div className="flex gap-2">
+            {/* placeholder come stringa JS: nell'attributo JSX nudo il rolldown-scanner di
+                vite 8 legge "\7" come octal escape deprecato e fallisce il dep-scan a ogni boot. */}
             <input
               type="text"
               value={local.sevenZipPath ?? ''}
@@ -200,7 +202,7 @@ export default function Settings() {
                 setLocal((l) => ({ ...l, sevenZipPath: e.target.value }))
                 setSevenZip(null)
               }}
-              placeholder="C:\Program Files\7-Zip\7z.exe"
+              placeholder={'C:\\Program Files\\7-Zip\\7z.exe'}
               className="input-field flex-1"
             />
             <button onClick={pickSevenZip} className="btn-ghost flex items-center gap-2 px-3">

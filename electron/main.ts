@@ -1680,6 +1680,37 @@ app.whenReady().then(() => {
     return { ok: true, backfilled, queue, catalog }
   })
 
+  // ── Svuotamento TOTALE del catalogo ──────────────────────────────────────────
+  // Richiesta esplicita: rimuovere l'INTERA modlist (catalogo, coda download, righe
+  // mods del profilo). Non tocca i file estratti su disco né l'istanza deployata
+  // (per quella c'è deploy:purge). Disattiva anche l'auto-seed del bundle curato:
+  // senza il flag, Catalog.tsx ri-seminerebbe le ~122 mod bundled al primo mount su
+  // DB vuoto e il wipe non sarebbe mai definitivo. Reversibile: "Importa modlist
+  // Vortex" / "Aggiorna catalogo" ripopolano e riattivano il seed.
+  ipcMain.handle('catalog:wipe', () => {
+    try {
+      const rdb = getRawDb()
+      const counts = { catalog: 0, downloads: 0, mods: 0, releases: 0 }
+      const tx = rdb.transaction(() => {
+        // Figli prima (FK senza cascade): delta_changeset → downloads → mods.
+        rdb.prepare('DELETE FROM delta_changeset').run()
+        counts.downloads = rdb.prepare('DELETE FROM downloads').run().changes
+        counts.mods = rdb.prepare('DELETE FROM mods').run().changes
+        counts.catalog = rdb.prepare('DELETE FROM modlist_catalog').run().changes
+        counts.releases = rdb.prepare('DELETE FROM catalog_release').run().changes // cascade su release_mod
+      })
+      tx()
+      store.set('catalogSeedDisabled', true)
+      logger.info(
+        'catalog',
+        `wipe totale: ${counts.catalog} righe catalogo, ${counts.downloads} download, ${counts.mods} mod eliminate; auto-seed bundle disattivato`,
+      )
+      return { ok: true, ...counts }
+    } catch (e) {
+      return { ok: false, error: (e as Error).message }
+    }
+  })
+
   // ── Vortex importer ────────────────────────────────────────────────────────
   // READ-ONLY scan of an existing Vortex Skyrim SE staging folder: parses the
   // collection.json files (authoritative Nexus modId/fileId) + folder names, dedups.
@@ -2040,6 +2071,9 @@ ipcMain.handle('catalog:list', (_e, filter?: { category?: string; search?: strin
 })
 
 ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
+  // Dopo catalog:wipe l'utente vuole un catalogo VUOTO: l'auto-seed del bundle resta
+  // spento finché un'azione esplicita (import Vortex) non riattiva il flag.
+  if (store.get('catalogSeedDisabled') === true) return { inserted: 0, disabled: true }
   const insert = getRawDb().prepare(`
     INSERT OR REPLACE INTO modlist_catalog
     (nexus_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
@@ -2100,6 +2134,8 @@ ipcMain.handle('catalog:import-vortex', () => {
     'catalog',
     `import Vortex: ${rows.length} candidati → ${imported} nuovi, ${deduped} doppioni rimossi (totale ${after}) da ${src}`,
   )
+  // Ripopolamento esplicito: riattiva l'auto-seed del bundle spento da catalog:wipe.
+  store.delete('catalogSeedDisabled')
   return { success: true, candidates: rows.length, imported, deduped, total: after }
 })
 

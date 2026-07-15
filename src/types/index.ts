@@ -200,7 +200,7 @@ declare global {
       }
       catalog: {
         list(filter?: { category?: string; search?: string }): Promise<CatalogMod[]>
-        seed(mods: Partial<CatalogMod>[]): Promise<{ inserted: number }>
+        seed(mods: Partial<CatalogMod>[]): Promise<{ inserted: number; disabled?: boolean }>
         // Import the full de-duplicated modlist (~4568 mods) from the Vortex backup into the
         // catalog without clobbering curated rows. Never rejects — inspect success.
         importVortex(): Promise<{
@@ -213,6 +213,16 @@ declare global {
         }>
         // Remove cross-source name duplicates from the catalog. Never rejects.
         dedupe(): Promise<{ success: boolean; removed?: number; total?: number; error?: string }>
+        // Svuotamento TOTALE: catalogo + coda download + mods del profilo; spegne l'auto-seed
+        // del bundle finché un import esplicito non lo riattiva. Never rejects — inspect ok.
+        wipe(): Promise<{
+          ok: boolean
+          catalog?: number
+          downloads?: number
+          mods?: number
+          releases?: number
+          error?: string
+        }>
         // Piano/esecuzione pruning collezione (dry-run senza apply=true). Rimuove solo le mod
         // ESCLUSIVE della collezione, tenendo quelle richieste dai superstiti (no missing masters).
         pruneCollection(
