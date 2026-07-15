@@ -1,6 +1,7 @@
 import axios from 'axios'
 import type { HttpGet } from '../install/downloadStream'
 import type { HttpGetJson } from '../nexus/downloadLink'
+import type { HttpPostJson } from '../nexus/collections'
 
 // Adapt axios to the injectable HttpGet / HttpGetJson seams used by the resumable
 // download stream core and the Nexus download_link resolver. The `as never` pair
@@ -8,3 +9,5 @@ import type { HttpGetJson } from '../nexus/downloadLink'
 // kept in one place so that single unavoidable cast never gets copied around.
 export const axiosGet: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
 export const axiosJson: HttpGetJson = (url, cfg) => axios.get(url, cfg as never) as never
+// POST variant for the Nexus GraphQL v2 endpoint (collections): body is JSON, response is JSON.
+export const axiosPostJson: HttpPostJson = (url, body, cfg) => axios.post(url, body, cfg as never) as never

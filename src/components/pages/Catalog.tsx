@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback, memo } from 'react'
+import { useState, useMemo, useCallback, memo } from 'react'
 import { Virtuoso } from 'react-virtuoso'
 import {
   Search,
@@ -16,7 +16,6 @@ import {
 import { useAppStore } from '@/store/appStore'
 import type { CatalogMod } from '@/types'
 import { clsx } from 'clsx'
-import { MODLIST_CATALOG } from '@/data/modlistCatalog'
 import { toast } from '@/lib/toast'
 import DependencyResolver from '@/components/ui/DependencyResolver'
 
@@ -51,6 +50,8 @@ export default function Catalog() {
   const [checkingAll, setCheckingAll] = useState(false)
   const [updatingCatalog, setUpdatingCatalog] = useState(false)
   const [importingVortex, setImportingVortex] = useState(false)
+  const [importingCollection, setImportingCollection] = useState(false)
+  const [collectionInput, setCollectionInput] = useState('')
   const [deduping, setDeduping] = useState(false)
   const [pruning, setPruning] = useState(false)
   const [wiping, setWiping] = useState(false)
@@ -60,22 +61,13 @@ export default function Catalog() {
   const [selectedNexusIds, setSelectedNexusIds] = useState<Set<number>>(new Set())
   const [resolverOpen, setResolverOpen] = useState(false)
 
-  useEffect(() => {
-    // Seed the bundled baseline when the DB has FEWER mods than the bundle ships — covers both an
-    // empty DB and a STALE seed frozen at an older build's count (the old `=== 0` guard never
-    // topped up when modlistCatalog.ts grew). INSERT OR REPLACE is idempotent by the UNIQUE
-    // nexus_id, so this tops up to the full bundled set WITHOUT clobbering a richer remote-ingested
-    // catalog (whose count exceeds the bundle, so this branch is skipped).
-    const bundledCount = new Set(
-      (MODLIST_CATALOG as { nexus_id?: number }[]).map((m) => m.nexus_id).filter((n) => n != null),
-    ).size
-    if (catalog.length < bundledCount) {
-      window.api.catalog
-        .seed(MODLIST_CATALOG as never[])
-        .then(() => loadCatalog())
-        .catch((e) => toast.error('Caricamento catalogo fallito', (e as Error).message))
-    }
-  }, [catalog.length, loadCatalog])
+  // NIENTE auto-seed del bundle curato al mount. Rimosso deliberatamente: ripopolava il
+  // catalogo con l'elenco statico (~122 mod, nexus_id storicamente inaffidabili — es. "A Matter
+  // Of Time" mappato sull'id di SkyUI) ogni volta che questa pagina montava con un catalogo più
+  // corto del bundle — incluso un catalogo VOLUTAMENTE svuotato dall'utente (catalog:wipe), con
+  // conseguente coda download rotta ("Link di download non disponibile" su ogni riga: il bundle
+  // non ha mai avuto nexus_file_id). Fonti valide del catalogo ora sono solo azioni esplicite:
+  // "Importa modlist Vortex" o "Importa Collection Nexus".
 
   // Everything already in the profile (installed OR queued) counts as "satisfied"
   // for the resolver so it neither re-adds nor re-plans it.
@@ -225,10 +217,9 @@ export default function Catalog() {
     [activeProfileId, catalogByNexus, addCatalogMod],
   )
 
-  // Fetch + ingest the full signed reference catalog (4000+ mods). Distinct from
-  // the bundled MODLIST_CATALOG seed (essential mods only) auto-loaded on first
-  // mount: this replaces modlist_catalog wholesale with the remote signed set.
-  // No-throw IPC boundary — always a CatalogIngestResult.
+  // Fetch + ingest the full signed reference catalog (4000+ mods): replaces
+  // modlist_catalog wholesale with the remote signed set. No-throw IPC boundary —
+  // always a CatalogIngestResult.
   const updateCatalog = async () => {
     setUpdatingCatalog(true)
     try {
@@ -271,6 +262,32 @@ export default function Catalog() {
       toast.error('Import Vortex fallito', (e as Error).message)
     } finally {
       setImportingVortex(false)
+    }
+  }
+
+  // Import diretto da Nexus Collections v2: modId/fileId autoritativi dal graph server-side,
+  // niente id da stimare o backfillare. Accetta slug nudo o URL pagina collezione.
+  const importNexusCollection = async () => {
+    const input = collectionInput.trim()
+    if (!input) return
+    setImportingCollection(true)
+    try {
+      const res = await window.api.catalog.importNexusCollection(input)
+      if (res.success) {
+        await loadCatalog()
+        setCollectionInput('')
+        const dd = res.deduped ? `, ${res.deduped} doppioni rimossi` : ''
+        toast.success(
+          `Collezione "${res.collectionName}" importata`,
+          `rev.${res.revisionNumber} · ${res.imported ?? 0} nuove mod${dd} (totale ${res.total ?? 0})`,
+        )
+      } else {
+        toast.error('Import Collection fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Import Collection fallito', (e as Error).message)
+    } finally {
+      setImportingCollection(false)
     }
   }
 
@@ -511,6 +528,33 @@ export default function Catalog() {
               ) : (
                 <>
                   <Boxes size={12} /> Importa modlist Vortex
+                </>
+              )}
+            </button>
+            <input
+              type="text"
+              value={collectionInput}
+              onChange={(e) => setCollectionInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') importNexusCollection()
+              }}
+              placeholder="Slug o URL Collection Nexus"
+              title="Slug (es. abc123) o URL pagina collezione nexusmods.com/…/collections/…"
+              className="w-52 px-2.5 py-1.5 rounded-lg text-xs bg-void-950/60 text-void-100 placeholder:text-void-500 border border-void-800 focus:outline-none focus:border-primary-500"
+            />
+            <button
+              onClick={importNexusCollection}
+              disabled={importingCollection || !collectionInput.trim()}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Import diretto da Nexus Collections v2: modId/fileId autoritativi dal graph, mai un JSON locale con id inaffidabili"
+            >
+              {importingCollection ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Import...
+                </>
+              ) : (
+                <>
+                  <Boxes size={12} /> Importa Collection Nexus
                 </>
               )}
             </button>

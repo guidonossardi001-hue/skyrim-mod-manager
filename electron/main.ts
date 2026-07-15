@@ -83,7 +83,13 @@ import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
 import { launchGame, createDesktopShortcut, resolveLauncherIcon } from './launcher/launcherService'
 import { streamToFile } from './install/downloadStream'
 import { resolveDownloadLink } from './nexus/downloadLink'
-import { axiosGet, axiosJson } from './http/axiosAdapters'
+import {
+  parseCollectionInput,
+  fetchCollectionRevision,
+  buildCatalogRowsFromCollection,
+  type CollectionRevisionResult,
+} from './nexus/collections'
+import { axiosGet, axiosJson, axiosPostJson } from './http/axiosAdapters'
 import { extractArchive } from './install/extract'
 import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash, randomUUID } from 'crypto'
@@ -2076,7 +2082,11 @@ ipcMain.handle('catalog:list', (_e, filter?: { category?: string; search?: strin
 ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
   // Dopo catalog:wipe l'utente vuole un catalogo VUOTO: l'auto-seed del bundle resta
   // spento finché un'azione esplicita (import Vortex) non riattiva il flag.
-  if (store.get('catalogSeedDisabled') === true) return { inserted: 0, disabled: true }
+  if (store.get('catalogSeedDisabled') === true) {
+    logger.info('catalog', `catalog:seed rifiutato (auto-seed disattivato) — ${mods.length} righe scartate`)
+    return { inserted: 0, disabled: true }
+  }
+  logger.info('catalog', `catalog:seed: inserimento/refresh di ${mods.length} righe bundle`)
   const insert = getRawDb().prepare(`
     INSERT OR REPLACE INTO modlist_catalog
     (nexus_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
@@ -2140,6 +2150,64 @@ ipcMain.handle('catalog:import-vortex', () => {
   // Ripopolamento esplicito: riattiva l'auto-seed del bundle spento da catalog:wipe.
   store.delete('catalogSeedDisabled')
   return { success: true, candidates: rows.length, imported, deduped, total: after }
+})
+
+// ── Import Collection Nexus (v2 GraphQL, fonte ufficiale) ────────────────────────────────────
+// A differenza del backup Vortex (JSON locale, id storicamente inaffidabili — vedi seed curato
+// che aveva marcato "installate" le mod sbagliate), qui modId/fileId arrivano DIRETTAMENTE dal
+// graph Nexus: la coppia è per costruzione corretta e scaricabile.
+ipcMain.handle('catalog:import-nexus-collection', async (_e, input: string) => {
+  const apiKey = readSecret('nexusApiKey')
+  if (!apiKey.trim())
+    return { success: false, error: 'Nessuna API key Nexus: impostala nelle Impostazioni prima di importare' }
+  const parsed = parseCollectionInput(input)
+  if (!parsed)
+    return { success: false, error: 'Slug o URL collezione non riconosciuto (es. "abc123" o link nexusmods.com/…/collections/abc123)' }
+  let revision: CollectionRevisionResult
+  try {
+    revision = await fetchCollectionRevision(axiosPostJson, { slug: parsed.slug, revision: parsed.revision, apiKey })
+  } catch (e) {
+    return { success: false, error: (e as Error).message }
+  }
+  // Guardia namespace: nexus_id è per-gioco, una collezione di un altro titolo corromperebbe
+  // il catalogo con id numerici che qui significano tutt'altro.
+  if (revision.gameDomain && revision.gameDomain !== 'skyrimspecialedition') {
+    return {
+      success: false,
+      error: `Collezione per "${revision.gameDomain}", non Skyrim Special Edition: import rifiutato`,
+    }
+  }
+  if (!revision.mods.length) return { success: false, error: `Collezione "${revision.collectionName}" senza mod` }
+
+  const rows = buildCatalogRowsFromCollection(revision)
+  const db = getRawDb()
+  const before = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
+  const insert = db.prepare(`
+    INSERT OR IGNORE INTO modlist_catalog
+    (nexus_id, nexus_file_id, name, category, subcategory, priority_order, required, description, author, tags, size_mb, has_it_translation, notes, conflicts_with, requires)
+    VALUES (@nexus_id, @nexus_file_id, @name, @category, @subcategory, @priority_order, @required, @description, @author, @tags, @size_mb, @has_it_translation, @notes, @conflicts_with, @requires)
+  `)
+  const tx = db.transaction((rs: typeof rows) => {
+    for (const r of rs) insert.run(r as unknown as Record<string, unknown>)
+  })
+  tx(rows)
+  const deduped = removeVortexNameDuplicates(db)
+  const after = (db.prepare('SELECT COUNT(*) AS c FROM modlist_catalog').get() as { c: number }).c
+  const imported = after + deduped - before
+  logger.info(
+    'catalog',
+    `import Collection Nexus "${revision.collectionName}" rev.${revision.revisionNumber}: ${rows.length} candidati → ${imported} nuovi, ${deduped} doppioni rimossi (totale ${after})`,
+  )
+  store.delete('catalogSeedDisabled')
+  return {
+    success: true,
+    collectionName: revision.collectionName,
+    revisionNumber: revision.revisionNumber,
+    candidates: rows.length,
+    imported,
+    deduped,
+    total: after,
+  }
 })
 
 // Standalone dedupe for a catalog that already contains the cross-source duplicates (e.g. imported

@@ -214,6 +214,18 @@ declare global {
           total?: number
           error?: string
         }>
+        // Import diretto da Nexus Collections v2 (fonte ufficiale, modId/fileId autoritativi).
+        // `input` = slug nudo o URL pagina collezione. Never rejects — inspect success.
+        importNexusCollection(input: string): Promise<{
+          success: boolean
+          collectionName?: string
+          revisionNumber?: number
+          candidates?: number
+          imported?: number
+          deduped?: number
+          total?: number
+          error?: string
+        }>
         // Remove cross-source name duplicates from the catalog. Never rejects.
         dedupe(): Promise<{ success: boolean; removed?: number; total?: number; error?: string }>
         // Svuotamento TOTALE: catalogo + coda download + mods del profilo; spegne l'auto-seed

@@ -675,6 +675,10 @@ export const mockApi = {
     seed: async () => ({ inserted: catalog.length }),
     // Preview stub: no Vortex backup on disk in the browser mock.
     importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
+    importNexusCollection: async () => ({
+      success: false as const,
+      error: 'Import Collection Nexus disponibile solo nell’app desktop',
+    }),
     dedupe: async () => ({ success: true as const, removed: 0, total: catalog.length }),
     // Preview stub: il wipe agisce sul DB reale (solo app desktop).
     wipe: async () => ({ ok: false as const, error: 'Svuotamento catalogo disponibile solo nell’app desktop' }),

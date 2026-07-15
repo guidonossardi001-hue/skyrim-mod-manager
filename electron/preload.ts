@@ -70,6 +70,9 @@ contextBridge.exposeInMainWorld('api', {
     // Import the full de-duplicated modlist (~4568 mods) from the Vortex backup into the
     // catalog, without overwriting curated rows. Resolves to { success, imported, total, ... }.
     importVortex: () => invoke('catalog:import-vortex'),
+    // Import diretto da Nexus Collections v2 (GraphQL): slug o URL collezione. modId/fileId
+    // arrivano dal graph server-side, autoritativi (mai un JSON locale con id inaffidabili).
+    importNexusCollection: (input: string) => invoke('catalog:import-nexus-collection', input),
     // Piano/esecuzione pruning di una collezione (dry-run senza apply). Vedi collectionPrune.ts.
     pruneCollection: (query: string, apply?: boolean) => invoke('catalog:prune-collection', query, apply),
     // Data-integrity check schema download (coda + catalogo, fail-safe: flagga, non cancella).
