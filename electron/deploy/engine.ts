@@ -20,6 +20,9 @@ export interface DeployEngineOptions {
   resolveMasterlistPath?: () => string | null | undefined
   // Path della cache locale del masterlist LOOT reale (fetch esplicita via masterlist:refresh).
   resolveLootMasterlistCachePath?: () => string | null | undefined
+  // false quando il target di deploy è una directory CONDIVISA (Data del gioco reale): vieta
+  // ogni pulizia/purge euristica nlink — solo manifest esatto. Default true (istanza dedicata).
+  allowHeuristics?: () => boolean
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -48,6 +51,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         systemPluginsDir: opts.resolveSystemPluginsDir?.() ?? undefined,
         masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
         lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
+        allowHeuristicCleanup: opts.allowHeuristics?.() ?? true,
         log: opts.log,
         onProgress: (p) => {
           try {
@@ -80,7 +84,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
           systemPluginsRestored: false,
           error: `profilo ${profileId} non trovato o percorso istanza non configurato`,
         }
-      return purgeInstance(dir, { log: opts.log, allowHeuristic: true })
+      return purgeInstance(dir, { log: opts.log, allowHeuristic: opts.allowHeuristics?.() ?? true })
     } catch (e) {
       opts.log?.('warn', `deploy:purge errore inatteso: ${(e as Error).message}`)
       return {

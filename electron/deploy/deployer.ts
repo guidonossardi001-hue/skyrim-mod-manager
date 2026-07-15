@@ -7,6 +7,7 @@ import {
   linkSync,
   symlinkSync,
   unlinkSync,
+  renameSync,
   rmSync,
   rmdirSync,
   writeFileSync,
@@ -23,6 +24,7 @@ import {
   toDeployCategory,
   parseDeployManifest,
   DEPLOY_MANIFEST_FILE,
+  VANILLA_BACKUP_SUFFIX,
   type DeployManifest,
   type DeployMod,
 } from './plan'
@@ -98,6 +100,10 @@ export interface DeployOptions {
   // il deploy legge SOLO questa cache locale, mai la rete). Assente = nessuna regola/rank/dirty
   // aggiuntivi, comportamento identico a prima dell'integrazione LOOT.
   lootMasterlistCachePath?: string
+  // false = MAI pulizia euristica (nlink) senza manifest. OBBLIGATORIO false quando il target è
+  // la Data del GIOCO REALE: l'euristica è pensata per un'istanza dedicata, su una Data condivisa
+  // potrebbe toccare file non nostri. Default true (retro-compatibile con le istanze).
+  allowHeuristicCleanup?: boolean
 }
 
 // Throttle the linking phase so a 100k-file deploy doesn't flood the IPC channel:
@@ -269,6 +275,18 @@ function purgeByManifest(
     }
     const p = dirname(dir)
     if (p && p !== '.') parentDirs.add(p)
+  }
+  // Ripristina gli ORIGINALI preesistenti sostituiti dal deploy (target = Data del gioco
+  // reale): il file mod è già stato rimosso sopra, il `.smm-vanilla.bak` torna al suo nome.
+  for (const rel of manifest.backups ?? []) {
+    const abs = join(instanceDataDir, rel)
+    const bak = abs + VANILLA_BACKUP_SUFFIX
+    try {
+      if (existsSync(bak) && !existsSync(abs)) renameSync(toLongPath(bak), toLongPath(abs))
+      else if (existsSync(bak)) unlinkSync(toLongPath(bak)) // il posto è già rioccupato: il bak è residuo
+    } catch (e) {
+      log('warn', `ripristino originale "${rel}" fallito: ${(e as Error).message}`)
+    }
   }
   // Pota le directory rimaste vuote, dalle più profonde.
   const byDepth = [...parentDirs].sort((a, b) => b.split(/[\\/]/).length - a.split(/[\\/]/).length)
@@ -473,7 +491,10 @@ export async function deployInstance(
     try {
       if (existsSync(instanceDataDir)) {
         const purged = purgeByManifest(instanceDataDir, log)
-        if (!purged.manifestFound) cleanInstanceLinks(instanceDataDir)
+        // Fallback euristico SOLO dove consentito: su un'istanza dedicata è sicuro; sulla
+        // Data del GIOCO REALE (allowHeuristicCleanup=false) senza manifest NON si tocca nulla.
+        if (!purged.manifestFound && opts.allowHeuristicCleanup !== false)
+          cleanInstanceLinks(instanceDataDir)
       }
       mkdirSync(toLongPath(instanceDataDir), { recursive: true })
     } catch (e) {
@@ -498,17 +519,51 @@ export async function deployInstance(
         })
       }
     }
+    // Registro degli originali PREESISTENTI sostituiti (target = Data del gioco reale: file
+    // vanilla loose/SKSE/CC possono già occupare la destinazione). L'originale va in
+    // `<rel>.smm-vanilla.bak` e finisce nel manifest: il purge lo ripristina.
+    const backedUp: string[] = []
+    const extraLinkedRels: string[] = [] // file linkati fuori dal piano hardlinks (fallback junction)
+    const junctionRelsCreated: string[] = [] // SOLO le junction realmente nate (le degradate no)
+    const backupIfExists = (destAbs: string, rel: string): void => {
+      if (!existsSync(toLongPath(destAbs))) return
+      const bak = destAbs + VANILLA_BACKUP_SUFFIX
+      // Un .bak già presente è di un deploy precedente non purgato: NON sovrascriverlo
+      // (contiene l'originale vero); la destinazione attuale è un residuo nostro.
+      if (existsSync(toLongPath(bak))) unlinkSync(toLongPath(destAbs))
+      else renameSync(toLongPath(destAbs), toLongPath(bak))
+      backedUp.push(rel)
+    }
     try {
       for (const j of plan.junctions) {
         const dest = join(instanceDataDir, j.dir)
         mkdirSync(toLongPath(dirname(dest)), { recursive: true })
-        symlinkSync(j.src, dest, 'junction') // Windows directory junction (absolute target)
-        junctionsCreated++
+        try {
+          symlinkSync(j.src, dest, 'junction') // Windows directory junction (absolute target)
+          junctionsCreated++
+          junctionRelsCreated.push(j.dir)
+        } catch (e) {
+          // Directory già esistente nel target (es. Data/SKSE, Data/Video del gioco reale):
+          // la junction non può nascere — si degrada a hardlink file-per-file DENTRO quella
+          // directory, con backup degli eventuali originali. Manifest: file singoli, non junction.
+          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e
+          for (const rel of listFilesRel(j.src)) {
+            const fileRel = `${j.dir}/${rel}`
+            const fileDest = join(instanceDataDir, fileRel)
+            mkdirSync(toLongPath(dirname(fileDest)), { recursive: true })
+            backupIfExists(fileDest, fileRel)
+            linkSync(toLongPath(join(j.src, rel)), toLongPath(fileDest))
+            filesHardlinked++
+            extraLinkedRels.push(fileRel)
+          }
+          log('info', `junction "${j.dir}" degradata a hardlink (directory già presente nel target)`)
+        }
         emitLinking(j.dir)
       }
       for (const h of plan.hardlinks) {
         const dest = join(instanceDataDir, h.rel)
         mkdirSync(toLongPath(dirname(dest)), { recursive: true })
+        backupIfExists(dest, h.rel)
         linkSync(toLongPath(h.src), toLongPath(dest))
         filesHardlinked++
         emitLinking(h.rel)
@@ -526,7 +581,13 @@ export async function deployInstance(
     // rather than failing an otherwise-valid deploy.
     let ccFilesLinked = 0
     const ccLinkedRels: string[] = []
-    if (ccList.length) {
+    // Target = Data del gioco reale: i contenuti Creation Club sono GIÀ lì (la sorgente CC
+    // coincide col target) — nessun linking, ma ccPluginOrder resta per il plugins.txt.
+    const ccSameDir =
+      !!opts.stockGameDataDir &&
+      opts.stockGameDataDir.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase() ===
+        instanceDataDir.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+    if (ccList.length && !ccSameDir) {
       const modDest = new Set(plan.hardlinks.map((h) => h.rel.toLowerCase()))
       for (const f of ccList) {
         if (modDest.has(f.rel.toLowerCase())) continue // a mod patch overrides this CC file
@@ -578,8 +639,9 @@ export async function deployInstance(
     const manifest: DeployManifest = {
       version: 1,
       target: instanceDataDir,
-      junctions: plan.junctions.map((j) => j.dir),
-      files: [...plan.hardlinks.map((h) => h.rel), ...ccLinkedRels],
+      junctions: junctionRelsCreated, // solo quelle nate davvero (le degradate sono nei files)
+      files: [...plan.hardlinks.map((h) => h.rel), ...extraLinkedRels, ...ccLinkedRels],
+      backups: backedUp.length ? backedUp : undefined,
       pluginsTxt: pluginsPath,
       systemPluginsTxt,
     }

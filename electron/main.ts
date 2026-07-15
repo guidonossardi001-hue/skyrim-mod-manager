@@ -624,9 +624,20 @@ app.whenReady().then(() => {
   // Deploy/virtualization engine: links the enabled mods of a profile into its
   // instance Data folder (hardlinks + junctions). The instance root lives on the
   // SAME volume as modsRoot (default under userData) so hardlinks are valid.
+  // DIRETTIVA (2026-07-15): senza MO2/VFS il gioco lanciato via SKSE vede SOLO la sua Data.
+  // deployTarget 'game' (default) linka le mod direttamente in <gioco>/Data col manifest
+  // esatto (originali preesistenti salvati in .smm-vanilla.bak, purge li ripristina);
+  // 'instance' resta disponibile per debug/ispezione senza toccare il gioco.
+  const resolveGameDataDir = (): string | null => {
+    const gp = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+    return gp ? join(gp, 'Data') : null
+  }
+  const deployTargetIsGame = () => ((store.get('deployTarget') as string | undefined) ?? 'game') === 'game'
+
   initDeployEngine({
     db: requireDb(),
     resolveInstanceDataDir: (profileId) => {
+      if (deployTargetIsGame()) return resolveGameDataDir()
       const prof = getRawDb().prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
         | { name: string }
         | undefined
@@ -636,8 +647,12 @@ app.whenReady().then(() => {
       const safe = sanitizePathSegment(prof.name, 'profile')
       return join(instanceRoot, safe, 'Data')
     },
-    // Creation Club "System DLC" source: the isolated StockGame's Data folder.
-    resolveStockGameDataDir: () => join(resolveStockTarget(), 'Data'),
+    // Sorgente Creation Club: col target 'game' i CC sono GIÀ nella Data del gioco (il deployer
+    // salta il linking ma usa l'ordine CC per plugins.txt); col target istanza, StockGame/Data.
+    resolveStockGameDataDir: () =>
+      deployTargetIsGame() ? resolveGameDataDir() : join(resolveStockTarget(), 'Data'),
+    // Sulla Data del gioco reale l'euristica nlink è VIETATA: solo purge da manifest.
+    allowHeuristics: () => !deployTargetIsGame(),
     // plugins.txt DI SISTEMA: %LOCALAPPDATA%/Skyrim Special Edition — è quello che il gioco legge
     // quando parte via SKSE diretto (senza MO2). Scritto solo se la cartella esiste già (gioco
     // installato/avviato almeno una volta): non creiamo alberi in LOCALAPPDATA al buio.

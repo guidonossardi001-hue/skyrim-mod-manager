@@ -360,9 +360,16 @@ export interface DeployManifest {
   target: string // instance Data dir del deploy
   junctions: string[] // dir Data-relative junctionate
   files: string[] // file Data-relative hardlinkati (mod + Creation Club)
+  /** File PREESISTENTI nel target sostituiti da una mod: l'originale è stato rinominato in
+   *  `<rel>.smm-vanilla.bak` e il purge lo ripristina. Serve quando il target è la Data del
+   *  GIOCO REALE (file vanilla/CC/SKSE loose), mai su un'istanza vuota. */
+  backups?: string[]
   pluginsTxt?: string // percorso assoluto del plugins.txt d'istanza scritto
   systemPluginsTxt?: string // percorso assoluto del plugins.txt di sistema (%LOCALAPPDATA%) scritto
 }
+
+/** Suffisso dei backup degli originali sostituiti (vedi DeployManifest.backups). */
+export const VANILLA_BACKUP_SUFFIX = '.smm-vanilla.bak'
 
 /** Parse difensivo del manifest letto da disco: qualsiasi forma inattesa → null (mai throw). */
 export function parseDeployManifest(raw: string): DeployManifest | null {
@@ -375,6 +382,9 @@ export function parseDeployManifest(raw: string): DeployManifest | null {
       target: m.target,
       junctions: m.junctions.filter((x): x is string => typeof x === 'string'),
       files: m.files.filter((x): x is string => typeof x === 'string'),
+      backups: Array.isArray(m.backups)
+        ? m.backups.filter((x): x is string => typeof x === 'string')
+        : undefined,
       pluginsTxt: typeof m.pluginsTxt === 'string' ? m.pluginsTxt : undefined,
       systemPluginsTxt: typeof m.systemPluginsTxt === 'string' ? m.systemPluginsTxt : undefined,
     }
