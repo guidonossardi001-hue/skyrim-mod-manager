@@ -160,10 +160,18 @@ describe('installManager.runInstall (delegates to InstallerService)', () => {
   })
 
   it('CAP: runs at most `concurrency` installs at once, queues the excess, promotes on free slot', async () => {
+    // Un archivio PER download (come in produzione): dal fix "politica spazio", l'install
+    // riuscita ELIMINA il proprio archivio — un file condiviso tra righe farebbe fallire
+    // not-found il download promosso dopo il primo success.
+    const archives = [1, 2, 3].map((n) => {
+      const p = join(dir, `a${n}.bin`)
+      writeFileSync(p, 'bytes')
+      return p
+    })
     const ids = [
-      seedDownload({ nexus_id: 1, file_hash: archiveHash }),
-      seedDownload({ nexus_id: 2, file_hash: archiveHash }),
-      seedDownload({ nexus_id: 3, file_hash: archiveHash }),
+      seedDownload({ nexus_id: 1, file_hash: archiveHash, file_path: archives[0] }),
+      seedDownload({ nexus_id: 2, file_hash: archiveHash, file_path: archives[1] }),
+      seedDownload({ nexus_id: 3, file_hash: archiveHash, file_path: archives[2] }),
     ]
     const gates = [deferred(), deferred(), deferred()]
     let started = 0

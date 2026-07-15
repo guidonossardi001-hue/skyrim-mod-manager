@@ -225,8 +225,25 @@ export function initDownloadManager(
     const confirmed = row.nexus_id
       ? await nexusMd5Confirms(md5, { modId: row.nexus_id, fileId: row.file_id ?? null })
       : null
-    const decision = decideIntegrity({ expected: null, computed: { md5 }, md5SearchConfirmed: confirmed })
+    // Provenienza API: l'URL di QUESTO download è stato generato dal resolver ufficiale
+    // (download_link.json per la coppia nexus_id+file_id — stessa condizione di resolveUrl:
+    // niente URL diretto utilizzabile). Nexus stesso ha servito il file per quegli id:
+    // l'indice md5_search incompleto non può bocciarlo (caso reale: PapyrusUtil AE, LOTD
+    // patch della collection Opoal). Un URL diretto arbitrario resta fail-closed.
+    const directUrlUsable = !!row.url && /^https?:\/\//i.test(row.url) && !/nexusmods\.com\/.*\/mods\/\d+\/?$/i.test(row.url)
+    const viaApi = !directUrlUsable && !!row.nexus_id && !!row.file_id
+    const decision = decideIntegrity({
+      expected: null,
+      computed: { md5 },
+      md5SearchConfirmed: confirmed,
+      apiResolvedProvenance: viaApi,
+    })
     if (decision.ok) {
+      if (decision.verifiedBy === 'api-provenance')
+        logger.warn(
+          'download',
+          `"${row.name}": md5_search non indicizza il file — accettato per provenienza API (mod ${row.nexus_id}, file ${row.file_id}); md5 registrato per le verifiche future`,
+        )
       // Persist the now-authoritative md5 so a re-check / cache-hit verifies locally & offline.
       try {
         db.prepare("UPDATE downloads SET file_hash=?, hash_algo='md5' WHERE id=?").run(md5, row.id)

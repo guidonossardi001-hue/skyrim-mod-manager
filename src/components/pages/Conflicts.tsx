@@ -1,3 +1,4 @@
+import { useState, useMemo } from 'react'
 import { useAppStore } from '@/store/appStore'
 import {
   AlertTriangle,
@@ -8,13 +9,69 @@ import {
   Zap,
   ArrowUp,
   PowerOff,
+  Layers,
+  ArrowLeftRight,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { toast } from '@/lib/toast'
 import type { ConflictInfo } from '@/types'
 
 export default function Conflicts() {
-  const { conflicts, mods, detectConflicts, resolveConflict, setActivePage } = useAppStore()
+  const { conflicts, mods, detectConflicts, resolveConflict, setActivePage, activeProfileId } = useAppStore()
+
+  // ── Sovrascritture REALI dal piano di deploy (dry-run, zero scritture) ──────────────
+  // Risoluzione avanzata: niente disattivazione — la mod scelta riceve un resolution_weight
+  // superiore e VINCE i file contesi al prossimo deploy (regole categoria/peso/priorità).
+  const [preview, setPreview] = useState<Awaited<ReturnType<typeof window.api.deploy.preview>> | null>(null)
+  const [previewBusy, setPreviewBusy] = useState(false)
+  const [preferBusy, setPreferBusy] = useState<string | null>(null)
+
+  const runPreview = async () => {
+    if (activeProfileId == null) return
+    setPreviewBusy(true)
+    try {
+      const r = await window.api.deploy.preview(activeProfileId)
+      setPreview(r)
+      if (!r.ok) toast.error('Analisi conflitti fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Analisi conflitti fallita', (e as Error).message)
+    } finally {
+      setPreviewBusy(false)
+    }
+  }
+
+  // Raggruppa i conflitti file per coppia vincitore→perdente (una riga per coppia).
+  const conflictPairs = useMemo(() => {
+    if (!preview?.ok || !preview.conflicts?.length) return []
+    const byPair = new Map<string, { winner: string; loser: string; files: string[] }>()
+    for (const c of preview.conflicts) {
+      const key = `${c.winner}→${c.loser}`
+      const e = byPair.get(key) ?? { winner: c.winner, loser: c.loser, files: [] }
+      e.files.push(c.file)
+      byPair.set(key, e)
+    }
+    return [...byPair.values()].sort((a, b) => b.files.length - a.files.length)
+  }, [preview])
+
+  const preferLoser = async (pair: { winner: string; loser: string; files: string[] }) => {
+    if (activeProfileId == null) return
+    const key = `${pair.winner}→${pair.loser}`
+    setPreferBusy(key)
+    try {
+      const r = await window.api.deploy.prefer(activeProfileId, pair.loser, pair.winner)
+      if (r.ok) {
+        toast.success(
+          'Precedenza invertita',
+          `"${pair.loser}" ora vince su "${pair.winner}" (${pair.files.length} file) — attivo dal prossimo Deploy`,
+        )
+        await runPreview() // il piano ricalcolato riflette subito la scelta
+      } else toast.error('Inversione fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Inversione fallita', (e as Error).message)
+    } finally {
+      setPreferBusy(null)
+    }
+  }
 
   const errors = conflicts.filter((c) => c.severity === 'error')
   const warnings = conflicts.filter((c) => c.severity === 'warning')
@@ -92,6 +149,87 @@ export default function Conflicts() {
           <p className="text-sm text-white/70 mt-1">Mod senza conflitti</p>
           <p className="text-xs text-dark-400">Compatibili e attive</p>
         </div>
+      </div>
+
+      {/* Sovrascritture REALI dal piano di deploy: risoluzione avanzata senza disattivare —
+          la mod scelta vince i file contesi alzandone il peso (attivo dal prossimo Deploy). */}
+      <div className="card p-5 mb-6">
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="font-semibold text-white/80 flex items-center gap-2 text-sm">
+            <Layers size={15} className="text-void-400" /> Sovrascritture file (piano di deploy)
+          </h3>
+          <button
+            onClick={runPreview}
+            disabled={previewBusy || activeProfileId == null}
+            className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={previewBusy ? 'animate-spin' : ''} />
+            {previewBusy ? 'Analisi…' : 'Analizza conflitti reali'}
+          </button>
+        </div>
+        <p className="text-xs text-dark-400 mb-3">
+          Dry-run del piano: per ogni coppia in conflitto vedi chi vince oggi (regole
+          categoria/peso/priorità) e puoi <b>invertire la precedenza</b> senza disattivare nulla.
+        </p>
+        {preview?.ok && (
+          <div className="flex flex-wrap items-center gap-3 text-xs text-dark-300 mb-3">
+            <span>{preview.modsScanned} mod analizzate</span>
+            <span>·</span>
+            <span>{preview.conflicts?.length ?? 0} file in conflitto ({conflictPairs.length} coppie)</span>
+            {preview.pluginBudget && (
+              <>
+                <span>·</span>
+                <span
+                  className={clsx(
+                    preview.pluginBudget.full > preview.pluginBudget.maxFull - 14
+                      ? 'text-orange-300'
+                      : 'text-dark-300',
+                  )}
+                >
+                  Slot plugin: {preview.pluginBudget.full}/{preview.pluginBudget.maxFull} full ·{' '}
+                  {preview.pluginBudget.light} light
+                </span>
+              </>
+            )}
+          </div>
+        )}
+        {preview?.ok && preview.loadOrderIssue && (
+          <div className="flex items-start gap-2 rounded-lg bg-red-900/20 border border-red-900/40 px-3 py-2 mb-3 text-xs text-red-300">
+            <AlertCircle size={14} className="flex-shrink-0 mt-0.5" />
+            {preview.loadOrderIssue}
+          </div>
+        )}
+        {preview?.ok && conflictPairs.length === 0 && (
+          <p className="text-xs text-green-400">Nessuna sovrascrittura contesa: ogni file ha un solo fornitore.</p>
+        )}
+        {conflictPairs.length > 0 && (
+          <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+            {conflictPairs.map((p) => {
+              const key = `${p.winner}→${p.loser}`
+              return (
+                <div key={key} className="flex items-center gap-3 p-2.5 rounded-lg border border-dark-800">
+                  <div className="flex-1 min-w-0 text-xs">
+                    <p className="text-white/85 truncate">
+                      <span className="text-green-400 font-medium">{p.winner}</span>
+                      <span className="text-dark-500"> sovrascrive </span>
+                      <span className="text-dark-300">{p.loser}</span>
+                    </p>
+                    <p className="text-dark-500">{p.files.length} file contesi · es. {p.files[0]}</p>
+                  </div>
+                  <button
+                    onClick={() => preferLoser(p)}
+                    disabled={preferBusy !== null}
+                    title={`Al prossimo Deploy "${p.loser}" fornirà i file contesi al posto di "${p.winner}"`}
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50"
+                  >
+                    <ArrowLeftRight size={12} className={preferBusy === key ? 'animate-pulse' : ''} />
+                    Inverti precedenza
+                  </button>
+                </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {conflicts.length === 0 ? (

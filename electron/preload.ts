@@ -218,6 +218,11 @@ contextBridge.exposeInMainWorld('api', {
     // Purge manifest-based: rimuove gli hardlink/junction creati dal deploy e ripristina il
     // plugins.txt di sistema dal backup. L'istanza torna vuota, le sorgenti mai toccate.
     purge: (profileId: number) => invoke('deploy:purge', profileId),
+    // Dry-run: conflitti file reali (winner/loser del planner) + budget plugin, zero scritture.
+    preview: (profileId: number) => invoke('deploy:preview', profileId),
+    // Risoluzione avanzata: la mod preferita vince i file contesi (peso avversaria+1).
+    prefer: (profileId: number, preferredMod: string, overMod: string) =>
+      invoke('deploy:prefer', profileId, preferredMod, overMod),
     // Subscribe to streamed progress. Returns an unsubscribe function so the
     // renderer can detach the listener (avoids leaks across re-renders/unmounts).
     onProgress: (callback: (p: unknown) => void) => {

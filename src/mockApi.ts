@@ -780,6 +780,15 @@ export const mockApi = {
       systemPluginsRestored: true,
     }),
     onProgress: (_cb: unknown) => () => {},
+    preview: async (_profileId: number) => ({
+      ok: true as const,
+      modsScanned: state.mods.filter((m) => m.is_enabled).length,
+      conflicts: [],
+      pluginBudget: { full: 12, light: 3, maxFull: 254 },
+      loadOrderIssue: null,
+      warnings: [],
+    }),
+    prefer: async () => ({ ok: false as const, error: 'Risoluzione conflitti disponibile solo nell’app desktop' }),
   },
 
   masterlist: {

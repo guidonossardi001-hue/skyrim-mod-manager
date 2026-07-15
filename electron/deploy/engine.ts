@@ -1,6 +1,13 @@
 import { ipcMain } from 'electron'
 import type { SqliteDb } from '../db/sqlite'
-import { deployInstance, purgeInstance, type DeployResult, type PurgeResult } from './deployer'
+import {
+  deployInstance,
+  purgeInstance,
+  previewDeploy,
+  type DeployResult,
+  type PurgeResult,
+  type DeployPreview,
+} from './deployer'
 
 // Thin ipcMain wrapper around deployInstance (same shape as catalog/engine.ts and
 // install/engine.ts). Path resolution (profileId → instance Data dir) is injected
@@ -97,6 +104,48 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         systemPluginsRestored: false,
         error: (e as Error).message,
       }
+    }
+  })
+
+  // deploy:prefer = risoluzione avanzata di una sovrascrittura SENZA disattivare nulla:
+  // la mod scelta riceve resolution_weight = peso dell'avversaria + 1, così il planner
+  // (categoria/peso/priorità) le fa vincere i file contesi al prossimo deploy. Chirurgico,
+  // persistente e reversibile (basta preferire l'altra).
+  ipcMain.handle(
+    'deploy:prefer',
+    (_e, profileId: number, preferredMod: string, overMod: string): { ok: boolean; newWeight?: number; error?: string } => {
+      try {
+        const get = opts.db.prepare(
+          'SELECT resolution_weight FROM mods WHERE profile_id=? AND name=?',
+        )
+        const other = get.get(profileId, overMod) as { resolution_weight: number | null } | undefined
+        const mine = get.get(profileId, preferredMod) as { resolution_weight: number | null } | undefined
+        if (!other || !mine) return { ok: false, error: 'mod non trovata nel profilo' }
+        const newWeight = Math.max(mine.resolution_weight ?? 0, (other.resolution_weight ?? 0) + 1)
+        opts.db
+          .prepare('UPDATE mods SET resolution_weight=? WHERE profile_id=? AND name=?')
+          .run(newWeight, profileId, preferredMod)
+        opts.log?.('info', `conflitti: "${preferredMod}" ora vince su "${overMod}" (peso ${newWeight})`)
+        return { ok: true, newWeight }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    },
+  )
+
+  // deploy:preview = dry-run: conflitti file REALI (winner/loser dalle regole del planner),
+  // budget plugin e problemi di load order — ZERO scritture. Alimenta la pagina Conflitti.
+  ipcMain.handle('deploy:preview', (_e, profileId: number): DeployPreview => {
+    try {
+      return previewDeploy(opts.db, {
+        profileId,
+        stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
+        masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
+        lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
+      })
+    } catch (e) {
+      opts.log?.('warn', `deploy:preview errore inatteso: ${(e as Error).message}`)
+      return { ok: false, error: (e as Error).message }
     }
   })
 }

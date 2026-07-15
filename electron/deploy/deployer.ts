@@ -376,6 +376,100 @@ export function purgeInstance(
   }
 }
 
+/** Query condivisa deploy/preview: mod abilitate+installate con cartella, in ordine di priorità. */
+function queryDeployRows(db: SqliteDb, profileId?: number): ModRow[] {
+  const where = ['is_enabled=1', 'is_installed=1', 'install_path IS NOT NULL']
+  const params: unknown[] = []
+  if (profileId != null) {
+    where.push('profile_id=?')
+    params.push(profileId)
+  }
+  // Conflict-resolution columns (migration v8) are selected only when present, so
+  // the deployer still runs against a pre-v8 / partial schema (falls back to priority).
+  const hasMeta = columnExists(db, 'mods', 'deploy_category')
+  const hasNexus = columnExists(db, 'mods', 'nexus_id')
+  const cols = `name, priority, install_path${hasNexus ? ', nexus_id' : ''}${hasMeta ? ', deploy_category, resolution_weight' : ''}`
+  return db
+    .prepare(`SELECT ${cols} FROM mods WHERE ${where.join(' AND ')} ORDER BY priority ASC, name ASC`)
+    .all(...params) as ModRow[]
+}
+
+/** Budget slot del motore: 5 master base + CC (estensione) + mod (flag reali TES4). */
+function computePluginBudget(
+  ccNames: string[],
+  slots: { full: number; light: number },
+): { full: number; light: number; maxFull: number } {
+  const ccFull = ccNames.filter((n) => !n.toLowerCase().endsWith('.esl')).length
+  return {
+    full: BASE_MASTERS.length + ccFull + slots.full,
+    light: ccNames.length - ccFull + slots.light,
+    maxFull: 254,
+  }
+}
+
+// ── Dry-run del deploy: conflitti reali + budget plugin, ZERO scritture ─────────────────────
+// Alimenta la pagina Conflitti con le sovrascritture VERE del piano (winner/loser dalle regole
+// categoria/peso/priorità) — la risoluzione avanzata alza resolution_weight della mod scelta,
+// mai una disattivazione. Stessa query e stesso planner del deploy reale: ciò che vedi è ciò
+// che il deploy farà.
+export interface DeployPreview {
+  ok: boolean
+  modsScanned?: number
+  conflicts?: { file: string; winner: string; loser: string }[]
+  pluginBudget?: { full: number; light: number; maxFull: number }
+  loadOrderIssue?: string | null
+  warnings?: string[]
+  error?: string
+}
+
+export function previewDeploy(
+  db: SqliteDb,
+  opts: Pick<DeployOptions, 'profileId' | 'stockGameDataDir' | 'masterlistPath' | 'lootMasterlistCachePath'> = {},
+): DeployPreview {
+  try {
+    const rows = queryDeployRows(db, opts.profileId)
+    if (!rows.length) return { ok: false, error: 'nessuna mod abilitata da analizzare' }
+    const mods: DeployMod[] = []
+    for (const r of rows) {
+      if (!existsSync(r.install_path)) return { ok: false, error: `cartella mod assente: ${r.install_path}` }
+      mods.push({
+        name: r.name,
+        priority: r.priority,
+        rootDir: r.install_path,
+        files: listFilesRel(r.install_path),
+        category: toDeployCategory(r.deploy_category),
+        resolutionWeight: typeof r.resolution_weight === 'number' ? r.resolution_weight : undefined,
+      })
+    }
+    const plan = computeDeployPlan(mods)
+    const nexusIdOf = new Map<string, number>()
+    for (const r of rows)
+      if (typeof r.nexus_id === 'number' && Number.isInteger(r.nexus_id) && r.nexus_id > 0)
+        nexusIdOf.set(r.name, r.nexus_id)
+    const ccNames = ccPluginOrder(detectCreationClub(opts.stockGameDataDir))
+    const lootCache = loadMasterlistCache(opts.lootMasterlistCachePath)
+    const ordered = orderPluginsLoot(plan.plugins, nexusIdOf, catalogRequires(db), {
+      externalMasters: ccNames,
+      rules: [...loadMasterlist(opts.masterlistPath), ...(lootCache?.rules ?? [])],
+      groupRankByPattern: lootCache?.groupRankByPattern,
+    })
+    return {
+      ok: true,
+      modsScanned: rows.length,
+      conflicts: plan.resolvedConflicts,
+      pluginBudget: ordered.ok ? computePluginBudget(ccNames, ordered.slots) : undefined,
+      loadOrderIssue: ordered.ok
+        ? null
+        : ordered.kind === 'dependency-cycle'
+          ? `Ciclo di dipendenze: ${ordered.cycle.join(' → ')}`
+          : `Master mancanti: ${ordered.missing.map((m) => `${m.plugin} richiede ${m.masters.join(', ')}`).join('; ')}`,
+      warnings: ordered.warnings,
+    }
+  } catch (e) {
+    return { ok: false, error: (e as Error).message }
+  }
+}
+
 export async function deployInstance(
   db: SqliteDb,
   instanceDataDir: string,
@@ -385,22 +479,7 @@ export async function deployInstance(
   const emit = opts.onProgress ?? (() => {})
   try {
     // 1) Enabled + installed mods with a deployed folder, in priority order.
-    const where = ['is_enabled=1', 'is_installed=1', 'install_path IS NOT NULL']
-    const params: unknown[] = []
-    if (opts.profileId != null) {
-      where.push('profile_id=?')
-      params.push(opts.profileId)
-    }
-    // Conflict-resolution columns (migration v8) are selected only when present, so
-    // the deployer still runs against a pre-v8 / partial schema (falls back to priority).
-    const hasMeta = columnExists(db, 'mods', 'deploy_category')
-    const hasNexus = columnExists(db, 'mods', 'nexus_id')
-    const cols = `name, priority, install_path${hasNexus ? ', nexus_id' : ''}${hasMeta ? ', deploy_category, resolution_weight' : ''}`
-    const rows = db
-      .prepare(
-        `SELECT ${cols} FROM mods WHERE ${where.join(' AND ')} ORDER BY priority ASC, name ASC`,
-      )
-      .all(...params) as ModRow[]
+    const rows = queryDeployRows(db, opts.profileId)
 
     if (rows.length === 0) return { success: false, errorKind: 'no-mods', error: 'nessuna mod abilitata da distribuire' }
 
@@ -491,23 +570,18 @@ export async function deployInstance(
     // (ESM/ESP non-light, base game INCLUSO) e 4096 light (FE). Oltre il limite full il
     // load crasha: BLOCCO. Vicino al limite: warn. Conteggio: 5 master base + CC per
     // estensione (.esl light, .esm/.esp full) + mod dai FLAG REALI degli header TES4.
-    const MAX_FULL = 254
-    const ccNames = ccPluginOrder(ccPackages)
-    const ccFull = ccNames.filter((n) => !n.toLowerCase().endsWith('.esl')).length
-    const fullTotal = BASE_MASTERS.length + ccFull + orderedPlugins.slots.full
-    const lightTotal = ccNames.length - ccFull + orderedPlugins.slots.light
-    const pluginBudget = { full: fullTotal, light: lightTotal, maxFull: MAX_FULL }
-    if (fullTotal > MAX_FULL) {
-      log('warn', `deploy BLOCCATO: ${fullTotal} plugin FULL > limite motore ${MAX_FULL}`)
+    const pluginBudget = computePluginBudget(ccPluginOrder(ccPackages), orderedPlugins.slots)
+    if (pluginBudget.full > pluginBudget.maxFull) {
+      log('warn', `deploy BLOCCATO: ${pluginBudget.full} plugin FULL > limite motore ${pluginBudget.maxFull}`)
       return {
         success: false,
         errorKind: 'plugin-limit',
         pluginBudget,
-        error: `Troppi plugin FULL: ${fullTotal} su un massimo di ${MAX_FULL} (base ${BASE_MASTERS.length} + CC ${ccFull} + mod ${orderedPlugins.slots.full}). Il gioco crasherebbe al caricamento: disabilita alcune mod ESP/ESM o usa versioni ESL-flagged, poi riprova. I ${lightTotal} plugin light non contano in questo limite.`,
+        error: `Troppi plugin FULL: ${pluginBudget.full} su un massimo di ${pluginBudget.maxFull} (i ${pluginBudget.light} light non contano). Il gioco crasherebbe al caricamento: disabilita alcune mod ESP/ESM o usa versioni ESL-flagged, poi riprova.`,
       }
     }
-    if (fullTotal > MAX_FULL - 14)
-      log('warn', `budget plugin quasi esaurito: ${fullTotal}/${MAX_FULL} slot FULL occupati (light: ${lightTotal})`)
+    if (pluginBudget.full > pluginBudget.maxFull - 14)
+      log('warn', `budget plugin quasi esaurito: ${pluginBudget.full}/${pluginBudget.maxFull} slot FULL (light: ${pluginBudget.light})`)
 
     // 4) Purge del deploy precedente. MANIFEST-first (rimozione esatta di ciò che ABBIAMO creato);
     // solo in sua assenza si ricade sull'euristica nlink — sicura su un'istanza dedicata, MAI da

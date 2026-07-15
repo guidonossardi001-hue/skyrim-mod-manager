@@ -173,6 +173,10 @@ const MOD_COLUMNS = new Set([
   'thumbnail_url',
   'nexus_file_id',
   'file_hash',
+  // Risoluzione conflitti avanzata: la pagina Conflitti alza il peso della mod che deve
+  // vincere una sovrascrittura (il planner usa categoria/peso/priorità) — mai disattivare.
+  'resolution_weight',
+  'deploy_category',
 ])
 const PROFILE_COLUMNS = new Set(['name', 'description', 'game_path', 'mo2_path'])
 const DOWNLOAD_COLUMNS = new Set([
@@ -592,6 +596,9 @@ app.whenReady().then(() => {
       onError: (id, err) => onDeltaDownloadFailed(requireDb(), id, err),
     },
     installConcurrency,
+    // Politica spazio: default elimina l'archivio a install riuscita; keepArchives=true in
+    // config la disattiva (cache stile Nolvus, al costo di ~raddoppiare l'occupazione disco).
+    { deleteArchiveAfterInstall: () => store.get('keepArchives') !== true },
   )
   downloadQueue = initDownloadManager(getRawDb(), () => mainWindow, {
     store,

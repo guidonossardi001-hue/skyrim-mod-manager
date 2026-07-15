@@ -458,6 +458,22 @@ declare global {
           systemPluginsRestored: boolean
           error?: string
         }>
+        // Dry-run: conflitti file reali + budget plugin + problemi load order, zero scritture.
+        preview(profileId: number): Promise<{
+          ok: boolean
+          modsScanned?: number
+          conflicts?: { file: string; winner: string; loser: string }[]
+          pluginBudget?: { full: number; light: number; maxFull: number }
+          loadOrderIssue?: string | null
+          warnings?: string[]
+          error?: string
+        }>
+        // Risoluzione avanzata: preferredMod vince i file contesi con overMod (peso+1).
+        prefer(
+          profileId: number,
+          preferredMod: string,
+          overMod: string,
+        ): Promise<{ ok: boolean; newWeight?: number; error?: string }>
         // Streamed progress. Mirrors DeployProgress in electron/deploy/deployer.ts.
         // Returns an unsubscribe function — call it on unmount to detach the listener.
         onProgress(

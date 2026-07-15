@@ -1,5 +1,5 @@
 import { BrowserWindow, ipcMain } from 'electron'
-import { existsSync } from 'fs'
+import { existsSync, unlinkSync, statSync } from 'fs'
 import Database from 'better-sqlite3'
 import { logger } from './logger'
 import { columnExists } from './db/sqlite'
@@ -78,6 +78,12 @@ export function initInstallManager(
   installer: InstallerService,
   hooks?: InstallHooks,
   concurrency: number = DEFAULT_INSTALL_CONCURRENCY,
+  opts: {
+    // true (default per policy spazio): l'archivio si elimina a install riuscita — la mod
+    // estratta È il dato, l'archivio è ricomprabile (Premium re-download). Su una collection
+    // reale la cache degli archivi raddoppia l'occupazione (74GB osservati su 156GB estratti).
+    deleteArchiveAfterInstall?: () => boolean
+  } = {},
 ) {
   function send(channel: string, payload: Record<string, unknown>) {
     win()?.webContents.send(channel, payload)
@@ -189,6 +195,20 @@ export function initInstallManager(
         markInstalled(db, row.mod_id, nexusId, res.modPath ?? null)
       }
       db.prepare("UPDATE downloads SET status='completed' WHERE id=?").run(downloadId)
+      // Politica spazio: archivio eliminato a estrazione riuscita (la mod estratta È il dato;
+      // un re-install riscarica via Premium). file_path azzerato: la coda sa che non c'è cache.
+      if (opts.deleteArchiveAfterInstall?.() !== false && row.file_path) {
+        try {
+          if (existsSync(row.file_path)) {
+            const bytes = statSync(row.file_path).size
+            unlinkSync(row.file_path)
+            db.prepare('UPDATE downloads SET file_path=NULL WHERE id=?').run(downloadId)
+            logger.info('install', `archivio eliminato dopo install: "${row.name}" (${Math.round(bytes / 1024 / 1024)} MB liberati)`)
+          }
+        } catch (e) {
+          logger.warn('install', `archivio non eliminato (${(e as Error).message}) — resta in cache`)
+        }
+      }
       logger.info(
         'install',
         `Installato "${row.name}" → ${res.modPath} (${res.strategy}/${res.recipeSource}, ${res.filesDeployed} file, ${res.method})`,

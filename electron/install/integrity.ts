@@ -62,19 +62,25 @@ export function md5SearchConfirms(resp: unknown, want: { modId: number; fileId: 
 }
 
 export type IntegrityDecision =
-  | { ok: true; verifiedBy: 'expected-hash' | 'md5-search' }
+  | { ok: true; verifiedBy: 'expected-hash' | 'md5-search' | 'api-provenance' }
   | { ok: false; reason: string }
 
 /**
- * The gate verdict, pure over already-computed inputs. Fail-closed by construction: the only
- * ways to pass are a matching trusted hash, or an authoritative md5_search confirmation.
+ * The gate verdict, pure over already-computed inputs. Fail-closed by construction: the ways
+ * to pass are a matching trusted hash, an authoritative md5_search confirmation, or — SOLO in
+ * assenza di hash atteso — la provenienza dal resolver API ufficiale Nexus (download_link.json
+ * chiamato con la coppia (modId, fileId) esatta su TLS con API key: è Nexus stesso a servire
+ * il file per quegli id; l'indice md5_search è notoriamente incompleto per file recenti e un
+ * suo miss non può bocciare un file che Nexus ha appena consegnato per quella coppia).
+ * Un URL diretto/arbitrario NON gode di questa fiducia e resta fail-closed come prima.
  */
 export function decideIntegrity(input: {
   expected: ExpectedHash | null
   computed: { md5?: string | null; sha256?: string | null }
   md5SearchConfirmed?: boolean | null // null = not attempted / unavailable
+  apiResolvedProvenance?: boolean // true = URL generato dal resolver API per (modId, fileId)
 }): IntegrityDecision {
-  const { expected, computed, md5SearchConfirmed } = input
+  const { expected, computed, md5SearchConfirmed, apiResolvedProvenance } = input
   if (expected) {
     const got = expected.algo === 'md5' ? computed.md5 : computed.sha256
     if (!got) return { ok: false, reason: `digest ${expected.algo} non calcolato` }
@@ -85,8 +91,10 @@ export function decideIntegrity(input: {
           reason: `hash ${expected.algo} non corrisponde (atteso ${expected.value.slice(0, 12)}…, ottenuto ${got.slice(0, 12)}…)`,
         }
   }
-  // No trusted local hash → fail-closed unless Nexus md5_search authoritatively confirms provenance.
+  // No trusted local hash → md5_search authoritative confirmation…
   if (md5SearchConfirmed === true) return { ok: true, verifiedBy: 'md5-search' }
+  // …oppure provenienza dal canale API autenticato (il chiamante logga il declassamento).
+  if (apiResolvedProvenance === true) return { ok: true, verifiedBy: 'api-provenance' }
   return {
     ok: false,
     reason: 'integrità non verificabile: nessun hash di riferimento e md5_search non conferma la provenienza',
