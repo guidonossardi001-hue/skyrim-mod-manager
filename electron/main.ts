@@ -22,7 +22,7 @@ import { recoverOnStartup } from './delta/journal'
 import { parseNxmUrl, findNxmUrl, createNxmDownload, validateNxmLink, type NxmLink } from './nexus/nxm'
 import { NxmConsentStore } from './nexus/nxmConsent'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
-import { detectSteamEnv } from './steam/detect'
+import { detectSteamEnv, detectSkse } from './steam/detect'
 import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
 import { runCompatReport } from './launch/compat'
 import { getLoadOrder, saveLoadOrder } from './pluginManager'
@@ -88,9 +88,11 @@ import { resolveDownloadLink } from './nexus/downloadLink'
 import {
   parseCollectionInput,
   fetchCollectionRevision,
+  fetchRevisionDownloadLink,
   buildCatalogRowsFromCollection,
   type CollectionRevisionResult,
 } from './nexus/collections'
+import { initFomodEngine } from './fomod/engine'
 import { axiosGet, axiosJson, axiosPostJson, axiosText } from './http/axiosAdapters'
 import { initMasterlistEngine } from './plugins/masterlistEngine'
 import { MASTERLIST_CACHE_FILE } from './plugins/masterlistCache'
@@ -698,6 +700,45 @@ app.whenReady().then(() => {
     resolveGameRoot: () =>
       detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null,
     log: (level, msg) => (level === 'warn' ? logger.warn('enb', msg) : logger.info('enb', msg)),
+  })
+
+  // Installer FOMOD headless (motore ufficiale Vortex) + scelte del curatore della collection:
+  // le 235 mod estratte flat con ModuleConfig.xml diventano il layout Data-relative corretto.
+  initFomodEngine({
+    db: requireDb(),
+    resolveModsRoot: () => (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'),
+    resolveChoicesDir: () => join(app.getPath('userData'), 'collection-manifest'),
+    getApiKey: () => readSecret('nexusApiKey') || undefined,
+    getCollectionRef: () => ({
+      slug: (store.get('collectionSlug') as string | undefined) ?? null,
+      revision: (store.get('collectionRevision') as number | undefined) ?? null,
+    }),
+    fetchRevisionDownloadLink: (slug, revision, apiKey) =>
+      fetchRevisionDownloadLink(axiosPostJson, { slug, revision, apiKey }),
+    downloadToFile: async (url, destPath, apiKey) => {
+      const axios = (await import('axios')).default
+      const res = await axios.get(url, {
+        responseType: 'arraybuffer',
+        headers: { apikey: apiKey, 'User-Agent': 'SkyrimAEModManager/1.0' },
+        maxContentLength: 512 * 1024 * 1024,
+      })
+      writeFileSync(destPath, Buffer.from(res.data as ArrayBuffer))
+    },
+    bundled7zaPath: bundled7zaPath(),
+    full7zPath: resolveRar7z(store.get('sevenZipPath') as string | undefined) ?? undefined,
+    gameVersion: () => detectSteamEnv().skyrim.version ?? '1.6.1170.0',
+    skseVersion: () => {
+      const gp = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+      return detectSkse(gp).version ?? ''
+    },
+    onProgress: (p) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('fomod:progress', p)
+      } catch {
+        /* renderer gone */
+      }
+    },
+    log: (level, msg) => (level === 'warn' ? logger.warn('fomod', msg) : logger.info('fomod', msg)),
   })
 
   // Auto-analisi post-lancio: al primo crash-*.log NUOVO dopo un GIOCA riuscito, il main
@@ -2299,6 +2340,9 @@ ipcMain.handle('catalog:import-nexus-collection', async (_e, input: string) => {
     'catalog',
     `import Collection Nexus "${revision.collectionName}" rev.${revision.revisionNumber}: ${rows.length} candidati → ${imported} nuovi, ${deduped} doppioni rimossi (totale ${after})`,
   )
+  // Riferimento per il fetch delle scelte FOMOD del curatore (archivio revision).
+  store.set('collectionSlug', revision.collectionSlug)
+  store.set('collectionRevision', revision.revisionNumber)
   store.delete('catalogSeedDisabled')
   return {
     success: true,
@@ -2660,7 +2704,17 @@ ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath'
 
 // Pandora Behaviour Engine — the single animation/behaviour manager. Launched as an
 // EXPLICIT step (it regenerates the game's behaviour files); never auto-run silently.
-ipcMain.handle('tools:launch-pandora', () => launchTool(toolPath('pandoraPath')))
+ipcMain.handle('tools:launch-pandora', () => {
+  // HEADLESS (flag verificati in Pandora CLI/CommandLineParser.cs): --tesv = root del gioco
+  // (cartella con SkyrimSE.exe), -o = Data di output, --auto_run + --auto_close = run completo
+  // senza interazione. Senza gamePath risolvibile si apre la GUI come prima (fallback).
+  const gp = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  const args = gp
+    ? [`--tesv:${gp}`, `-o:${join(gp, 'Data')}`, '--auto_run', '--auto_close']
+    : []
+  if (gp) logger.info('tools', `Pandora headless: --tesv "${gp}" → output Data (auto_run/auto_close)`)
+  return launchTool(toolPath('pandoraPath'), args)
+})
 
 // Validate / auto-detect 7-Zip: required for .7z/.rar (most heavy mods). Resolves the
 // configured path or a known install location, then runs the binary to confirm it is

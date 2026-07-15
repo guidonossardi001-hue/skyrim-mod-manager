@@ -21,6 +21,7 @@ const EVENT_CHANNELS = new Set([
   'nxm:queued',
   'nxm:confirm-request',
   'crash:detected',
+  'fomod:progress',
 ])
 
 // original listener → ipcRenderer wrapper, so off() accepts either one.
@@ -251,6 +252,13 @@ contextBridge.exposeInMainWorld('api', {
     scan: () => invoke('enb:scan'),
     apply: (presetDir: string, label: string) => invoke('enb:apply', presetDir, label),
     remove: () => invoke('enb:remove'),
+  },
+
+  // Installer FOMOD headless (motore Vortex) + scelte del curatore della collection.
+  fomod: {
+    fetchChoices: () => invoke('fomod:fetch-choices'),
+    scan: () => invoke('fomod:scan'),
+    applyAll: () => invoke('fomod:apply-all'),
   },
 
   // StockGame builder (isolated vanilla copy; companion-safe, read-only on source)

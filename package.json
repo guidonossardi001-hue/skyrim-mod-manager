@@ -23,6 +23,7 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@nexusmods/fomod-installer-native": "^0.13.3",
     "7zip-bin": "^5.2.0",
     "adm-zip": "^0.5.10",
     "axios": "^1.6.0",
@@ -85,8 +86,7 @@
       "package.json"
     ],
     "asarUnpack": [
-      "**/node_modules/better-sqlite3/**",
-      "**/node_modules/7zip-bin/**"
+      "node_modules/@nexusmods/fomod-installer-native/**"
     ],
     "extraResources": [
       {
@@ -134,6 +134,7 @@
       "deleteAppDataOnUninstall": false,
       "runAfterFinish": true
     },
-    "disableAsarIntegrity": true
+    "disableAsarIntegrity": true,
+    "npmRebuild": false
   }
 }

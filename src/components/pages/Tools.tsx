@@ -88,6 +88,75 @@ export default function Tools() {
     if (path) await analyzeCrash(path)
   }
 
+  // Installer FOMOD headless (motore Vortex) + scelte del curatore della collection.
+  const [fomodStatus, setFomodStatus] = useState<{
+    total?: number
+    applied?: number
+    withChoices?: number
+    choicesCached?: boolean
+  } | null>(null)
+  const [fomodBusy, setFomodBusy] = useState<'fetch' | 'apply' | null>(null)
+  const [fomodProgress, setFomodProgress] = useState<{ done: number; total: number; current: string } | null>(null)
+  const [fomodReport, setFomodReport] = useState<Awaited<ReturnType<typeof window.api.fomod.applyAll>> | null>(null)
+
+  const refreshFomod = async () => {
+    const r = await window.api.fomod.scan()
+    if (r.ok) setFomodStatus(r)
+  }
+  useEffect(() => {
+    refreshFomod()
+    const api = window.api as unknown as {
+      on?: (ch: string, cb: (...a: unknown[]) => void) => unknown
+      off?: (ch: string, cb: unknown) => void
+    }
+    if (!api.on) return
+    const onP = (p?: { done: number; total: number; current: string }) => p && setFomodProgress(p)
+    const w = api.on('fomod:progress', onP as (...a: unknown[]) => void)
+    return () => api.off?.('fomod:progress', w)
+  }, [])
+
+  const fetchFomodChoices = async () => {
+    setFomodBusy('fetch')
+    try {
+      const r = await window.api.fomod.fetchChoices()
+      if (r.ok) {
+        toast.success('Scelte del curatore scaricate', `${r.withChoices} mod con scelte FOMOD su ${r.mods} nel manifest`)
+        await refreshFomod()
+      } else toast.error('Download scelte fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Download scelte fallito', (e as Error).message)
+    } finally {
+      setFomodBusy(null)
+    }
+  }
+
+  const applyFomodAll = async () => {
+    if (
+      !window.confirm(
+        'Applicare gli installer FOMOD a tutte le mod estratte?\n\nLe cartelle mod verranno ristrutturate nel layout finale (le varianti NON scelte vengono rimosse: un re-install richiede il re-download). Le scelte del curatore vengono usate dove disponibili, altrimenti i default dell\'autore.',
+      )
+    )
+      return
+    setFomodBusy('apply')
+    setFomodReport(null)
+    try {
+      const r = await window.api.fomod.applyAll()
+      setFomodReport(r)
+      if (r.ok)
+        toast.success(
+          'FOMOD applicati',
+          `${r.applied}/${r.processed} mod ristrutturate · ${r.defaultsUsed} coi default autore · ${r.failed?.length ?? 0} fallite`,
+        )
+      else toast.error('Applicazione FOMOD fallita', r.error ?? 'errore sconosciuto')
+      await refreshFomod()
+    } catch (e) {
+      toast.error('Applicazione FOMOD fallita', (e as Error).message)
+    } finally {
+      setFomodBusy(null)
+      setFomodProgress(null)
+    }
+  }
+
   // Preset ENB REALI: scan nelle mod estratte, apply nella root del gioco (backup+manifest).
   const [enbPresets, setEnbPresets] = useState<
     { modName: string; presetDir: string; label: string; files: number; hasCoreDll: boolean }[] | null
@@ -449,6 +518,75 @@ export default function Tools() {
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Installer FOMOD headless (motore ufficiale Vortex): le mod estratte flat con
+          ModuleConfig.xml vengono ristrutturate nel layout finale usando le SCELTE del
+          curatore della collection (o i default dell'autore dove mancano). */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Wrench size={15} className="text-soul-400" /> Installer FOMOD (scelte collection)
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Le mod con installer FOMOD estratte "piatte" hanno gli asset dentro cartelle-opzione che il
+          gioco ignora. Qui vengono ristrutturate col motore di Vortex: prima scarica le scelte del
+          curatore, poi applica a tutte.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            onClick={fetchFomodChoices}
+            disabled={fomodBusy !== null}
+            className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <Download size={14} className={fomodBusy === 'fetch' ? 'animate-pulse' : ''} />
+            {fomodBusy === 'fetch' ? 'Download…' : 'Scarica scelte del curatore'}
+          </button>
+          <button
+            onClick={applyFomodAll}
+            disabled={fomodBusy !== null || !fomodStatus?.total}
+            className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg btn-primary disabled:opacity-50"
+          >
+            <Zap size={14} className={fomodBusy === 'apply' ? 'animate-pulse' : ''} />
+            {fomodBusy === 'apply' ? 'Applicazione…' : `Applica a tutte (${(fomodStatus?.total ?? 0) - (fomodStatus?.applied ?? 0)})`}
+          </button>
+        </div>
+        {fomodStatus && (
+          <div className="mt-3 flex flex-wrap gap-3 text-xs text-dark-300">
+            <span>{fomodStatus.total ?? 0} mod con FOMOD</span>
+            <span>·</span>
+            <span className="text-green-400">{fomodStatus.applied ?? 0} già applicate</span>
+            <span>·</span>
+            <span>{fomodStatus.choicesCached ? `${fomodStatus.withChoices ?? 0} con scelte del curatore` : 'scelte del curatore NON ancora scaricate'}</span>
+          </div>
+        )}
+        {fomodProgress && fomodBusy === 'apply' && (
+          <div className="mt-3">
+            <div className="flex justify-between text-xs text-dark-400 mb-1">
+              <span className="truncate">{fomodProgress.current}</span>
+              <span className="font-mono">{fomodProgress.done}/{fomodProgress.total}</span>
+            </div>
+            <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden">
+              <div
+                className="progress-shimmer h-full rounded-full transition-all"
+                style={{ width: fomodProgress.total ? `${(fomodProgress.done / fomodProgress.total) * 100}%` : '0%' }}
+              />
+            </div>
+          </div>
+        )}
+        {fomodReport?.ok && ((fomodReport.failed?.length ?? 0) > 0 || (fomodReport.unsupported?.length ?? 0) > 0) && (
+          <div className="mt-3 space-y-1 text-xs max-h-40 overflow-y-auto">
+            {fomodReport.unsupported?.map((m) => (
+              <p key={m} className="text-orange-300">
+                {m}: installer non-XML (richiede intervento manuale)
+              </p>
+            ))}
+            {fomodReport.failed?.map((f) => (
+              <p key={f.mod} className="text-red-300">
+                {f.mod}: {f.error}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
 
       {/* Preset ENB REALI (sostituisce il vecchio mock): scan nelle mod estratte, apply nella

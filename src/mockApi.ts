@@ -807,6 +807,12 @@ export const mockApi = {
     remove: async () => ({ ok: true as const, removed: 0, restored: 0 }),
   },
 
+  fomod: {
+    fetchChoices: async () => ({ ok: false as const, error: 'FOMOD disponibile solo nell’app desktop' }),
+    scan: async () => ({ ok: true as const, total: 0, applied: 0, withChoices: 0, choicesCached: false }),
+    applyAll: async () => ({ ok: false as const, error: 'FOMOD disponibile solo nell’app desktop' }),
+  },
+
   downloads: {
     list: async (profileId: number) => {
       tickDownloads()

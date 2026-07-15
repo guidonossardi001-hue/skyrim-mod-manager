@@ -530,6 +530,27 @@ declare global {
         }>
         remove(): Promise<{ ok: boolean; removed: number; restored: number; error?: string }>
       }
+      // Installer FOMOD headless (motore Vortex) + scelte del curatore. Never rejects.
+      fomod: {
+        fetchChoices(): Promise<{ ok: boolean; mods?: number; withChoices?: number; error?: string }>
+        scan(): Promise<{
+          ok: boolean
+          total?: number
+          applied?: number
+          withChoices?: number
+          choicesCached?: boolean
+          error?: string
+        }>
+        applyAll(): Promise<{
+          ok: boolean
+          processed?: number
+          applied?: number
+          defaultsUsed?: number
+          unsupported?: string[]
+          failed?: { mod: string; error: string }[]
+          error?: string
+        }>
+      }
       // Analizzatore crash log (Crash Logger SSE/AE/VR, Trainwreck): sola lettura.
       crash: {
         listRecent(): Promise<{

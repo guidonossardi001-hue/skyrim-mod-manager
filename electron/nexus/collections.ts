@@ -184,6 +184,36 @@ export async function fetchCollectionRevision(
   }
 }
 
+/**
+ * Recupera il downloadLink dell'ARCHIVIO della revision (contiene collection.json con le
+ * scelte FOMOD del curatore — non esposte dal graph sui modFiles). Stessa query minimale.
+ */
+export async function fetchRevisionDownloadLink(
+  http: HttpPostJson,
+  opts: { slug: string; revision?: number | null; apiKey: string; signal?: AbortSignal },
+): Promise<string> {
+  const hasRevision = typeof opts.revision === 'number' && opts.revision > 0
+  const decl = hasRevision ? '($slug: String!, $revision: Int, $adult: Boolean)' : '($slug: String!, $adult: Boolean)'
+  const args = hasRevision
+    ? 'slug: $slug, revision: $revision, viewAdultContent: $adult'
+    : 'slug: $slug, viewAdultContent: $adult'
+  const variables: Record<string, unknown> = { slug: opts.slug, adult: true }
+  if (hasRevision) variables.revision = opts.revision
+  const res = await http(
+    GRAPHQL_URL,
+    { query: `query RevLink${decl} { collectionRevision(${args}) { downloadLink } }`, variables },
+    {
+      headers: { apikey: opts.apiKey, 'Content-Type': 'application/json', 'User-Agent': 'SkyrimAEModManager/1.0' },
+      signal: opts.signal,
+    },
+  )
+  const body = res.data as { data?: { collectionRevision?: { downloadLink?: unknown } } }
+  const link = body?.data?.collectionRevision?.downloadLink
+  if (typeof link !== 'string' || !/^https?:\/\//i.test(link))
+    throw new CollectionFetchError('downloadLink della revision non disponibile dal graph')
+  return link
+}
+
 /** Mappa una collezione già recuperata in righe modlist_catalog (stesso shape dell'import Vortex). */
 export function buildCatalogRowsFromCollection(result: CollectionRevisionResult): CatalogRow[] {
   const seen = new Set<number>()
