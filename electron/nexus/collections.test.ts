@@ -19,8 +19,18 @@ describe('parseCollectionInput', () => {
       parseCollectionInput('https://www.nexusmods.com/skyrimspecialedition/collections/abc123/revisions/7'),
     ).toEqual({ slug: 'abc123', revision: 7 })
   })
-  it('accetta uno slug nudo', () => {
+  it('accetta il formato URL NUOVO col segmento games/ (il caso reale che falliva)', () => {
+    expect(
+      parseCollectionInput('https://www.nexusmods.com/games/skyrimspecialedition/collections/frkafa'),
+    ).toEqual({ slug: 'frkafa', revision: null })
+    expect(
+      parseCollectionInput('https://next.nexusmods.com/skyrimspecialedition/collections/abc123'),
+    ).toEqual({ slug: 'abc123', revision: null })
+  })
+  it('accetta uno slug nudo, anche con delimitatori copiati attorno', () => {
     expect(parseCollectionInput('abc123')).toEqual({ slug: 'abc123', revision: null })
+    expect(parseCollectionInput('`frkafa`')).toEqual({ slug: 'frkafa', revision: null })
+    expect(parseCollectionInput('[frkafa]')).toEqual({ slug: 'frkafa', revision: null })
   })
   it('null per input vuoto o irriconoscibile', () => {
     expect(parseCollectionInput('')).toBeNull()

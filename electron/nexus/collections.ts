@@ -47,17 +47,23 @@ export interface CollectionRevisionResult {
 }
 
 /**
- * Estrae lo slug da uno slug nudo o da un URL pagina collezione
- * (https://www.nexusmods.com/skyrimspecialedition/collections/<slug>[/revisions/<n>]).
+ * Estrae lo slug da uno slug nudo o da un URL pagina collezione, in TUTTI i formati reali:
+ *   • vecchio:  nexusmods.com/skyrimspecialedition/collections/<slug>[/revisions/<n>]
+ *   • nuovo:    nexusmods.com/games/skyrimspecialedition/collections/<slug>  (segmento games/)
+ *   • next:     next.nexusmods.com/skyrimspecialedition/collections/<slug>
  * Ritorna anche il numero di revisione se presente nell'URL. null = input non riconoscibile.
  */
 export function parseCollectionInput(input: string): { slug: string; revision: number | null } | null {
   const trimmed = input.trim()
   if (!trimmed) return null
-  const urlMatch = trimmed.match(/nexusmods\.com\/[^/]+\/collections\/([a-z0-9]+)(?:\/revisions\/(\d+))?/i)
+  const urlMatch = trimmed.match(
+    /nexusmods\.com\/(?:games\/)?[^/]+\/collections\/([a-z0-9]+)(?:\/revisions\/(\d+))?/i,
+  )
   if (urlMatch) return { slug: urlMatch[1], revision: urlMatch[2] ? Number(urlMatch[2]) : null }
-  // Slug nudo: alfanumerico, formato reale Nexus (es. "abc123").
-  if (/^[a-z0-9]+$/i.test(trimmed)) return { slug: trimmed, revision: null }
+  // Slug nudo: alfanumerico. Tollera delimitatori copiati per sbaglio attorno (backtick,
+  // parentesi, virgolette): si spogliano i bordi non alfanumerici e si valida il nucleo.
+  const bare = trimmed.replace(/^[^a-z0-9]+/i, '').replace(/[^a-z0-9]+$/i, '')
+  if (bare && /^[a-z0-9]+$/i.test(bare)) return { slug: bare, revision: null }
   return null
 }
 
