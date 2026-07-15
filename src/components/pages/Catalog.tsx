@@ -129,6 +129,10 @@ export default function Catalog() {
       mod_id: created?.id ?? null,
       profile_id: activeProfileId,
       nexus_id: m.nexus_id,
+      // SENZA file_id il resolver Nexus non può derivare il link diretto e la riga muore in
+      // coda con "Link di download non disponibile" (l'URL pagina-mod NON è scaricabile):
+      // la coppia (nexus_id, nexus_file_id) del catalogo è ciò che rende il download avviabile.
+      file_id: m.nexus_file_id ?? null,
       name: m.name,
       url: m.nexus_id ? `https://www.nexusmods.com/skyrimspecialedition/mods/${m.nexus_id}` : null,
       total_size: m.size_mb * 1024 * 1024,

@@ -58,6 +58,9 @@ export type ModCategory =
 export interface CatalogMod {
   id: number
   nexus_id: number
+  /** File primario Nexus: con nexus_id forma la coppia che rende DERIVABILE il link diretto.
+   *  Assente nel seed curato bundled (che infatti NON è scaricabile senza backfill dal backup). */
+  nexus_file_id?: number | null
   name: string
   category: ModCategory
   subcategory: string | null

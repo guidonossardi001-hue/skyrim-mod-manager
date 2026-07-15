@@ -21,12 +21,13 @@ import {
   computeDeployPlan,
   buildPluginsTxt,
   toDeployCategory,
-  orderPluginsByDependencies,
   parseDeployManifest,
   DEPLOY_MANIFEST_FILE,
   type DeployManifest,
   type DeployMod,
 } from './plan'
+import { orderPluginsLoot } from './lootOrder'
+import { loadMasterlist } from '../plugins/masterlist'
 import { applyIniSettings, mergeIniMaps, managedFileCount, type IniFileMap } from '../ini/iniService'
 import { resolveIniTemplate, MOD_REQUIRED_OVERRIDES } from '../ini/templates'
 import { detectCreationClub, ccFiles, ccPluginOrder } from './ccHandler'
@@ -45,6 +46,7 @@ export type DeployErrorKind =
   | 'cross-volume' // hardlinks can't span volumes → refuse before touching anything
   | 'source-missing'
   | 'dependency-cycle' // ciclo nel grafo requires dei plugin → deploy BLOCCATO prima di toccare file
+  | 'missing-master' // un plugin richiede un master (header TES4) né deployato né vanilla/CC → crash al load
   | 'cleanup'
   | 'link'
   | 'db'
@@ -86,6 +88,9 @@ export interface DeployOptions {
   // load order da lì quando NON si passa da MO2. Opzionale/iniettata; se assente si scrive solo la
   // copia d'istanza. Il file preesistente dell'utente viene salvato UNA volta in plugins.txt.pre-smm.bak.
   systemPluginsDir?: string
+  // Masterlist-lite opzionale (regole "after" LOOT-like): path del masterlist.json in userData.
+  // Regole SOFT: ordinano quando possibile, scartate con warning su ciclo, mai un blocco.
+  masterlistPath?: string
 }
 
 // Throttle the linking phase so a 100k-file deploy doesn't flood the IPC channel:
@@ -416,20 +421,37 @@ export async function deployInstance(
 
     const plan = computeDeployPlan(mods)
 
-    // 3.5) Load order sul grafo dipendenze — PRIMA di qualsiasi scrittura: su un ciclo il deploy
-    // si BLOCCA con l'istanza intatta, invece di generare un plugins.txt corrotto/azzardato.
+    // 3.5) Load order LOOT-like — PRIMA di qualsiasi scrittura: su ciclo o missing master il
+    // deploy si BLOCCA con l'istanza intatta, invece di generare un plugins.txt che crasha il
+    // gioco. Fonte di verità: i master REALI dall'header TES4 di ogni plugin; il grafo requires
+    // del catalogo resta il fallback per i soli header illeggibili.
     const nexusIdOf = new Map<string, number>()
     for (const r of rows)
       if (typeof r.nexus_id === 'number' && Number.isInteger(r.nexus_id) && r.nexus_id > 0)
         nexusIdOf.set(r.name, r.nexus_id)
-    const orderedPlugins = orderPluginsByDependencies(plan.plugins, nexusIdOf, catalogRequires(db))
+    const orderedPlugins = orderPluginsLoot(plan.plugins, nexusIdOf, catalogRequires(db), {
+      externalMasters: ccPluginOrder(ccPackages),
+      rules: loadMasterlist(opts.masterlistPath),
+    })
+    for (const w of orderedPlugins.warnings) log('warn', `load order: ${w}`)
     if (!orderedPlugins.ok) {
-      const path = orderedPlugins.cycle.join(' → ')
-      log('warn', `deploy BLOCCATO: ciclo di dipendenze nei plugin (${path})`)
+      if (orderedPlugins.kind === 'dependency-cycle') {
+        const path = orderedPlugins.cycle.join(' → ')
+        log('warn', `deploy BLOCCATO: ciclo di dipendenze nei plugin (${path})`)
+        return {
+          success: false,
+          errorKind: 'dependency-cycle',
+          error: `Ciclo di dipendenze tra i plugin: ${path}. Correggi il campo requires nel catalogo o disabilita una delle mod del ciclo, poi riprova.`,
+        }
+      }
+      const detail = orderedPlugins.missing
+        .map((m) => `${m.plugin} richiede ${m.masters.join(', ')}`)
+        .join('; ')
+      log('warn', `deploy BLOCCATO: master mancanti (${detail})`)
       return {
         success: false,
-        errorKind: 'dependency-cycle',
-        error: `Ciclo di dipendenze tra i plugin: ${path}. Correggi il campo requires nel catalogo o disabilita una delle mod del ciclo, poi riprova.`,
+        errorKind: 'missing-master',
+        error: `Master mancanti nel deploy: ${detail}. Installa e abilita le mod che forniscono questi master (il gioco crasherebbe al caricamento), poi riprova.`,
       }
     }
 

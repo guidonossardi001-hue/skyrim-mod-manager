@@ -16,6 +16,8 @@ export interface DeployEngineOptions {
   // Cartella del plugins.txt DI SISTEMA (%LOCALAPPDATA%/Skyrim Special Edition). Opzionale: senza,
   // il deploy scrive solo la copia d'istanza (il gioco lanciato senza MO2 legge quella di sistema).
   resolveSystemPluginsDir?: () => string | null | undefined
+  // Path del masterlist.json (regole "after" LOOT-like, soft). Opzionale: assente → zero regole.
+  resolveMasterlistPath?: () => string | null | undefined
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -42,6 +44,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         profileId,
         stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
         systemPluginsDir: opts.resolveSystemPluginsDir?.() ?? undefined,
+        masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
         log: opts.log,
         onProgress: (p) => {
           try {

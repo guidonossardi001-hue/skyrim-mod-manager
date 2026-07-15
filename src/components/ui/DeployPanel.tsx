@@ -92,6 +92,9 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
       } else if (r.errorKind === 'dependency-cycle') {
         onLog(`Deploy bloccato: ${r.error}`, 'error')
         toast.error('Ciclo di dipendenze nei plugin', r.error ?? 'deploy bloccato per sicurezza')
+      } else if (r.errorKind === 'missing-master') {
+        onLog(`Deploy bloccato: ${r.error}`, 'error')
+        toast.error('Master mancanti', r.error ?? 'un plugin richiede master non installati')
       } else {
         onLog(`Deploy fallito: ${r.error}`, 'error')
         toast.error('Deploy fallito', r.error ?? r.errorKind ?? 'errore sconosciuto')

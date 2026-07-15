@@ -44,6 +44,8 @@ export interface PluginEntry {
   type: PluginType
   mod: string
   priority: number
+  /** Path sorgente assoluto del file plugin (per il parse dell'header TES4). */
+  src?: string
 }
 
 // One auto-resolved file collision: two+ mods wrote the same destination, the
@@ -246,7 +248,7 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
     // Plugins live at the Data root (no directory component).
     if (dir === '') {
       const t = pluginType(rel)
-      if (t) plugins.push({ name: rel, type: t, mod: mod.name, priority: mod.priority })
+      if (t) plugins.push({ name: rel, type: t, mod: mod.name, priority: mod.priority, src: srcOf.get(key)! })
     }
   }
 

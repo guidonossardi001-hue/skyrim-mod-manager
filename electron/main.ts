@@ -619,6 +619,9 @@ app.whenReady().then(() => {
       const dir = join(base, 'Skyrim Special Edition')
       return existsSync(dir) ? dir : null
     },
+    // Masterlist-lite LOOT-like (regole "after" soft): file opzionale in userData,
+    // editabile dall'utente; assente → zero regole, nessun errore.
+    resolveMasterlistPath: () => join(app.getPath('userData'), 'masterlist.json'),
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
 
