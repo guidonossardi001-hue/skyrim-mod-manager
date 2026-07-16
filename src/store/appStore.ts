@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type { Profile, Mod, Download, AppSettings, CatalogMod, ConflictInfo } from '@/types'
 import { parseMO2Modlist } from '@/lib/modlist'
+import { detectExclusionConflicts } from '@/lib/exclusionGroups'
 
 export interface LogLine {
   id: number
@@ -448,37 +449,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       }
     }
 
-    // Known mutual-exclusion groups (only one mod per group should be active)
-    const exclusionGroups: { label: string; severity: 'warning' | 'error'; keywords: string[] }[] = [
-      { label: 'body', severity: 'error', keywords: ['cbbe', 'bhunp', 'unp ', 'uunp', 'sos ', 'schlongs'] },
-      { label: 'ENB', severity: 'warning', keywords: ['enb', 'reshade'] },
-      { label: 'physics', severity: 'warning', keywords: ['hdt-smp', 'hdt smp', 'cbpc'] },
-      {
-        label: 'combat overhaul',
-        severity: 'warning',
-        keywords: ['valhalla combat', 'wildcat', 'mortal enemies'],
-      },
-      { label: 'perk overhaul', severity: 'warning', keywords: ['ordinator', 'vokrii', 'adamant'] },
-      { label: 'magic overhaul', severity: 'warning', keywords: ['apocalypse', 'odin', 'mysticism'] },
-      {
-        label: 'NPC overhaul',
-        severity: 'warning',
-        keywords: ['bijin', 'pandorable', 'inhabitants of skyrim'],
-      },
-    ]
-
-    for (const group of exclusionGroups) {
-      const matching = enriched.filter((e) => group.keywords.some((kw) => e.lname.includes(kw)))
-      if (matching.length > 1) {
-        for (const { mod } of matching) {
-          addConflict({
-            modId: mod.id,
-            modName: mod.name,
-            conflictType: 'incompatible',
-            severity: group.severity,
-            message: `Conflitto gruppo "${group.label}": attive ${matching.length} mod incompatibili tra loro`,
-          })
-        }
+    // Gruppi a mutua esclusione (un solo body replacer, un solo preset ENB, …). La logica vive in
+    // ./lib/exclusionGroups: famiglie + esclusione dei derivati, perché il match per substring sul
+    // nome segnalava ogni armatura convertita per CBBE come "incompatibile" col body CBBE stesso.
+    for (const hit of detectExclusionConflicts(enabledMods.map((m) => ({ id: m.id, name: m.name })))) {
+      for (const mod of hit.members) {
+        addConflict({
+          modId: mod.id,
+          modName: mod.name,
+          conflictType: 'incompatible',
+          severity: hit.severity,
+          message: `Conflitto gruppo "${hit.label}": attive ${hit.members.length} mod di famiglie incompatibili (${hit.families.join(' vs ')})`,
+        })
       }
     }
 
