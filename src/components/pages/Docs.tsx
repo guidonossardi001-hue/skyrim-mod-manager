@@ -15,21 +15,21 @@ const DOCS: DocSection[] = [
     content: `
 **Prerequisiti**
 - Skyrim Anniversary Edition installato su Steam (non in C:\\Program Files)
-- Mod Organizer 2 installato
-- Account Nexus Mods (gratuito, premium consigliato per download veloci)
-- ~300 GB di spazio libero su SSD NVMe
+- SKSE64 per AE installato nella cartella del gioco (nessun Mod Organizer 2: questo launcher gestisce mod, load order e deploy da solo e avvia SEMPRE via SKSE interno)
+- Account Nexus Mods (Premium fortemente consigliato: sblocca il download automatico dell'intera coda; senza, ogni mod richiede il click manuale "Mod Manager Download" su Nexus)
+- Spazio libero adeguato alla collezione scelta (l'app calcola e blocca in anticipo se il disco non basta)
 
 **Passi iniziali**
-1. Apri **Impostazioni** e configura tutti i percorsi (Skyrim AE, MO2, LOOT, SSEEdit, DynDOLOD)
-2. Incolla la tua **API Key Nexus Mods** e clicca "Verifica"
-3. Vai al **Catalogo** e aggiungi le mod al profilo partendo dalle ESSENZIALI
-4. Usa **Strumenti → LOOT** per ordinare i plugin
-5. Esegui **Pandora Behaviour Engine** per le animazioni
-6. Esegui **DynDOLOD** per i LOD
-7. Avvia il gioco tramite **MO2**
+1. Apri **Impostazioni**, incolla la tua **API Key Nexus Mods** e clicca "Verifica"; premi "Rileva Automaticamente" per i percorsi (Skyrim AE viene trovato da solo dal registro Steam)
+2. Vai al **Catalogo** e importa una collezione Nexus (campo "Slug o URL Collection Nexus", es. \`nexusmods.com/games/skyrimspecialedition/collections/<slug>\`) oppure aggiungi mod singole
+3. Premi **Installa tutto**: download → estrazione → installazione partono in coda automaticamente
+4. In **Strumenti**: se la collezione ha mod con installer FOMOD, "Scarica scelte del curatore" poi "Applica a tutte"; se ci sono preset ENB, "Cerca preset ENB" poi "Applica"
+5. Vai in **Deploy** e premi **Deploy**: collega le mod nella cartella Data del gioco (hardlink, reversibile con Purge) e genera il load order da solo (motore LOOT interno)
+6. Se la collezione usa OStim/animazioni custom, esegui **Pandora Behaviour Engine** da Strumenti (parte in automatico, senza interazione)
+7. Premi **GIOCA**: il launcher avvia SKSE64 direttamente, nessun passaggio manuale
 
 **Ordine di installazione consigliato**
-Framework → Bug Fix → Corpo/Skin → NPC → Grafica → Combat → Gameplay → Animazioni → UI → Adult → Patch
+Framework → Bug Fix → Corpo/Skin → NPC → Grafica → Combat → Gameplay → Animazioni → UI → Adult → Patch (il motore di load order interno lo applica da solo sui master reali dei plugin)
     `,
     links: [
       { label: 'Nexus Mods API Keys', url: 'https://www.nexusmods.com/users/myaccount?tab=api' },
@@ -94,32 +94,37 @@ Con questa configurazione hardware e la modlist completa (~230 GB):
   },
   {
     id: 'ordine-esecuzione',
-    title: '🔧 Ordine di Esecuzione Strumenti',
+    title: '🔧 Ordine di Esecuzione — Da fare dopo ogni modifica alla lista mod',
     content: `
-**Da eseguire dopo ogni modifica alla lista mod:**
+**1. Installer FOMOD (Strumenti)**
+   - Le mod con più varianti (texture 1K/2K, CBBE/HIMBO, patch opzionali) vanno ristrutturate col motore FOMOD interno
+   - "Scarica scelte del curatore" (se hai importato una Collection) poi "Applica a tutte"
+   - Senza questo passo gli asset restano in cartelle-opzione invisibili al gioco
 
-1. **LOOT** — Ordina automaticamente i plugin (.esp/.esm)
-   - Risolve i problemi di load order
-   - Segnala conflitti e master mancanti
+**2. Conflitti (pagina Conflitti)**
+   - "Analizza conflitti reali" mostra ogni sovrascrittura file con vincitore/perdente
+   - "Inverti precedenza" per cambiare chi vince, SENZA disattivare alcuna mod
+   - Il budget slot plugin (254 full / 4096 light) è mostrato qui: oltre soglia il Deploy si blocca
 
-2. **Pandora Behaviour Engine** — Genera i comportamenti animazione
-   - Va eseguito DOPO aver installato MCO, SCAR, e tutte le mod animazione
-   - Output: cartella "Pandora_Engine"
+**3. Deploy**
+   - Collega (hardlink) le mod abilitate nella cartella Data del gioco
+   - Genera da solo il load order corretto (motore LOOT interno: legge i master REALI di ogni plugin + la masterlist community, non serve LOOT esterno)
+   - "Purge" riporta la Data del gioco a vanilla in un click (reversibile)
 
-3. **xLODGen** — LOD terreno (opzionale ma consigliato)
-   - Genera terrain LOD per distanze
-   - Tempo: 20-40 minuti
+**4. Preset ENB (Strumenti)**
+   - "Cerca preset ENB" nelle mod estratte, "Applica" li copia nella ROOT del gioco (non Data)
+   - Il core ENB (d3d11.dll) va scaricato a parte da enbdev.com — non ridistribuibile nelle collection
 
-4. **DynDOLOD** — LOD alberi e oggetti
-   - Genera LOD dinamici per alberi, edifici, ecc.
-   - Usare preset "Medium" per performance ottimali
-   - Tempo: 30-60 minuti
+**5. Pandora Behaviour Engine (Strumenti)**
+   - OBBLIGATORIO se la collezione usa OStim/animazioni custom — senza, T-pose e crash
+   - Parte in automatico (headless), nessuna interazione richiesta
 
-5. **BodySlide** — Adatta outfit al preset corpo
-   - Eseguire "Build Morphs" per tutti gli outfit
-   - Scegliere il tuo preset CBBE 3BA
+**6. xLODGen / DynDOLOD** (opzionali, tool esterni da configurare in Impostazioni se disponibili)
+   - LOD terreno/alberi — non ancora automatizzabili da questo launcher
 
-6. **Avvio tramite MO2** — MAI avviare SKSE direttamente
+**7. GIOCA**
+   - Avvio ESCLUSIVAMENTE tramite SKSE64 interno al launcher — non serve né è supportato Mod Organizer 2
+   - Se il gioco crasha, il launcher analizza da solo l'ultimo crash log e mostra il modulo probabile colpevole (Strumenti → Analizza crash log)
     `,
   },
   {
@@ -153,11 +158,11 @@ La modlist è progettata per essere stabile. I contenuti adulti non interferisco
     id: 'risoluzione-problemi',
     title: '🛠 Risoluzione Problemi Comuni',
     content: `
-**Il gioco crasha all'avvio**
-1. Controlla Crash Logger (Documents/My Games/Skyrim Special Edition/SKSE/Crash Logger)
-2. Verifica che SKSE64 sia la versione corretta per AE (1.6.x)
-3. Controlla che Address Library sia aggiornata
-4. Rimuovi mod una ad una per isolare il problema
+**Il gioco crasha all'avvio o durante il gioco**
+1. Il launcher rileva da solo il crash dopo un GIOCA riuscito e mostra un avviso col modulo probabile colpevole — apri **Strumenti → Analizza crash log** per il report completo (call stack, plugin SKSE caricati, load order)
+2. Verifica che SKSE64 sia la versione corretta per AE (1.6.x) — il gate d'avvio lo controlla già prima di lasciarti giocare
+3. Controlla che Address Library sia presente (naming AE: \`versionlib-*.bin\`) — anche questo è nel gate d'avvio
+4. Se il crash indica una mod specifica, disattivala e ri-fai Deploy per isolare il problema
 
 **NPC con facce nere (black face bug)**
 - Causato da conflitti nei file .esp che modificano gli NPC
