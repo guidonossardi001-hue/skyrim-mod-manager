@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { FolderOpen, Save, Key, CheckCircle, XCircle, ScrollText, Wand2, Loader2 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { SEVENZIP_LICENSE, THIRD_PARTY_LICENSES } from '@/data/licenses'
@@ -297,6 +297,11 @@ export default function Settings() {
         ))}
       </Section>
 
+      {/* Steam update guard */}
+      <Section title="Protezione aggiornamenti Steam">
+        <UpdateGuardCard />
+      </Section>
+
       {/* Automation */}
       <Section title="Automazione">
         <div className="space-y-3">
@@ -476,6 +481,101 @@ export default function Settings() {
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// Protezione aggiornamenti Steam: stato reale dall'acf + toggle reversibile. Un update
+// Steam del runtime rompe SKSE e tutti i plugin nativi: il blocco è la difesa a monte.
+function UpdateGuardCard() {
+  const [status, setStatus] = useState<{
+    found: boolean
+    protected: boolean
+    buildId: string | null
+  } | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const refresh = async () => {
+    try {
+      const s = await window.api.updateGuard.status()
+      setStatus({ found: s.found, protected: s.protected, buildId: s.buildId })
+    } catch {
+      setStatus(null)
+    }
+  }
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const toggle = async () => {
+    if (!status) return
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await window.api.updateGuard.set(!status.protected)
+      if (r.success) {
+        setMsg({
+          ok: true,
+          text: r.protected
+            ? 'Protezione attiva: Steam non può più aggiornare Skyrim.'
+            : 'Protezione rimossa: Steam torna libero di aggiornare il gioco.',
+        })
+      } else {
+        setMsg({ ok: false, text: `Operazione fallita: ${r.error ?? 'errore sconosciuto'}` })
+      }
+      await refresh()
+    } catch (e) {
+      setMsg({ ok: false, text: `Errore: ${(e as Error).message}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!status) {
+    return <p className="text-sm text-dark-400">Stato protezione non disponibile in questa modalità.</p>
+  }
+  if (!status.found) {
+    return (
+      <p className="text-sm text-dark-400">
+        appmanifest di Skyrim non trovato nelle librerie Steam: installa il gioco prima di attivare la
+        protezione.
+      </p>
+    )
+  }
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-3 flex-wrap">
+        <button
+          onClick={toggle}
+          disabled={busy}
+          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold text-white disabled:opacity-50 transition-all"
+          style={{
+            background: status.protected
+              ? 'linear-gradient(90deg,#22c55e,#15803d)'
+              : 'linear-gradient(90deg,#7d4dff,#4d7dff)',
+          }}
+        >
+          {busy ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : status.protected ? (
+            <CheckCircle size={15} />
+          ) : (
+            <XCircle size={15} />
+          )}
+          {status.protected ? 'Protezione ATTIVA — clicca per disattivare' : 'Attiva protezione aggiornamenti'}
+        </button>
+        {msg && (
+          <span className={`text-xs ${msg.ok ? 'text-green-400' : 'text-orange-400/90'}`}>{msg.text}</span>
+        )}
+      </div>
+      <p className="text-[11px] text-dark-500">
+        Un aggiornamento Steam di Skyrim rompe SKSE e tutti i plugin nativi finché non escono le build
+        nuove. La protezione rende in sola lettura l&apos;appmanifest del gioco (metodo standard della
+        community): Steam non può più aggiornarlo. Compatibile con l&apos;avvio da questo launcher (SKSE
+        diretto); per aggiornare il gioco di proposito, disattivala prima. Reversibile in un click.
+        {status.buildId ? ` Build Steam corrente: ${status.buildId}.` : ''}
+      </p>
     </div>
   )
 }

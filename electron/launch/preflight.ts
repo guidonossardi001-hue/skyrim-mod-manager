@@ -1,14 +1,105 @@
 import { execFile } from 'child_process'
-import { existsSync, readdirSync } from 'fs'
+import { existsSync, readdirSync, readFileSync, statSync, lstatSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { app } from 'electron'
 import type Database from 'better-sqlite3'
 import type Store from 'electron-store'
-import { detectSteamEnv, detectSkse } from '../steam/detect'
+import { detectSteamEnv, detectSkse, SKYRIM_SE_APPID } from '../steam/detect'
 import { isAddressLibraryBin, addressLibraryMatchesVersion } from './addressLibrary'
 import { resolveMo2Plugins } from '../steam/mo2'
 import { runLaunchWorkflow, type LaunchEnv, type LaunchReport } from '../../src/lib/launchWorkflow'
 import { resolveActiveProfileId } from '../util/activeProfile'
+import { readGuardStatus, checkVersionDrift, type UpdateGuardFsOps } from '../steam/updateGuard'
+import { verifyDeployedInstance, type VerifyIo } from '../deploy/verifyDeploy'
+import { resolveDeployDataDir } from '../deploy/resolveTarget'
+import { runSaveDoctor, type SaveDoctorIo } from '../saves/saveDoctor'
+
+/** Chiave setting: ultima versione del runtime vista a un lancio riuscito (drift detection). */
+export const LAST_GAME_VERSION_KEY = 'lastKnownGameVersion'
+
+/** FsOps reali dell'update guard (Windows: bit di scrittura ↔ attributo read-only). */
+export const realGuardFs: UpdateGuardFsOps = {
+  exists: existsSync,
+  readFile: (p) => readFileSync(p, 'utf8'),
+  isReadOnly: (p) => (statSync(p).mode & 0o200) === 0,
+  setReadOnly: (p, ro) => chmodSync(p, ro ? 0o444 : 0o644),
+}
+
+const verifyIo: VerifyIo = {
+  exists: existsSync,
+  readFile: (p) => readFileSync(p, 'utf8'),
+  lstat: (p) => {
+    const st = lstatSync(p)
+    return { nlink: st.nlink, isFile: st.isFile(), isDirectory: st.isDirectory() }
+  },
+}
+
+const saveDoctorIo: SaveDoctorIo = {
+  exists: existsSync,
+  listDir: (p) =>
+    readdirSync(p, { withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => {
+        let mtimeMs = 0
+        try {
+          mtimeMs = statSync(join(p, e.name)).mtimeMs
+        } catch {
+          /* voce illeggibile: resta in coda per mtime */
+        }
+        return { name: e.name, mtimeMs }
+      }),
+  readFileBuf: (p) => readFileSync(p),
+  readFileText: (p) => readFileSync(p, 'utf8'),
+}
+
+/** Cartella saves standard del gioco (Documenti/My Games). */
+export function defaultSavesDir(): string {
+  return join(app.getPath('documents'), 'My Games', 'Skyrim Special Edition', 'Saves')
+}
+
+/** plugins.txt DI SISTEMA (%LOCALAPPDATA%) — quello letto dal gioco avviato via SKSE. */
+export function systemPluginsTxtPath(): string | null {
+  const base = process.env.LOCALAPPDATA
+  return base ? join(base, 'Skyrim Special Edition', 'plugins.txt') : null
+}
+
+/** Save Doctor con IO reale — usato dal preflight e dall'IPC `saves:doctor`. */
+export function runSaveDoctorLive(gamePath: string | null) {
+  return runSaveDoctor(
+    {
+      savesDir: defaultSavesDir(),
+      systemPluginsTxt: systemPluginsTxtPath(),
+      gameDataDir: gamePath ? join(gamePath, 'Data') : null,
+    },
+    saveDoctorIo,
+  )
+}
+
+/** Verifica integrità deploy con IO reale — usata dal preflight e dall'IPC `deploy:verify`. */
+export function verifyDeployLive(dataDir: string) {
+  return verifyDeployedInstance(dataDir, verifyIo)
+}
+
+/** Directory Data del deploy attivo (condivisa con l'engine deploy via resolveTarget). */
+export function activeDeployDataDir(db: Database.Database, store: Store, gamePath: string | null): string | null {
+  const profileId = resolveActiveProfileId(db, store)
+  let profileName: string | null = null
+  try {
+    const row = db.prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
+      | { name: string }
+      | undefined
+    profileName = row?.name ?? null
+  } catch {
+    profileName = null
+  }
+  return resolveDeployDataDir({
+    deployTarget: store.get('deployTarget') as string | undefined,
+    gameDataDir: gamePath ? join(gamePath, 'Data') : null,
+    profileName,
+    instanceRoot:
+      (store.get('instancePath') as string | undefined) || join(app.getPath('userData'), 'instances'),
+  })
+}
 
 // Assembles the serializable launch environment from local sources (Steam probe,
 // DB, settings, filesystem) and runs the pure workflow. COMPANION MODE: read-only;
@@ -77,6 +168,51 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     /* */
   }
 
+  // Update guard: stato protezione acf + drift della versione runtime dall'ultimo lancio.
+  let updateGuard: LaunchEnv['updateGuard']
+  try {
+    const g = readGuardStatus(steam.libraries, SKYRIM_SE_APPID, realGuardFs)
+    updateGuard = {
+      found: g.found,
+      protected: g.protected,
+      drift: checkVersionDrift(store.get(LAST_GAME_VERSION_KEY) as string | undefined, skyrim.version),
+    }
+  } catch {
+    updateGuard = undefined
+  }
+
+  // Integrità del deploy (external changes): manifest vs disco, sola lettura.
+  let deployIntegrity: LaunchEnv['deployIntegrity']
+  try {
+    const dataDir = activeDeployDataDir(db, store, gamePath)
+    if (dataDir) {
+      const v = verifyDeployLive(dataDir)
+      deployIntegrity = {
+        checked: v.checked,
+        totalFiles: v.totalFiles,
+        missingCount: v.missingCount,
+        replacedCount: v.replacedCount,
+        junctionsMissingCount: v.junctionsMissingCount,
+      }
+    }
+  } catch {
+    deployIntegrity = undefined
+  }
+
+  // Save Doctor: ultimo salvataggio vs load order attivo (fail-soft: mai warning spuri).
+  let saveDoctor: LaunchEnv['saveDoctor']
+  try {
+    const sd = runSaveDoctorLive(gamePath)
+    saveDoctor = {
+      checked: sd.checked,
+      saveName: sd.saveName,
+      missingCount: sd.missingCount,
+      missingPlugins: sd.missingPlugins,
+    }
+  } catch {
+    saveDoctor = undefined
+  }
+
   return {
     steam,
     skyrim,
@@ -88,6 +224,9 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     modlist: { complete: missing.length === 0, missing },
     manifest,
     backups: { count: backupCount, lastValid: backupCount > 0 },
+    updateGuard,
+    deployIntegrity,
+    saveDoctor,
     // DIRETTIVA: avvio esclusivo via SKSE interno del launcher — MO2 mai target, anche se
     // configurato (i campi mo2.* restano informativi per la pipeline di verifica).
     launchTarget: skse.present ? 'skse' : null,
@@ -122,6 +261,19 @@ export async function executeLaunch(db: Database.Database, store: Store): Promis
     })
     // execFile callback only fires on exit/error; the launch itself succeeds
     // immediately, so report success after spawning.
-    setTimeout(() => resolve({ launched: true, report }), 300)
+    setTimeout(() => {
+      recordGameVersion(store, env.skyrim.version)
+      resolve({ launched: true, report })
+    }, 300)
   })
+}
+
+/** Registra la versione runtime vista a un lancio riuscito: baseline del drift detection.
+ *  Chiamare SOLO dopo un avvio andato a buon fine — mai in preflight (azzererebbe il confronto). */
+export function recordGameVersion(store: Store, version: string | null | undefined): void {
+  try {
+    if (version) store.set(LAST_GAME_VERSION_KEY, version)
+  } catch {
+    /* best-effort */
+  }
 }

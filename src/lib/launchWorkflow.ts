@@ -42,6 +42,28 @@ export interface LaunchEnv {
   manifest: { used: boolean; verified: boolean; reason: string | null }
   backups: { count: number; lastValid: boolean }
   launchTarget: 'mo2' | 'skse' | null
+  /** Protezione aggiornamenti Steam (opzionale: assente = probe non eseguita). */
+  updateGuard?: {
+    found: boolean
+    protected: boolean
+    /** null = drift non decidibile (prima esecuzione o versione ignota). */
+    drift: { changed: boolean; from: string | null; to: string | null } | null
+  }
+  /** Verifica external-changes del deploy (manifest vs disco); assente = non eseguita. */
+  deployIntegrity?: {
+    checked: boolean
+    totalFiles: number
+    missingCount: number
+    replacedCount: number
+    junctionsMissingCount: number
+  }
+  /** Diagnosi ultimo salvataggio vs load order attivo; assente = non eseguita. */
+  saveDoctor?: {
+    checked: boolean
+    saveName: string | null
+    missingCount: number
+    missingPlugins: string[]
+  }
 }
 
 export interface LaunchReport {
@@ -124,6 +146,32 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
         `${env.skyrim.path ?? 'percorso noto'}${env.skyrim.version ? ` · v${env.skyrim.version}` : ''}`,
       ),
     )
+
+  // 3b. Update guard (probe opzionale): drift di versione = update Steam avvenuto (spiega
+  // PERCHÉ SKSE potrebbe fallire al check successivo); non protetto = rischio latente.
+  if (env.updateGuard && env.skyrim.installed) {
+    const g = env.updateGuard
+    if (g.drift?.changed)
+      c.push(
+        warn(
+          'VerifySkyrim',
+          'Skyrim aggiornato da Steam',
+          `Runtime cambiato: ${g.drift.from} → ${g.drift.to}. I plugin SKSE compilati per la versione precedente potrebbero non caricare`,
+          'Aggiorna SKSE e Address Library al nuovo runtime, oppure ripristina la versione precedente',
+        ),
+      )
+    else if (g.found && !g.protected)
+      c.push(
+        warn(
+          'VerifySkyrim',
+          'Aggiornamenti Steam non bloccati',
+          'Steam può aggiornare Skyrim in qualsiasi momento e rompere SKSE + plugin nativi',
+          'Attiva la protezione aggiornamenti nelle Impostazioni',
+        ),
+      )
+    else if (g.found && g.protected)
+      c.push(ok('VerifySkyrim', 'Protezione aggiornamenti attiva', 'Steam non può aggiornare il runtime moddato'))
+  }
 
   // 4. VerifySKSE
   if (!env.skse.present)
@@ -220,6 +268,45 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
       ),
     )
   else c.push(ok('VerifyManifest', 'Manifest verificato', 'Firma e integrità ok'))
+
+  // 8b. Integrità del deploy (external changes): il manifest è la verità di cosa abbiamo
+  // linkato — file spariti/sostituiti da tool esterni emergono QUI, non come CTD nel gioco.
+  if (env.deployIntegrity?.checked) {
+    const di = env.deployIntegrity
+    const issues = di.missingCount + di.replacedCount + di.junctionsMissingCount
+    if (issues > 0) {
+      const parts: string[] = []
+      if (di.missingCount) parts.push(`${di.missingCount} file mancanti`)
+      if (di.replacedCount) parts.push(`${di.replacedCount} sostituiti esternamente`)
+      if (di.junctionsMissingCount) parts.push(`${di.junctionsMissingCount} junction scollegate`)
+      c.push(
+        warn(
+          'VerifyManifest',
+          'Deploy alterato esternamente',
+          parts.join(', '),
+          'Riesegui il Deploy dalla Dashboard per ripristinare i collegamenti',
+        ),
+      )
+    } else
+      c.push(ok('VerifyManifest', 'Deploy integro', `${di.totalFiles} file del manifest verificati sul disco`))
+  }
+
+  // 8c. Save Doctor: l'ultimo salvataggio referenzia plugin non più nel load order →
+  // CTD al load o progressione corrotta. Diagnosi read-only, warning mai bloccante.
+  if (env.saveDoctor?.checked && env.saveDoctor.missingCount > 0) {
+    const sd = env.saveDoctor
+    const sample = sd.missingPlugins.slice(0, 3).join(', ')
+    c.push(
+      warn(
+        'VerifyLoadOrder',
+        'Ultimo salvataggio a rischio',
+        `${sd.saveName ?? 'save'} richiede ${sd.missingCount} plugin assenti dal load order (${sample}${sd.missingCount > 3 ? ', …' : ''})`,
+        'Reinstalla/riattiva le mod mancanti, oppure prosegui solo con una nuova partita',
+      ),
+    )
+  } else if (env.saveDoctor?.checked) {
+    c.push(ok('VerifyLoadOrder', 'Salvataggio coerente', 'Tutti i plugin dell’ultimo save sono presenti'))
+  }
 
   // 9. VerifyBackups (recommended)
   if (env.backups.count === 0)

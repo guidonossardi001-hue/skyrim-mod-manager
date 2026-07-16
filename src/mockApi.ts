@@ -397,8 +397,15 @@ function buildMockLaunchEnv(): LaunchEnv {
     manifest: { used: false, verified: false, reason: null },
     backups: { count: state.backups.length, lastValid: state.backups.length > 0 },
     launchTarget: s.mo2Path ? 'mo2' : hasSkse ? 'skse' : null,
+    // Anteprima: guard non protetto (mostra il warning e il toggle in Impostazioni ha effetto).
+    updateGuard: { found: true, protected: mockGuardProtected, drift: null },
+    deployIntegrity: undefined,
+    saveDoctor: undefined,
   }
 }
+
+// Stato del mock della protezione aggiornamenti (toggle verificabile in anteprima).
+let mockGuardProtected = false
 
 // ── One-Click Play simulation (browser preview) ──────────────────────────────
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
@@ -789,6 +796,47 @@ export const mockApi = {
       warnings: [],
     }),
     prefer: async () => ({ ok: false as const, error: 'Risoluzione conflitti disponibile solo nell’app desktop' }),
+    // Anteprima: la verifica reale confronta manifest e disco (solo app desktop).
+    verify: async () => ({
+      checked: true,
+      totalFiles: 126,
+      intactFiles: 126,
+      missing: [] as string[],
+      replaced: [] as string[],
+      junctionsMissing: [] as string[],
+      missingCount: 0,
+      replacedCount: 0,
+      junctionsMissingCount: 0,
+    }),
+  },
+
+  // Protezione aggiornamenti Steam (mock con stato: il toggle si riflette nello status).
+  updateGuard: {
+    status: async () => ({
+      found: true,
+      manifestPath: 'C:/Program Files (x86)/Steam/steamapps/appmanifest_489830.acf',
+      protected: mockGuardProtected,
+      autoUpdateBehavior: 0,
+      buildId: '16543012',
+    }),
+    set: async (enabled: boolean) => {
+      mockGuardProtected = enabled === true
+      return { success: true, protected: mockGuardProtected }
+    },
+  },
+
+  // Save Doctor (anteprima: diagnosi d'esempio coerente e innocua).
+  saves: {
+    doctor: async () => ({
+      checked: false,
+      saveName: null,
+      playerName: null,
+      playerLevel: null,
+      playerLocation: null,
+      missingPlugins: [] as string[],
+      missingCount: 0,
+      totalSavePlugins: 0,
+    }),
   },
 
   masterlist: {

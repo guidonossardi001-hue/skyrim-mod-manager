@@ -494,6 +494,46 @@ declare global {
             percent?: number
           }) => void,
         ): () => void
+        // Verifica external-changes: manifest del deploy vs disco. Mirrors DeployVerifyResult
+        // in electron/deploy/verifyDeploy.ts. checked:false = nessun manifest (mai deployato).
+        verify(): Promise<{
+          checked: boolean
+          totalFiles: number
+          intactFiles: number
+          missing: string[]
+          replaced: string[]
+          junctionsMissing: string[]
+          missingCount: number
+          replacedCount: number
+          junctionsMissingCount: number
+        }>
+      }
+      // Protezione aggiornamenti Steam: appmanifest_489830.acf read-only → Steam non può
+      // aggiornare Skyrim e rompere SKSE. Mirrors electron/steam/updateGuard.ts.
+      updateGuard: {
+        status(): Promise<{
+          found: boolean
+          manifestPath: string | null
+          protected: boolean
+          autoUpdateBehavior: number | null
+          buildId: string | null
+        }>
+        set(enabled: boolean): Promise<{ success: boolean; protected: boolean; error?: string }>
+      }
+      // Save Doctor: diagnosi read-only dell'ultimo salvataggio vs load order attivo.
+      // Mirrors SaveDoctorReport in electron/saves/saveDoctor.ts. checked:false = niente
+      // save o non parsabile (mai warning spuri).
+      saves: {
+        doctor(): Promise<{
+          checked: boolean
+          saveName: string | null
+          playerName: string | null
+          playerLevel: number | null
+          playerLocation: string | null
+          missingPlugins: string[]
+          missingCount: number
+          totalSavePlugins: number
+        }>
       }
       // Masterlist LOOT reale (community-curata): regole "after", rank di gruppo, CRC dirty-plugin.
       // Never rejects — inspect ok.

@@ -167,6 +167,16 @@ contextBridge.exposeInMainWorld('api', {
   steam: {
     detect: () => invoke('steam:detect'),
   },
+  // Protezione aggiornamenti Steam: appmanifest read-only (Steam non può più aggiornare
+  // Skyrim e rompere SKSE). Stato + toggle reversibile; nessun path attraversa il bridge.
+  updateGuard: {
+    status: () => invoke('updateGuard:status'),
+    set: (enabled: boolean) => invoke('updateGuard:set', enabled),
+  },
+  // Save Doctor: diagnosi read-only dell'ultimo salvataggio vs load order attivo.
+  saves: {
+    doctor: () => invoke('saves:doctor'),
+  },
   launch: {
     preflight: () => invoke('launch:preflight'),
     run: () => invoke('launch:run'),
@@ -228,6 +238,8 @@ contextBridge.exposeInMainWorld('api', {
     // Risoluzione avanzata: la mod preferita vince i file contesi (peso avversaria+1).
     prefer: (profileId: number, preferredMod: string, overMod: string) =>
       invoke('deploy:prefer', profileId, preferredMod, overMod),
+    // Verifica external-changes: manifest del deploy vs disco (file spariti/sostituiti).
+    verify: () => invoke('deploy:verify'),
     // Subscribe to streamed progress. Returns an unsubscribe function so the
     // renderer can detach the listener (avoids leaks across re-renders/unmounts).
     onProgress: (callback: (p: unknown) => void) => {

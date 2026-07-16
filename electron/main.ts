@@ -22,8 +22,18 @@ import { recoverOnStartup } from './delta/journal'
 import { parseNxmUrl, findNxmUrl, createNxmDownload, validateNxmLink, type NxmLink } from './nexus/nxm'
 import { NxmConsentStore } from './nexus/nxmConsent'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
-import { detectSteamEnv, detectSkse } from './steam/detect'
-import { runPreflight, executeLaunch, buildLaunchEnv } from './launch/preflight'
+import { detectSteamEnv, detectSkse, SKYRIM_SE_APPID } from './steam/detect'
+import {
+  runPreflight,
+  executeLaunch,
+  buildLaunchEnv,
+  recordGameVersion,
+  realGuardFs,
+  runSaveDoctorLive,
+  verifyDeployLive,
+  activeDeployDataDir,
+} from './launch/preflight'
+import { readGuardStatus, setGuardProtection, findAppManifest } from './steam/updateGuard'
 import { runCompatReport } from './launch/compat'
 import { getLoadOrder, saveLoadOrder } from './pluginManager'
 import type { LoadOrderEntry } from '../src/types'
@@ -779,6 +789,39 @@ app.whenReady().then(() => {
   // Steam detection + launch pre-flight (companion mode: read-only, gated launch).
   ipcMain.handle('steam:detect', () => detectSteamEnv())
   ipcMain.handle('launch:preflight', () => runPreflight(getRawDb(), store))
+
+  // ── Protezione aggiornamenti Steam ───────────────────────────────────────────
+  // Steam aggiorna Skyrim → SKSE e i plugin nativi smettono di caricare. Il metodo
+  // community consolidato è l'appmanifest read-only: qui stato + toggle (reversibile).
+  // Compatibile col nostro avvio SKSE-only (Steam non deve lanciare il gioco).
+  ipcMain.handle('updateGuard:status', () => {
+    const { steam } = detectSteamEnv()
+    return readGuardStatus(steam.libraries, SKYRIM_SE_APPID, realGuardFs)
+  })
+  ipcMain.handle('updateGuard:set', (_e, enabled: boolean) => {
+    const { steam } = detectSteamEnv()
+    const manifestPath = findAppManifest(steam.libraries, SKYRIM_SE_APPID, realGuardFs.exists)
+    const res = setGuardProtection(manifestPath, enabled === true, realGuardFs)
+    logger.info(
+      'launch',
+      `protezione aggiornamenti Steam ${enabled ? 'ATTIVATA' : 'disattivata'}: success=${res.success}${res.error ? ` (${res.error})` : ''}`,
+    )
+    return res
+  })
+
+  // Save Doctor: diagnosi read-only dell'ultimo salvataggio vs load order attivo.
+  ipcMain.handle('saves:doctor', () => {
+    const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+    return runSaveDoctorLive(gamePath)
+  })
+
+  // Verifica external-changes del deploy attivo (manifest vs disco, sola lettura).
+  ipcMain.handle('deploy:verify', () => {
+    const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+    const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
+    if (!dataDir) return { checked: false, totalFiles: 0, intactFiles: 0, missing: [], replaced: [], junctionsMissing: [], missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 }
+    return verifyDeployLive(dataDir)
+  })
   ipcMain.handle('launch:run', async () => {
     const r = await executeLaunch(getRawDb(), store)
     if (r.launched) armPostLaunchCrashWatch()
@@ -828,6 +871,7 @@ app.whenReady().then(() => {
     if (res.success) {
       logger.info('launcher', `gioco avviato via ${target.bootstrapperName}: ${target.exe} (pid ${res.pid})`)
       armPostLaunchCrashWatch()
+      recordGameVersion(store, detectSteamEnv().skyrim.version)
     } else logger.warn('launcher', `avvio via ${target.bootstrapperName} fallito: ${res.error}`)
     return { ...res, via: target.bootstrapperId }
   }
@@ -880,6 +924,7 @@ app.whenReady().then(() => {
       },
       recordSuccess: (target) => {
         armPostLaunchCrashWatch()
+        recordGameVersion(store, detectSteamEnv().skyrim.version)
         try {
           const profileId = resolveActiveProfileId(getRawDb(), store)
           recordLaunch(kvStore, { bootstrapperId: target.bootstrapperId, profileId }, new Date().toISOString())

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link2, Trash2, Loader, FolderSync } from 'lucide-react'
+import { Link2, Trash2, Loader, FolderSync, ShieldCheck } from 'lucide-react'
 import { toast } from '@/lib/toast'
 
 // Pannello Deployment (hardlink engine): consuma deploy:run / deploy:purge / deploy:progress.
@@ -31,6 +31,17 @@ interface DeployApi {
       error?: string
     }>
     onProgress(cb: (p: { stage: string; percent?: number; currentMod?: string; currentFile?: string }) => void): () => void
+    verify?(): Promise<{
+      checked: boolean
+      totalFiles: number
+      intactFiles: number
+      missing: string[]
+      replaced: string[]
+      junctionsMissing: string[]
+      missingCount: number
+      replacedCount: number
+      junctionsMissingCount: number
+    }>
   }
 }
 
@@ -57,7 +68,7 @@ const STAGE_LABEL: Record<string, string> = {
 }
 
 export function DeployPanel({ profileId, onLog }: { profileId: number | null; onLog: (msg: string, level?: string) => void }) {
-  const [busy, setBusy] = useState<'deploy' | 'purge' | 'register' | null>(null)
+  const [busy, setBusy] = useState<'deploy' | 'purge' | 'register' | 'verify' | null>(null)
   const [progress, setProgress] = useState<{ stage: string; percent?: number; detail?: string } | null>(null)
   const [summary, setSummary] = useState<string | null>(null)
   const api = (window.api as unknown as DeployApi).deploy
@@ -163,6 +174,40 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
     }
   }
 
+  // Verifica external-changes: manifest vs disco (sola lettura, mai modifica nulla).
+  const runVerify = async () => {
+    if (busy || !api.verify) return
+    setBusy('verify')
+    try {
+      const r = await api.verify()
+      if (!r.checked) {
+        onLog('Verifica deploy: nessun manifest trovato (nessun deploy attivo)', 'warn')
+        toast.info('Nessun deploy da verificare', 'Esegui prima un Deploy')
+        return
+      }
+      const issues = r.missingCount + r.replacedCount + r.junctionsMissingCount
+      if (issues === 0) {
+        const line = `Verifica deploy: ${r.totalFiles} file integri, nessuna modifica esterna`
+        setSummary(line)
+        onLog(line)
+        toast.success('Deploy integro', `${r.totalFiles} file verificati`)
+      } else {
+        const parts: string[] = []
+        if (r.missingCount) parts.push(`${r.missingCount} mancanti (${r.missing.slice(0, 3).join(', ')}…)`)
+        if (r.replacedCount) parts.push(`${r.replacedCount} sostituiti esternamente`)
+        if (r.junctionsMissingCount) parts.push(`${r.junctionsMissingCount} junction scollegate`)
+        const line = `Verifica deploy: ${parts.join(' · ')} — riesegui il Deploy per ripristinare`
+        setSummary(null)
+        onLog(line, 'warn')
+        toast.error('Deploy alterato esternamente', parts.join(' · '))
+      }
+    } catch (e) {
+      toast.error('Verifica fallita', (e as Error).message)
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
     <div className="rounded-xl border border-dark-800 bg-dark-900/40 p-4">
       <div className="flex items-center justify-between mb-2">
@@ -182,6 +227,17 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
             >
               {busy === 'register' ? <Loader size={12} className="animate-spin" /> : <FolderSync size={12} />}{' '}
               Registra estratte
+            </button>
+          )}
+          {api.verify && (
+            <button
+              onClick={runVerify}
+              disabled={busy != null}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Confronta il manifest del deploy col disco: file cancellati o sostituiti da tool esterni emergono qui"
+            >
+              {busy === 'verify' ? <Loader size={12} className="animate-spin" /> : <ShieldCheck size={12} />}{' '}
+              Verifica
             </button>
           )}
           <button

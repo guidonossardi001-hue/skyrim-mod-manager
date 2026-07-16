@@ -117,4 +117,94 @@ describe('runLaunchWorkflow', () => {
     expect(r.canLaunch).toBe(false)
     expect(r.blockingStage).toBe('LaunchMO2OrSKSE')
   })
+
+  // ── Probe opzionali (updateGuard / deployIntegrity / saveDoctor) ────────────
+
+  it('env senza probe opzionali → nessun check aggiuntivo (retrocompatibile)', () => {
+    const stages = runLaunchWorkflow(goodEnv()).checks.map((c) => c.label)
+    expect(stages).not.toContain('Protezione aggiornamenti attiva')
+    expect(stages.some((l) => /Deploy/.test(l))).toBe(false)
+  })
+
+  it('drift versione (update Steam avvenuto) → warning con from→to, non blocca', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        updateGuard: {
+          found: true,
+          protected: true,
+          drift: { changed: true, from: '1.6.1170.0', to: '1.6.1180.0' },
+        },
+      }),
+    )
+    const c = r.checks.find((x) => x.label === 'Skyrim aggiornato da Steam')!
+    expect(c.status).toBe('warning')
+    expect(c.detail).toContain('1.6.1170.0 → 1.6.1180.0')
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('guard non protetto senza drift → warning "attiva la protezione"', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ updateGuard: { found: true, protected: false, drift: { changed: false, from: 'x', to: 'x' } } }),
+    )
+    expect(r.checks.find((x) => x.label === 'Aggiornamenti Steam non bloccati')?.status).toBe('warning')
+  })
+
+  it('guard protetto → ok', () => {
+    const r = runLaunchWorkflow(goodEnv({ updateGuard: { found: true, protected: true, drift: null } }))
+    expect(r.checks.find((x) => x.label === 'Protezione aggiornamenti attiva')?.status).toBe('ok')
+  })
+
+  it('deploy alterato esternamente → warning con conteggi', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        deployIntegrity: {
+          checked: true,
+          totalFiles: 100,
+          missingCount: 2,
+          replacedCount: 1,
+          junctionsMissingCount: 0,
+        },
+      }),
+    )
+    const c = r.checks.find((x) => x.label === 'Deploy alterato esternamente')!
+    expect(c.status).toBe('warning')
+    expect(c.detail).toContain('2 file mancanti')
+    expect(c.detail).toContain('1 sostituiti')
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('deploy integro → ok con totale verificato', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        deployIntegrity: { checked: true, totalFiles: 100, missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 },
+      }),
+    )
+    expect(r.checks.find((x) => x.label === 'Deploy integro')?.detail).toContain('100 file')
+  })
+
+  it('save con plugin mancanti → warning con nomi; save coerente → ok; non verificato → silenzio', () => {
+    const warn = runLaunchWorkflow(
+      goodEnv({
+        saveDoctor: {
+          checked: true,
+          saveName: 'hero.ess',
+          missingCount: 2,
+          missingPlugins: ['Gone.esp', 'Away.esl'],
+        },
+      }),
+    ).checks.find((x) => x.label === 'Ultimo salvataggio a rischio')!
+    expect(warn.status).toBe('warning')
+    expect(warn.detail).toContain('hero.ess')
+    expect(warn.detail).toContain('Gone.esp')
+
+    const okRun = runLaunchWorkflow(
+      goodEnv({ saveDoctor: { checked: true, saveName: 'hero.ess', missingCount: 0, missingPlugins: [] } }),
+    )
+    expect(okRun.checks.find((x) => x.label === 'Salvataggio coerente')?.status).toBe('ok')
+
+    const silent = runLaunchWorkflow(
+      goodEnv({ saveDoctor: { checked: false, saveName: null, missingCount: 0, missingPlugins: [] } }),
+    )
+    expect(silent.checks.some((x) => /salvataggio/i.test(x.label))).toBe(false)
+  })
 })
