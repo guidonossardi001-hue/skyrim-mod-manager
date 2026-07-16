@@ -4,6 +4,11 @@ Formato: [Keep a Changelog](https://keepachangelog.com/) · SemVer.
 
 ## [Unreleased]
 
+## [1.0.1] — 2026-07-16
+
+### Packaging
+- **Installer NSIS ricostruito sullo stack corrente** (Electron 43.1.0, electron-builder 26, Vite 8, Node 24, `disableAsarIntegrity:true` per Smart App Control, `npmRebuild:false` per il modulo nativo FOMOD): `release/Skyrim-AE-Fantasy-Launcher-Setup-1.0.1.exe` (132 MB) + `latest.yml` + `.blockmap` coerenti (PIVOT-13 chiuso). App impacchettata avviata e verificata viva (4 processi, provider Nexus attivo, log boot pulito).
+
 ### Added — GUARD-01: protezione aggiornamenti Steam + verifica deploy + Save Doctor (2026-07-16)
 - **Protezione aggiornamenti Steam** (`electron/steam/updateGuard.ts`): rende read-only `appmanifest_489830.acf` (metodo community standard) così Steam non può aggiornare Skyrim e rompere SKSE/plugin nativi; reversibile in un click dalla card in Impostazioni. Stato reale dall'acf (AutoUpdateBehavior, buildid via `vdf.ts`). Drift detection: la versione runtime vista a ogni lancio riuscito è registrata (`lastKnownGameVersion`) e confrontata in preflight → warning "Skyrim aggiornato da Steam (from → to)".
 - **Verifica external-changes del deploy** (`electron/deploy/verifyDeploy.ts`, T17): confronto manifest ↔ disco (file mancanti, sostituiti esternamente con nlink=1, junction scollegate). Bottone "Verifica" nel DeployPanel + check automatico in preflight ("Deploy alterato esternamente" → riesegui Deploy). Helper condiviso `deploy/resolveTarget.ts` per la dir Data (engine + preflight, zero drift di logica).
