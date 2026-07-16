@@ -4,6 +4,9 @@ Formato: [Keep a Changelog](https://keepachangelog.com/) · SemVer.
 
 ## [Unreleased]
 
+### Added — TOOLS-01: provisioning strumenti dalle release GitHub ufficiali (2026-07-17)
+- **`electron/tools/provision.ts`**: LOOT (loot/loot), SSEEdit (TES5Edit/TES5Edit) e xLODGen (sheson/xLODGen) scaricati dalle release GitHub ufficiali quando mancanti — owner/repo costanti, asset accettato solo dal dominio release del repo (anti-tamper), estrazione atomica, exe individuato per candidati. Le release xEdit recenti shippano `xTESEdit*.exe` (verificato sull'archivio 4.1.5f reale): creato alias `SSEEdit64.exe` (l'exe adatta il gioco al nome). IPC `tools:provision-missing` + bottone "Scarica strumenti (GitHub)" in Impostazioni. DynDOLOD escluso (non su GitHub — dyndolod.info). **Eseguito sulla macchina reale: LOOT 0.29.1 + SSEEdit 4.1.5f + xLODGen v132 installati in `<userData>/tools` e cablati in config** (Pandora già presente, rilevato). 15 test nuovi, suite 858.
+
 ## [1.0.1] — 2026-07-16
 
 ### Packaging
