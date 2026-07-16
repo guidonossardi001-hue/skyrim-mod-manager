@@ -17,3 +17,4 @@
 - ebda8f0 2026-07-17 docs: il launcher non va distribuito — Release/firma non sono residui aperti -- 3 files changed, 14 insertions(+), 3 deletions(-)
 - 5c68efb 2026-07-17 fix(ui): via le voci morte di MO2 e i consigli a vicolo cieco -- 7 files changed, 71 insertions(+), 61 deletions(-)
 - 8263b98 2026-07-17 feat(launch): riparazione automatica pre-avvio (stile Nolvus) + fine caselle finte -- 12 files changed, 604 insertions(+), 57 deletions(-)
+- e5ea4dd 2026-07-17 fix(launch): mai avviare vanilla + falso positivo Creation Club underscore -- 7 files changed, 230 insertions(+), 18 deletions(-)

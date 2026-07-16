@@ -118,6 +118,106 @@ function pluginType(name: string): PluginType | null {
   return m[1] === 'esm' ? 'ESM' : m[1] === 'esl' ? 'ESL' : 'ESP'
 }
 
+// Directory canoniche di una Data di Skyrim. Servono a riconoscere una root VALIDA dal
+// CONTENUTO (come fanno MO2/Vortex) invece che dal nome della cartella.
+const DATA_DIRS = new Set([
+  'meshes',
+  'textures',
+  'scripts',
+  'interface',
+  'sound',
+  'music',
+  'seq',
+  'shadersfx',
+  'strings',
+  'video',
+  'lodsettings',
+  'grass',
+  'dialogueviews',
+  'calientetools',
+  'skse',
+  'netscriptframework',
+  'source',
+  'facegen',
+  'distantlod',
+  'asi',
+  'dllplugins',
+  'nemesis_engine',
+  'pandora_engine',
+  'tools',
+  'dyndolod',
+  'skyproc patchers',
+  'lightplacer',
+  'seasons',
+  'planetdata',
+  'bookcovers',
+])
+const DATA_ROOT_EXT = /\.(esp|esm|esl|bsa|ba2|modgroups)$/i
+
+// Rumore di root che i wrapper reali si portano dietro: non decide la forma dell'albero.
+const ROOT_NOISE_RE = /\.(txt|md|jpg|jpeg|png|webp|pdf|html|ini|7z|zip|rar)$|^(fomod|meta\.ini|readme)/i
+
+/**
+ * true se `rels` (path relativi a una root candidata) sono già una Data valida: almeno un
+ * plugin/BSA alla radice, OPPURE una directory canonica di Data al primo livello.
+ * PURA: usata per decidere se strippare un wrapper, e per rifiutare strip che
+ * peggiorerebbero l'albero.
+ */
+export function looksLikeDataRoot(rels: string[]): boolean {
+  for (const r of rels) {
+    const i = r.indexOf('/')
+    if (i === -1) {
+      if (DATA_ROOT_EXT.test(r)) return true
+    } else if (DATA_DIRS.has(r.slice(0, i).toLowerCase())) return true
+  }
+  return false
+}
+
+/**
+ * Toglie i wrapper di root con nome ARBITRARIO (`Beyond Skyrim Bruma/BSHeartland.esm`,
+ * `Data/MCMHelper.esp`, e annidati come `Mod/Data/`).
+ *
+ * Prima si riconosceva il wrapper per NOME LETTERALE ('data'): un archivio incapsulato in
+ * una cartella col nome della mod sopravviveva fino al piano, i suoi plugin non erano più
+ * alla radice Data e sparivano dal load order — venendo poi riportati come "master mancanti"
+ * benché i file fossero sul disco. Su questa modlist erano 489 mod su 1940.
+ *
+ * FAIL-SAFE: si strippa SOLO se il risultato è una Data riconoscibile. Se lo strip non
+ * migliora l'albero si lascia tutto com'è (= comportamento storico, nessuna regressione).
+ */
+export function stripWrapperDirs(rels: string[], maxDepth = 3): { files: string[]; segments: string[] } {
+  let files = rels
+  const segments: string[] = []
+  for (let depth = 0; depth < maxDepth; depth++) {
+    if (looksLikeDataRoot(files)) break // già una Data valida: non toccare
+    // Candidati alla decisione: i file "veri" (readme/fomod/immagini non contano).
+    const decisive = files.filter((r) => !ROOT_NOISE_RE.test(r))
+    if (!decisive.length) break
+    const first = decisive[0].indexOf('/')
+    if (first <= 0) break // c'è un file deciso alla radice → nessun wrapper uniforme
+    const seg = decisive[0].slice(0, first)
+    const segLower = seg.toLowerCase()
+    // Uniformità: ogni file deciso deve stare sotto lo STESSO primo segmento.
+    const uniform = decisive.every((r) => {
+      const i = r.indexOf('/')
+      return i > 0 && r.slice(0, i).toLowerCase() === segLower
+    })
+    if (!uniform) break
+    files = files
+      .filter((r) => r.toLowerCase().startsWith(`${segLower}/`))
+      .map((r) => r.slice(seg.length + 1))
+      .filter(Boolean)
+    segments.push(seg)
+  }
+  // GUARDIA FAIL-SAFE sullo stato FINALE, non sui passi intermedi: un wrapper annidato
+  // (`Mod/Data/…`) attraversa uno stato intermedio non-Data prima di arrivare a destinazione,
+  // quindi validare ogni passo bloccherebbe proprio i casi che vogliamo risolvere. Se alla
+  // fine l'albero non è riconoscibile come Data, si annulla TUTTO e si lascia l'originale
+  // (= comportamento storico: meglio non deployare che deployare file a caso).
+  if (segments.length && !looksLikeDataRoot(files)) return { files: rels, segments: [] }
+  return { files, segments }
+}
+
 export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   // Deterministic base order (ascending priority, name tie-break) so candidate
   // lists — and therefore the resolved-conflict log — are stable across input order.
@@ -131,19 +231,11 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   // Data/) non finivano mai nel load order.
   const normalized = ordered.map((mod) => {
     const rels = mod.files.map(normRel).filter(Boolean)
-    const wrapped =
-      rels.length > 0 &&
-      rels.every((r) => {
-        const i = r.indexOf('/')
-        return i > 0 && r.slice(0, i).toLowerCase() === 'data'
-      })
-    if (!wrapped) return { mod, files: rels, root: mod.rootDir }
-    const seg = rels[0].slice(0, rels[0].indexOf('/')) // casing originale della cartella Data
-    return {
-      mod,
-      files: rels.map((r) => r.slice(r.indexOf('/') + 1)).filter(Boolean),
-      root: `${mod.rootDir}/${seg}`,
-    }
+    if (!rels.length) return { mod, files: rels, root: mod.rootDir }
+    const { files, segments } = stripWrapperDirs(rels)
+    if (!segments.length) return { mod, files: rels, root: mod.rootDir }
+    // La root efficace scende dentro i wrapper tolti, mantenendone il casing originale.
+    return { mod, files, root: `${mod.rootDir}/${segments.join('/')}` }
   })
 
   // Every mod that writes each destination key (lowercased destRel → candidates).

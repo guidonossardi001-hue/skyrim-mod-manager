@@ -4,6 +4,8 @@ import {
   buildPluginsTxt,
   orderPluginsByDependencies,
   parseDeployManifest,
+  looksLikeDataRoot,
+  stripWrapperDirs,
   BASE_MASTERS,
   type DeployMod,
   type PluginEntry,
@@ -170,6 +172,92 @@ describe('buildPluginsTxt', () => {
     const updates = txt.split('\n').filter((l) => /update\.esm/i.test(l))
     expect(updates).toHaveLength(1) // only the base-master line, not a duplicate '*Update.esm'
     expect(updates[0]).toBe('Update.esm')
+  })
+})
+
+// ── Wrapper con nome ARBITRARIO (regressione reale 2026-07-17) ───────────────
+// Il deploy di 1939 mod si bloccava con "BSHeartland.esm master mancante" benché il file
+// fosse su disco: sta in `10917-Beyond Skyrim Bruma/Beyond Skyrim Bruma/BSHeartland.esm`,
+// cioè dentro un wrapper col nome della mod. Lo strip riconosceva solo il nome letterale
+// 'data', quindi i plugin non erano alla radice Data e sparivano dal load order.
+// Erano 489 mod su 1940.
+
+describe('looksLikeDataRoot', () => {
+  it('riconosce una Data valida da plugin/BSA alla radice', () => {
+    expect(looksLikeDataRoot(['BSHeartland.esm'])).toBe(true)
+    expect(looksLikeDataRoot(['Foo.bsa'])).toBe(true)
+    expect(looksLikeDataRoot(['x.esl', 'readme.txt'])).toBe(true)
+  })
+  it('riconosce una Data valida da directory canoniche di primo livello', () => {
+    expect(looksLikeDataRoot(['textures/x.dds'])).toBe(true)
+    expect(looksLikeDataRoot(['SKSE/Plugins/a.dll'])).toBe(true)
+    expect(looksLikeDataRoot(['MESHES/a.nif'])).toBe(true) // case-insensitive
+  })
+  it('NON riconosce un albero incapsulato in un wrapper arbitrario', () => {
+    expect(looksLikeDataRoot(['Beyond Skyrim Bruma/BSHeartland.esm'])).toBe(false)
+    expect(looksLikeDataRoot(['Data/x.esp'])).toBe(false)
+    expect(looksLikeDataRoot(['readme.txt'])).toBe(false)
+  })
+})
+
+describe('stripWrapperDirs', () => {
+  it('toglie un wrapper col nome della mod (il caso Bruma reale)', () => {
+    const r = stripWrapperDirs(['Beyond Skyrim Bruma/BSHeartland.esm', 'Beyond Skyrim Bruma/BSHeartland.bsa'])
+    expect(r.files).toEqual(['BSHeartland.esm', 'BSHeartland.bsa'])
+    expect(r.segments).toEqual(['Beyond Skyrim Bruma'])
+  })
+  it('toglie wrapper ANNIDATI (Mod/Data/...)', () => {
+    const r = stripWrapperDirs(['My Mod/Data/Thing.esp', 'My Mod/Data/textures/t.dds'])
+    expect(r.files).toEqual(['Thing.esp', 'textures/t.dds'])
+    expect(r.segments).toEqual(['My Mod', 'Data'])
+  })
+  it('una Data GIÀ valida non viene toccata', () => {
+    expect(stripWrapperDirs(['textures/x.dds']).segments).toEqual([])
+    expect(stripWrapperDirs(['SkyUI.esp', 'interface/x.swf']).segments).toEqual([])
+  })
+  it('mod di sole texture: `textures/` NON è un wrapper da togliere', () => {
+    const r = stripWrapperDirs(['textures/armor/a.dds', 'textures/armor/b.dds'])
+    expect(r.segments).toEqual([])
+    expect(r.files).toEqual(['textures/armor/a.dds', 'textures/armor/b.dds'])
+  })
+  it('albero non uniforme → nessuno strip (comportamento storico)', () => {
+    expect(stripWrapperDirs(['A/x.esp', 'B/y.esp']).segments).toEqual([])
+  })
+  it('FAIL-SAFE: se dopo lo strip l’albero non è Data-like, non si strippa', () => {
+    // "Docs/manuale/pagina.dat" → togliendo Docs resterebbe "manuale/..." che non è Data.
+    const r = stripWrapperDirs(['Docs/manuale/pagina.dat', 'Docs/manuale/altro.dat'])
+    expect(r.segments).toEqual([])
+  })
+  it('readme e fomod alla radice non impediscono di riconoscere il wrapper', () => {
+    const r = stripWrapperDirs(['readme.txt', 'Cool Mod/Cool.esp', 'Cool Mod/meshes/a.nif'])
+    expect(r.segments).toEqual(['Cool Mod'])
+    expect(r.files).toContain('Cool.esp')
+  })
+  it('non va in loop infinito su alberi profondi (cap di profondità)', () => {
+    const deep = ['a/b/c/d/e/f/g/plugin.esp']
+    expect(stripWrapperDirs(deep).segments.length).toBeLessThanOrEqual(3)
+  })
+})
+
+describe('computeDeployPlan — wrapper arbitrario', () => {
+  it('il plugin dentro un wrapper col nome della mod entra nel load order (fix Bruma)', () => {
+    const plan = computeDeployPlan([
+      mod('Beyond Skyrim Bruma', 1, [
+        'Beyond Skyrim Bruma/BSHeartland.esm',
+        'Beyond Skyrim Bruma/BSHeartland.bsa',
+        'Beyond Skyrim Bruma/textures/bruma/t.dds',
+      ]),
+    ])
+    expect(plan.plugins.map((p) => p.name)).toEqual(['BSHeartland.esm'])
+    // La sorgente punta DENTRO il wrapper, il path di destinazione è Data-relative.
+    const src = [...plan.hardlinks.map((h) => h.src), ...plan.junctions.map((j) => j.src)]
+    expect(src.every((s) => s.includes('/Beyond Skyrim Bruma/Beyond Skyrim Bruma/'))).toBe(true)
+    expect(plan.hardlinks.every((h) => !h.rel.includes('Beyond Skyrim Bruma/'))).toBe(true)
+  })
+
+  it('una mod di sole texture NON viene strippata (nessun falso positivo)', () => {
+    const plan = computeDeployPlan([mod('Texture Pack', 1, ['textures/a.dds', 'textures/b.dds'])])
+    expect(plan.junctions.map((j) => j.dir)).toEqual(['textures'])
   })
 })
 
