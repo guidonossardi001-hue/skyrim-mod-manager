@@ -4,6 +4,78 @@ Formato: [Keep a Changelog](https://keepachangelog.com/) · SemVer.
 
 ## [Unreleased]
 
+### Added — FOMOD-01: installer FOMOD headless (motore ufficiale Vortex) + scelte del curatore
+- **`@nexusmods/fomod-installer-native`** (motore Vortex reale, .NET Native AOT, N-API 8 stabile — nessun rebuild tra versioni Electron/Node, prebuilds win32-x64): `electron/fomod/fomodApply.ts` (`runFomodHeadless`, `applyFomodInstructions` con journal RENAME + rollback + marker idempotente `.smm-fomod-applied.json`, varianti non scelte eliminate), `collectionChoices.ts` (parse `collection.json` della revision per le scelte del curatore), `engine.ts` (IPC `fomod:fetch-choices`/`scan`/`apply-all`).
+- Le scelte per-mod del curatore **non sono nel GraphQL** delle Collection: vivono dentro il `collection.json` scaricabile dal `downloadLink` della revision (`fetchRevisionDownloadLink`, aggiunto a `electron/nexus/collections.ts`).
+- Card **Strumenti → FOMOD** (Scarica scelte → Applica a tutte, progress + report). Build: `build.asarUnpack` per i file nativi del modulo + `build.npmRebuild:false` (il pacchetto shippa prebuilds; node-gyp lo romperebbe).
+- Quirk API scoperti empiricamente (nessuna documentazione pubblica sufficiente): `scriptPath` = **directory root** della mod (non il path di `ModuleConfig.xml`, altrimenti l'engine lo concatena due volte), `preset` = **array** (mai oggetto, nemmeno vuoto).
+
+### Added — INTEGRITY-01: provenienza API nel gate integrità + conflitti chirurgici + politica spazio
+- **`decideIntegrity()`** (`electron/install/integrity.ts`): nuovo verdetto `'api-provenance'` — accettato **solo** senza hash atteso E quando l'URL è stato risolto dal resolver API autenticato per la coppia modId/fileId esatta (mai per URL diretti/arbitrari). Copre i file troppo recenti per l'indice `md5_search` di Nexus senza indebolire il fail-closed.
+- **Conflitti chirurgici**: IPC `deploy:preview` (dry-run del piano reale di sovrascrittura) + `deploy:prefer` (alza `resolution_weight` della mod scelta) + sezione "Sovrascritture file" in pagina Conflitti con bottone "Inverti precedenza" — **mai** disattivazione della mod.
+- **Politica spazio disco**: archivio eliminato di default dopo install riuscita (`deleteArchiveAfterInstall`, override `keepArchives`). Pulizia one-shot eseguita su dati reali: 1737 archivi, **73,8 GB liberati** (disco 94%→87%).
+
+### Added — QUEUE-01: fix archivi RAR mascherati + retry bulk + budget plugin + preset ENB reali
+- **`sniffArchiveKind()`** (`electron/install/extract.ts`): dispatch sui **magic byte reali** ("Rar!"/7z/zip) invece che sull'estensione — 12/14 download "falliti" erano in realtà **RAR serviti da Nexus con estensione `.7z`**, rifiutati dal 7za bundlato (senza codec Rar). Bottone **"Riprova falliti"** + IPC `download:retry-failed` (riusa la cache, rifà solo l'estrazione per i RAR).
+- **Budget plugin** nel deployer: blocco pre-scrittura `plugin-limit` se si superano i **254 slot "full"** (ESM/ESP non-light, base+CC+mod) o i **4096 slot "light"** (ESL/FE), contati dai flag reali dell'header TES4.
+- **Gestione preset ENB reale** (`electron/enb/`): `scan` nelle mod estratte, `apply` copia (non hardlink) nella root del gioco + backup `.smm-enb-bak` + manifest `.smm-enb-manifest.json`, `remove` ripristina; avviso se manca il core `d3d11.dll` (enbdev.com, non ridistribuibile).
+- Fix minore: riconoscimento del nuovo formato URL Nexus (`games/<gioco>/collections/<slug>`) in `parseCollectionInput`.
+
+### Added — DEPLOY-GAME-01: deploy nella Data del gioco reale
+- `deployTarget: 'game'` in config + `resolveGameDataDir()`: senza MO2/VFS il gioco vede **solo** la propria cartella `Data`, quindi il deploy scrive lì direttamente (non più uno staging separato).
+- **Reversibilità garantita**: file pre-esistenti nel target vengono salvati come `<file>.smm-vanilla.bak` prima di essere sovrascritti; il purge del manifest li **ripristina**. Le junction degradano a hardlink per-file (con backup) quando la directory di destinazione esiste già (caso normale su Data reale, es. `Data/SKSE`). Euristica di pulizia (`allowHeuristics`) disattivata quando il target è il gioco reale — solo purge esatto da manifest.
+
+### Added — CRASH-01: analisi automatica crash dopo il lancio
+- `electron/launch/crashLogAnalyzer.ts`: `parseCrashLog`/`findProbableCulprit`/`analyzeCrashLog` — parser puro per il formato Crash Logger SSE, verificato su un log reale da 835 righe (identifica correttamente il DLL colpevole in un caso sintetico; su log reali "solo moduli motore" riporta nessun colpevole invece di indovinare a caso).
+- `crashEngine.ts`: `armCrashWatch`/`stopCrashWatch` — poll ogni 30s per 3h dopo ogni lancio riuscito (timer `unref()`'d, non blocca l'uscita dell'app), evento `crash:detected` → toast in `App.tsx` col modulo colpevole. IPC `crash:list-recent`/`crash:analyze` anche per l'uso manuale in Strumenti.
+- Rimossa la card ENB **mock** in Strumenti (sostituita dalla card reale, vedi QUEUE-01 sopra).
+
+### Added — SKSE-ONLY-01: avvio esclusivo via SKSE interno + ottimizzazioni performance
+- **MO2 rimosso dal percorso di avvio di default**: `bootstrapper.ts` → `DEFAULT_BOOTSTRAPPERS = [skseBootstrapper, dragonLoaderBootstrapper]` (`mo2Bootstrapper` resta esportato ma non usato); `preflight.ts` → `resolveGameLaunchTarget()`/`executeLaunch` semplificati a **solo SKSE**, nessun ramo MO2. Il gioco moddato si avvia esclusivamente tramite "Skyrim AE Fantasy Launcher" col suo SKSE interno.
+- **Ottimizzazioni performance** (da ricerca best-practice Electron): `Menu.setApplicationMenu(null)` in produzione, `spellcheck:false` in `webPreferences`, fallback anti-ghost-window (`setTimeout` show() a 5s), handler `did-fail-load`, `app.on('before-quit')` → checkpoint DB; `applyPragmas` esteso (`cache_size`/`temp_store`/`mmap_size`/`optimize`); `downloads:list` refactorato su un singolo prepared statement riusato.
+- Settings: rimossi i campi MO2/percorso mods (non più pertinenti al flusso SKSE-only).
+
+### Added — LOOT-MASTERLIST-01: masterlist LOOT reale (regole/gruppi/dirty-plugin)
+- **`electron/plugins/lootMasterlist.ts`**: parser YAML (via `js-yaml`, gestisce anchor/alias/merge-key nativamente) della masterlist community reale `loot/skyrimse` (GitHub) — **verificato sul file reale**: 3162 plugin, 47 gruppi, 429 regole, 872 voci dirty, parse in 42ms. `fetchMasterlistYaml` scarica su richiesta esplicita (bottone "Aggiorna masterlist" in Strumenti — mai automatico).
+- **`masterlistCache.ts`**: cache persistita su disco (`loadMasterlistCache`/`refreshMasterlistCache`/`mergeMasterlists`).
+- **`dirtyPluginCheck.ts` + `crc32.ts`**: CRC32 (IEEE 802.3, implementazione pura, verificata contro il test vector standard `0xCBF43926`) per il match dei plugin "dirty" (ITM/UDR/deleted nav) contro le voci della masterlist.
+- **`espParser.ts`**: parser puro dell'header binario **TES4** (magic, `HEDR`, subrecord `MAST` per i master reali, gestione del subrecord esteso `XXXX` necessario per l'`ONAM` grande di USSEP) — verificato **355/355** su plugin reali.
+
+### Added — CATALOG-REBUILD-01: svuotamento catalogo + import diretto da Nexus Collections v2
+- **Bottone "Svuota catalogo"** (IPC `catalog:wipe`): cancella `modlist_catalog`+`downloads`+`mods` in transazione e imposta il flag persistito `catalogSeedDisabled`. **Rimossa la `useEffect`** in `Catalog.tsx` che ri-seedava automaticamente il bundle statico ad ogni mount — causa della regressione ricorrente per cui il catalogo "resuscitava" da solo con `nexus_id` storicamente sbagliati anche dopo uno svuotamento voluto.
+- **`electron/nexus/collections.ts`**: `parseCollectionInput` (slug nudo o URL, tollerante ai delimitatori) + `fetchCollectionRevision` — interroga il **GraphQL v2 ufficiale** di Nexus (`collectionRevision(slug, revision)`) invece di dipendere dal pacchetto npm pubblicato `@nexusmods/nexus-api` (tarball 1.1.5, verificato via `npm pack`: **non contiene ancora** i metodi collections presenti solo su GitHub master). `buildCatalogRowsFromCollection` produce righe con `nexus_file_id` sempre valorizzato (mai stimato).
+
+### Added — LOADORDER-01: load order LOOT-like sui master reali dei plugin
+- **`electron/plugins/lootSort.ts`**: topological sort con partizione master-space, blocco duro su master mancante o ciclo (sui master reali/fallback), regole soft con scarto su ciclo, arricchito da `groupRank` (ranking dei gruppi della masterlist community).
+- **`electron/deploy/lootOrder.ts`**: adapter che collega `espParser`+`lootSort`+masterlist al deploy — legge i master **dai binari reali dei plugin**, mai dal catalogo (che resta solo fallback quando l'header è illeggibile).
+
+### Fixed — LAUNCH-FIX-01: riconoscimento naming AE dell'Address Library
+- Il gate di avvio riconosce ora `versionlib-*.bin` (naming reale AE) oltre al nome legacy, evitando falsi negativi sul controllo Address Library presente.
+
+### Added — DEPLOY-SYNC-01: bridge mass-sync→mods + load order/manifest/plugins.txt
+- **`electron/deploy/`**: piano di deploy dependency-aware (ordine di caricamento), **manifest** (`deploy:run`/`deploy:purge` con purge esatto da manifest, non euristico), scrittura `plugins.txt` di sistema, UI dedicata. Bridge che collega le estrazioni del mass-sync alla tabella `mods` + normalizzazione dei mod con wrapper `Data/` nell'archivio.
+
+### Added — CATALOG-VALIDATE-01: pruning collezione + validazione fail-safe
+- Pruning delle righe catalogo dal dominio DOMAIN + validazione dello schema download (righe malformate scartate invece di propagare un mod non installabile).
+
+### Hardened — DISK-GATE-02: gatekeeper disco unificato fail-closed
+- Consolidato il pre-flight disco (mass-sync + install) dietro un unico gatekeeper fail-closed; chiuse le note review avversariali della revisione precedente (PRECHECK-01).
+
+### Changed — CI/DEPS-01: Electron 43 + toolchain aggiornata
+- Bump **Electron 43.1.0**, **better-sqlite3 12.11.1**, **electron-builder 26**, **Vite 8** (rolldown, no esbuild), **Vitest 4**, **Node 24** (SRB-002). CI: `actions/checkout`/`actions/setup-node` a v5.
+
+### Added — MASS-INSTALL-01: budget ESL/254 + traduzioni ITA + worker a due fasi
+- Resolver budget plugin "full"(254)/"light"(ESL,4096) + resolver traduzioni ITA + worker a due fasi (scan poi install) + profilo qualità texture (2K/4K) con selezione variante per-mod + pool install a concorrenza limitata (cap 3, stato in coda).
+
+### Added — CATALOG-DEDUP-01: modlist completa dal backup Vortex
+- Import del modlist de-duplicato (~4568 voci) dal backup Vortex; rimossi i doppioni cross-source (id placeholder curato vs id reale Vortex).
+
+### Hardened — SECURITY-01/SRB-001: chiusura red-team + residual findings
+- Batch di hardening sicurezza: fail-closed su install/hash-gating, confinamento IPC a root whitelisted (fs read-dir/file-open/reveal-folder), consenso esplicito per `nxm://`, anti-rollback freshness gate sui manifest di update firmati, sanitizzazione risposta validazione API Nexus, validazione dei path in `settings:set` + rifiuto exec UNC al lancio, purga plaintext residuo, guardia clock-rollback.
+
+### Added — LOADORDER-EDITOR-01: editor ordine caricamento interattivo
+- Editor drag-and-drop con toggle e salvataggio, write-back con backup, componente di visualizzazione ordine caricamento.
+
 ### Added — AUTODETECT-01: rilevamento automatico percorsi gioco+tool (zero config)
 - **Modulo backend** `electron/tools/autoDetect.ts`: elimina la configurazione manuale della schermata "Percorsi Gioco e Strumenti". Sequenza: (a) **cartella Skyrim** via registro Steam (riusa `detectSteamEnv`, nessuna nuova dipendenza, read-only); (b) **scansione tool** — `scanForExes` (DFS a profondità limitata, default 3, denylist `SKIP_DIRS` per Windows/WindowsApps/node_modules/…, single-pass multi-tool, primo match per tool) su root standard (`standardToolRoots`: cartella gioco + parent, `C:\Games|Modding|Mods|Tools|Modlists|Wabbajack`, Desktop/Downloads/Documents, `%LOCALAPPDATA%\ModOrganizer|LOOT`, Program Files, librerie Steam) per `ModOrganizer.exe` (+ cartella `mods` derivata), `LOOT.exe`, `SSEEdit(x64/64).exe`, `DynDOLODx64/DynDOLOD.exe`, `xLODGen(x64).exe`; 7-Zip via `detect7zPath`, Pandora via `findPandoraExe`; (c) **fallback silenzioso** — i tool non trovati restano vuoti, mai bloccante.
 - **Cablaggio**: IPC `settings:auto-detect` + helper `applyDetectedPaths(det, {fillEmptyOnly})` in `main.ts` (persiste solo i percorsi trovati nel DB cifrato via `store.set`; `fillEmptyOnly` non sovrascrive mai valori già impostati dall'utente) + **auto-run all'avvio** (`setImmediate` in `whenReady`, `fillEmptyOnly:true`). `window.api.settings.autoDetect` (preload + tipi). Bottone **"Rileva Automaticamente"** in cima alla sezione "Percorsi Gioco e Strumenti" (`Settings.tsx`, spinner + feedback), rifà la scansione on-click e salva.
