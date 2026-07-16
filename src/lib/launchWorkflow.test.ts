@@ -194,9 +194,91 @@ describe('runLaunchWorkflow', () => {
     expect(r.checks.find((x) => x.label === 'Deploy integro')?.detail).toContain('100 file')
   })
 
+  // ── Regressione REALE (2026-07-17): il gioco è stato avviato VANILLA ──────────
+  // Il deploy era fallito, plugins.txt di sistema conteneva 1 sola riga, ma la checklist
+  // segnava "0/254 slot [ok]" e il lancio è proseguito: il check aveva solo il tetto.
+
+  it('ZERO plugin con mod abilitate → BLOCCA: il gioco partirebbe vanilla', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ plugins: [], mods: { total: 1939, enabled: 1939, installed: 1939 }, pluginsSource: 'system' }),
+    )
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
+    expect(r.firstFix).toMatch(/Deploy/i)
+  })
+
+  it('ZERO plugin ma NESSUNA mod abilitata → nessun blocco (vanilla voluto)', () => {
+    const r = runLaunchWorkflow(goodEnv({ plugins: [], mods: { total: 1939, enabled: 0, installed: 1939 } }))
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('plugins.txt non trovata → il dettaglio lo dice (diagnosi, non "0 plugin")', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ plugins: [], mods: { total: 5, enabled: 5, installed: 5 }, pluginsSource: 'none' }),
+    )
+    expect(r.checks.find((c) => c.label === 'Nessun plugin attivo')?.detail).toMatch(/non trovata/i)
+  })
+
+  // ── Gate anti-corruzione del salvataggio: le 3 condizioni ────────────────────
+
+  const risky = {
+    saveDoctor: { checked: true, saveName: 'hero.ess', missingCount: 12, missingPlugins: ['A.esp', 'B.esp'] },
+    deployIntegrity: { checked: false, totalFiles: 0, missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 },
+    mods: { total: 1939, enabled: 1939, installed: 1939 },
+  }
+
+  it('save a rischio + deploy assente + mod abilitate → BLOCCA (le 3 condizioni)', () => {
+    const r = runLaunchWorkflow(goodEnv(risky))
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
+    expect(r.checks.find((c) => c.status === 'fail')?.detail).toMatch(/hero\.ess/)
+  })
+
+  it('save a rischio MA deploy INTEGRO → nessun blocco (le mod sono collegate ora)', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        ...risky,
+        deployIntegrity: { checked: true, totalFiles: 500, missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 },
+      }),
+    )
+    expect(r.canLaunch).toBe(true)
+    expect(r.checks.find((c) => c.label === 'Ultimo salvataggio a rischio')?.status).toBe('warning')
+  })
+
+  it('save a rischio MA nessuna mod abilitata → nessun blocco (vanilla voluto)', () => {
+    const r = runLaunchWorkflow(goodEnv({ ...risky, mods: { total: 1939, enabled: 0, installed: 1939 } }))
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('deploy assente ma save SANO → nessun blocco (niente da corrompere)', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        ...risky,
+        saveDoctor: { checked: true, saveName: 'hero.ess', missingCount: 0, missingPlugins: [] },
+      }),
+    )
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('nessun save verificabile → nessun blocco (partita nuova in vanilla non corrompe)', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ ...risky, saveDoctor: { checked: false, saveName: null, missingCount: 0, missingPlugins: [] } }),
+    )
+    expect(r.canLaunch).toBe(true)
+  })
+
   it('save con plugin mancanti → warning con nomi; save coerente → ok; non verificato → silenzio', () => {
     const warn = runLaunchWorkflow(
       goodEnv({
+        // Deploy INTEGRO: le mod sono collegate ora, quindi il save a rischio resta un
+        // avviso informativo. Senza deploy integro lo stesso input BLOCCA (vedi gate sopra).
+        deployIntegrity: {
+          checked: true,
+          totalFiles: 100,
+          missingCount: 0,
+          replacedCount: 0,
+          junctionsMissingCount: 0,
+        },
         saveDoctor: {
           checked: true,
           saveName: 'hero.ess',

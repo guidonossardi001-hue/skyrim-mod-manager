@@ -8,6 +8,7 @@ import { detectSteamEnv, detectSkse, SKYRIM_SE_APPID } from '../steam/detect'
 import { isAddressLibraryBin, addressLibraryMatchesVersion } from './addressLibrary'
 import { resolveMo2Plugins } from '../steam/mo2'
 import { runLaunchWorkflow, type LaunchEnv, type LaunchReport } from '../../src/lib/launchWorkflow'
+import { parsePluginsTxt } from '../../src/lib/compatibility'
 import { resolveActiveProfileId } from '../util/activeProfile'
 import { readGuardStatus, checkVersionDrift, type UpdateGuardFsOps } from '../steam/updateGuard'
 import { verifyDeployedInstance, type VerifyIo } from '../deploy/verifyDeploy'
@@ -61,6 +62,30 @@ export function defaultSavesDir(): string {
 export function systemPluginsTxtPath(): string | null {
   const base = process.env.LOCALAPPDATA
   return base ? join(base, 'Skyrim Special Edition', 'plugins.txt') : null
+}
+
+/**
+ * Load order REALE del gioco. Il launcher avvia SKSE direttamente: il gioco legge la
+ * plugins.txt DI SISTEMA — la stessa che il deploy scrive. Leggere invece quella del
+ * profilo MO2 (che non usiamo, e il cui percorso non è nemmeno impostabile) rendeva il
+ * check dei plugin CIECO per costruzione: sempre 0 plugin, quindi sempre "sotto il limite".
+ * MO2 resta un fallback informativo per installazioni ibride legacy.
+ */
+export function resolveRealPlugins(mo2Plugins: { name: string; enabled: boolean }[]): {
+  plugins: { name: string; enabled: boolean }[]
+  source: 'system' | 'mo2' | 'none'
+} {
+  try {
+    const p = systemPluginsTxtPath()
+    if (p && existsSync(p)) {
+      const parsed = parsePluginsTxt(readFileSync(p, 'utf8'))
+      if (parsed.length) return { plugins: parsed, source: 'system' }
+    }
+  } catch {
+    /* illeggibile → si prova il fallback */
+  }
+  if (mo2Plugins.length) return { plugins: mo2Plugins, source: 'mo2' }
+  return { plugins: [], source: 'none' }
 }
 
 /** Save Doctor con IO reale — usato dal preflight e dall'IPC `saves:doctor`. */
@@ -135,6 +160,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     valid: !!mo2Path && existsSync(mo2Path) && /modorganizer\.exe$/i.test(mo2Path),
   }
   const mo2Plugins = resolveMo2Plugins(mo2Path)
+  const realPlugins = resolveRealPlugins(mo2Plugins.plugins)
 
   // Mods / modlist completeness from the DB (active profile).
   const profileId = resolveActiveProfileId(db, store)
@@ -220,7 +246,9 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     addressLibrary,
     mo2,
     mods: { total: mods.length, enabled, installed },
-    plugins: mo2Plugins.plugins, // parsed from <MO2>/profiles/<active>/plugins.txt (T3)
+    // Load order REALE (plugins.txt di sistema, quella che il gioco legge), non MO2.
+    plugins: realPlugins.plugins,
+    pluginsSource: realPlugins.source,
     modlist: { complete: missing.length === 0, missing },
     manifest,
     backups: { count: backupCount, lastValid: backupCount > 0 },

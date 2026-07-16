@@ -37,7 +37,10 @@ export interface LaunchEnv {
   addressLibrary: { present: boolean; correctForVersion: boolean | null }
   mo2: { path: string | null; valid: boolean }
   mods: { total: number; enabled: number; installed: number }
+  /** Load order REALE dal plugins.txt che il gioco legge (di sistema), non da MO2. */
   plugins: { name: string; enabled: boolean }[]
+  /** Provenienza di `plugins`: rende diagnosticabile il caso vuoto invece di confonderlo con "0 plugin". */
+  pluginsSource?: 'system' | 'mo2' | 'none'
   modlist: { complete: boolean; missing: string[] }
   manifest: { used: boolean; verified: boolean; reason: string | null }
   backups: { count: number; lastValid: boolean }
@@ -227,9 +230,23 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
     )
   else c.push(ok('VerifyModlist', 'Modlist completa', `${env.mods.installed}/${env.mods.total} installate`))
 
-  // 7. VerifyLoadOrder (ESP/ESM hard limit)
+  // 7. VerifyLoadOrder — limite INFERIORE prima di quello superiore.
+  // Il check storico validava solo il tetto (>254): ZERO plugin cadeva nel ramo "ok" e il
+  // launcher avviava Skyrim VANILLA con l'intera modlist abilitata. Nessun invariante legava
+  // `mods.enabled` a `plugins.length`, quindi il caso peggiore passava come sano.
   const slots = countFullSlots(env.plugins)
-  if (slots > LOAD_ORDER_LIMIT)
+  if (env.plugins.length === 0 && env.mods.enabled > 0)
+    c.push(
+      fail(
+        'VerifyLoadOrder',
+        'Nessun plugin attivo',
+        `${env.mods.enabled} mod abilitate ma il load order è vuoto (${
+          env.pluginsSource === 'none' ? 'plugins.txt non trovata' : 'plugins.txt vuota'
+        }): il gioco partirebbe VANILLA`,
+        'Esegui il Deploy dalla Dashboard per collegare le mod e generare il load order',
+      ),
+    )
+  else if (slots > LOAD_ORDER_LIMIT)
     c.push(
       fail(
         'VerifyLoadOrder',
@@ -291,10 +308,35 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
       c.push(ok('VerifyManifest', 'Deploy integro', `${di.totalFiles} file del manifest verificati sul disco`))
   }
 
-  // 8c. Save Doctor: l'ultimo salvataggio referenzia plugin non più nel load order →
-  // CTD al load o progressione corrotta. Diagnosi read-only, warning mai bloccante.
-  if (env.saveDoctor?.checked && env.saveDoctor.missingCount > 0) {
-    const sd = env.saveDoctor
+  // 8c. Save Doctor + GATE ANTI-CORRUZIONE.
+  // Il verdetto guarda lo STATO OSSERVATO, mai l'esito dell'azione di riparazione: un
+  // deploy fallito ma con un deploy precedente ancora integro è un avvio sicuro, mentre
+  // "riparazione ok" senza mod collegate non lo è. Il blocco scatta SOLO con tutte e tre:
+  //   1. INTENTO moddato      → mod abilitate nel profilo
+  //   2. REALTÀ non moddata   → nessun deploy integro sul disco
+  //   3. PROVA del danno      → il save richiede plugin che non verrebbero caricati
+  // Ognuna elimina un falso positivo: (1) chi gioca vanilla di proposito disabilita le mod;
+  // (2) chi ha un deploy sano non viene bloccato da un register/backup fallito; (3) senza
+  // save, o con save vanilla, non c'è nulla da corrompere e non si disturba l'utente.
+  const deployIntact =
+    !!env.deployIntegrity?.checked &&
+    env.deployIntegrity.missingCount +
+      env.deployIntegrity.replacedCount +
+      env.deployIntegrity.junctionsMissingCount ===
+      0
+  const sd = env.saveDoctor
+  if (sd?.checked && sd.missingCount > 0 && env.mods.enabled > 0 && !deployIntact) {
+    const sample = sd.missingPlugins.slice(0, 3).join(', ')
+    c.push(
+      fail(
+        'VerifyLoadOrder',
+        'Avvio bloccato: il salvataggio verrebbe danneggiato',
+        `${sd.saveName ?? 'Il salvataggio'} richiede ${sd.missingCount} plugin che ora non verrebbero caricati (${sample}${sd.missingCount > 3 ? ', …' : ''}). Caricarlo così cancella dal salvataggio tutto ciò che dipende da quelle mod.`,
+        'Esegui il Deploy dalla Dashboard per ricollegare le mod, oppure disabilita le mod del profilo se vuoi davvero giocare in vanilla',
+      ),
+    )
+  } else if (sd?.checked && sd.missingCount > 0) {
+    // Deploy integro o vanilla voluto: resta un avviso informativo, non un blocco.
     const sample = sd.missingPlugins.slice(0, 3).join(', ')
     c.push(
       warn(
@@ -304,7 +346,7 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
         'Reinstalla/riattiva le mod mancanti, oppure prosegui solo con una nuova partita',
       ),
     )
-  } else if (env.saveDoctor?.checked) {
+  } else if (sd?.checked) {
     c.push(ok('VerifyLoadOrder', 'Salvataggio coerente', 'Tutti i plugin dell’ultimo save sono presenti'))
   }
 

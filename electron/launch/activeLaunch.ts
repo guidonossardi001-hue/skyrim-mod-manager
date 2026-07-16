@@ -112,10 +112,11 @@ export async function runActiveLaunch(deps: ActiveLaunchDeps): Promise<ActiveLau
       return { status: 'skipped', detail: 'Riparazione automatica non disponibile', critical: false }
     }
     const r = await deps.autoRepair()
-    if (r.changed) {
-      env = deps.buildEnv()
-      report = runLaunchWorkflow(env)
-    }
+    // Rilettura INCONDIZIONATA: il gate a valle deve giudicare lo stato reale del disco dopo
+    // la riparazione, non lo snapshot precedente. Rileggere solo su `changed` fidava di ciò
+    // che la riparazione DICHIARA di aver fatto; qui conta solo ciò che è davvero successo.
+    env = deps.buildEnv()
+    report = runLaunchWorkflow(env)
     if (!r.enabled) return { status: 'skipped', detail: r.summary, critical: false }
     if (r.failed) {
       return {

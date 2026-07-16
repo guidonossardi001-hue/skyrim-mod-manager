@@ -12,8 +12,12 @@ import type { PluginType } from './plan'
 // simply yields an empty list (graceful degradation).
 
 // Naming conventions, kept in sync with electron/install/stockGame.ts vanilla patterns.
-const CC_PLUGIN_RE = /^(cc[a-z0-9]+-.+|_resourcepack)\.(esm|esl)$/i
-const CC_ARCHIVE_RE = /^(cc[a-z0-9]+-.+|_resourcepack|marketplacetextures)\.bsa$/i
+// Il separatore accetta `-` E `_`: la convenzione Bethesda usa il trattino su ~80 plugin CC
+// ma `ccKRTSSE001_Altar.esl` (Saints & Seducers altar) usa l'underscore. Col solo `-` quel
+// plugin non veniva riconosciuto come Creation Club → restava fuori dai master disponibili →
+// ogni mod che lo richiede veniva bocciata con "master mancante" benché il file fosse lì.
+const CC_PLUGIN_RE = /^(cc[a-z0-9]+[-_].+|_resourcepack)\.(esm|esl)$/i
+const CC_ARCHIVE_RE = /^(cc[a-z0-9]+[-_].+|_resourcepack|marketplacetextures)\.bsa$/i
 const CCC_FILE = 'Skyrim.ccc' // Bethesda's authoritative CC load-order manifest
 
 export interface CCFile {
@@ -70,6 +74,14 @@ export function detectCreationClub(stockGameDataDir?: string): CCPackage[] {
     return [] // unreadable Data folder → graceful empty
   }
 
+  // Skyrim.ccc è il manifest UFFICIALE di Bethesda dei CC posseduti: usarlo come fonte di
+  // verità rende il riconoscimento immune a ogni futura eccezione di naming (il regex resta
+  // come fallback per una Data senza .ccc). L'intersezione con `entries` è implicita: il
+  // loop parte dai file realmente presenti, quindi un .ccc che elenca CC non installati
+  // non può inventare pacchetti.
+  const ccc = readCccOrder(stockGameDataDir)
+  const isCccPlugin = (name: string) => ccc.has(name.toLowerCase())
+
   const byBase = new Map<string, CCPackage>()
   const baseNameOf = (file: string) => file.replace(/\.(esm|esl|bsa)$/i, '')
   const pkgFor = (base: string): CCPackage => {
@@ -80,7 +92,8 @@ export function detectCreationClub(stockGameDataDir?: string): CCPackage[] {
   }
 
   for (const name of entries) {
-    const isPlugin = CC_PLUGIN_RE.test(name)
+    // Plugin: dichiarato nel .ccc di Bethesda OPPURE conforme alla convenzione di naming.
+    const isPlugin = isCccPlugin(name) ? /\.(esm|esl)$/i.test(name) : CC_PLUGIN_RE.test(name)
     if (!isPlugin && !CC_ARCHIVE_RE.test(name)) continue // not CC content
     const p = pkgFor(baseNameOf(name))
     p.files.push({ rel: name, src: join(stockGameDataDir, name) })
@@ -94,9 +107,8 @@ export function detectCreationClub(stockGameDataDir?: string): CCPackage[] {
   // Deterministic file order within each package (plugin-agnostic, by name).
   for (const p of byBase.values()) p.files.sort((a, b) => a.rel.toLowerCase().localeCompare(b.rel.toLowerCase()))
 
-  // Order packages by their plugin's position in Skyrim.ccc; unlisted/archive-only
-  // packages follow alphabetically. This preserves Bethesda's intended load order.
-  const ccc = readCccOrder(stockGameDataDir)
+  // Order packages by their plugin's position in Skyrim.ccc (già letto sopra); unlisted /
+  // archive-only packages follow alphabetically. This preserves Bethesda's intended order.
   const idx = (p: CCPackage) => (p.plugin ? (ccc.get(p.plugin.toLowerCase()) ?? Infinity) : Infinity)
   return [...byBase.values()].sort(
     (a, b) => idx(a) - idx(b) || a.name.toLowerCase().localeCompare(b.name.toLowerCase()),

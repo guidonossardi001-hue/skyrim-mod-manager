@@ -90,3 +90,49 @@ describe('detectCreationClub — graceful degradation', () => {
     expect(detectCreationClub('')).toEqual([])
   })
 })
+
+// ── Regressione REALE: separatore underscore nel naming Creation Club ─────────
+// Bug osservato sul setup dell'utente: il deploy delle 1939 mod si bloccava con
+// "master mancante: cckrtsse001_altar.esl" benché il file fosse nella Data del gioco.
+// Causa: CC_PLUGIN_RE accettava solo il trattino, ma questo CC ufficiale (Saints &
+// Seducers) usa l'underscore — unico su ~80. Non riconosciuto come CC ⇒ fuori dai
+// master disponibili ⇒ ogni mod che lo richiede bocciata.
+describe('detectCreationClub — naming con underscore (regressione reale)', () => {
+  it('riconosce ccKRTSSE001_Altar.esl come Creation Club (separatore underscore)', () => {
+    touch('cckrtsse001_altar.esl')
+    touch('cckrtsse001_altar.bsa')
+    const pkgs = detectCreationClub(dataDir)
+    const altar = pkgs.find((p) => p.name.toLowerCase() === 'cckrtsse001_altar')
+    expect(altar).toBeDefined()
+    expect(altar!.plugin).toBe('cckrtsse001_altar.esl')
+    expect(altar!.pluginType).toBe('ESL')
+    expect(ccPluginOrder(pkgs)).toContain('cckrtsse001_altar.esl')
+  })
+
+  it('il naming col trattino continua a funzionare (nessuna regressione)', () => {
+    touch('ccbgssse001-fish.esm')
+    touch('_ResourcePack.esl')
+    const names = ccPluginOrder(detectCreationClub(dataDir)).map((n) => n.toLowerCase())
+    expect(names).toContain('ccbgssse001-fish.esm')
+    expect(names).toContain('_resourcepack.esl')
+  })
+
+  it('Skyrim.ccc è fonte di verità: un CC con naming fuori convenzione è comunque riconosciuto', () => {
+    // Robustezza verso future eccezioni Bethesda senza dover ritoccare il regex.
+    touch('ccWeirdNameNoSeparator.esl')
+    touch('Skyrim.ccc', 'ccWeirdNameNoSeparator.esl\n')
+    const pkgs = detectCreationClub(dataDir)
+    expect(pkgs.find((p) => p.plugin === 'ccWeirdNameNoSeparator.esl')).toBeDefined()
+  })
+
+  it('un .ccc che elenca CC NON presenti su disco non inventa pacchetti', () => {
+    touch('Skyrim.ccc', 'ccNonInstallato.esl\nccAltroAssente.esm\n')
+    expect(detectCreationClub(dataDir)).toEqual([])
+  })
+
+  it('una mod utente qualsiasi NON diventa Creation Club', () => {
+    touch('AnimeFollower.esp')
+    touch('SkyUI_SE.esp')
+    expect(detectCreationClub(dataDir)).toEqual([])
+  })
+})
