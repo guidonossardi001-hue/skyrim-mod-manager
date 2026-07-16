@@ -12,3 +12,4 @@
 - ba496d5 2026-07-16 docs(go-no-go): packaging NSIS 1.0.1 verificato — GO pieno, PIVOT-13 chiuso -- 2 files changed, 7 insertions(+), 4 deletions(-)
 - 7fa42fb 2026-07-17 feat(tools): provisioning LOOT/SSEEdit/xLODGen dalle release GitHub ufficiali -- 8 files changed, 483 insertions(+), 3 deletions(-)
 - 8fe18fc 2026-07-17 docs(changelog): TOOLS-01 provisioning strumenti GitHub -- 2 files changed, 4 insertions(+)
+- c299440 2026-07-17 feat(backup): compressione gzip backup profilo (T11) + pulizia TODO stale -- 5 files changed, 121 insertions(+), 13 deletions(-)

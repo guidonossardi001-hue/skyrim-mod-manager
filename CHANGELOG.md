@@ -4,6 +4,11 @@ Formato: [Keep a Changelog](https://keepachangelog.com/) · SemVer.
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-07-17
+
+### Packaging
+- **Installer NSIS ricostruito** con dentro tutti i fix di questa sessione (GUARD-01, TOOLS-01, T11): `release/Skyrim-AE-Fantasy-Launcher-Setup-1.0.2.exe` (132 MB) + `latest.yml` + `.blockmap` coerenti. App impacchettata avviata e verificata viva (4 processi, log boot pulito, provider Nexus attivo).
+
 ### Added — T11: backup profilo compressi gzip (2026-07-17)
 - `electron/backup/manager.ts`: i nuovi backup profilo sono scritti gzip-compressi (`.json.gz`, tipicamente 80%+ più piccoli — rilevante quando se ne accumulano decine su un disco quasi pieno). Retrocompatibile al 100%: `listBackups` e `restoreProfileBackup` riconoscono i vecchi backup `.json` in chiaro tramite sniffing dei magic byte gzip (non dall'estensione) — nessuna migrazione, i backup esistenti restano ripristinabili. `deleteBackup` ripulisce entrambe le varianti + sidecar. Snapshot DB (`.db`, raro, pre-delta) lasciato non compresso: resta un artefatto di recovery manuale. Incrementale scartato: il contenuto è un dump di righe DB, non file — diff incrementale sarebbe complessità senza beneficio su questo volume di dati. +7 test, suite 864.
 - Pulizia backlog: T6 (search catalogo locale), T8 (endpoint `nexus:search` legacy) e T13 (`secrets/release_pub.pem` ridondante) erano già risolti in sessioni precedenti non documentate — verificati e chiusi in TODO.md.
