@@ -51,6 +51,7 @@ export default function Catalog() {
   const [updatingCatalog, setUpdatingCatalog] = useState(false)
   const [importingVortex, setImportingVortex] = useState(false)
   const [importingCollection, setImportingCollection] = useState(false)
+  const [queueingMissing, setQueueingMissing] = useState(false)
   const [collectionInput, setCollectionInput] = useState('')
   const [deduping, setDeduping] = useState(false)
   const [pruning, setPruning] = useState(false)
@@ -288,6 +289,42 @@ export default function Catalog() {
       toast.error('Import Collection fallito', (e as Error).message)
     } finally {
       setImportingCollection(false)
+    }
+  }
+
+  // File di collection mancanti in locale: mod multi-file (main + patch ESL/USSEP/addon) che la
+  // vecchia dedup per modId scartava. Il piano è read-only; la conferma accoda e avvia la coda.
+  const queueMissingFiles = async () => {
+    setQueueingMissing(true)
+    try {
+      const plan = await window.api.catalog.planMissingFiles()
+      if (!plan.ok) {
+        toast.error('Piano file mancanti fallito', plan.error ?? 'errore sconosciuto')
+        return
+      }
+      if (!plan.missing) {
+        toast.info('Nessun file mancante', 'Tutti i file della collection risultano già scaricati o in coda')
+        return
+      }
+      if (
+        !window.confirm(
+          `Scaricare ${plan.missing} file mancanti della collection (~${plan.totalMB ?? 0} MB)?\n\n` +
+            'Sono i file aggiuntivi delle mod multi-file (main + patch ESL/USSEP/addon). ' +
+            'Le mod già scaricate ed estratte NON vengono toccate.',
+        )
+      )
+        return
+      const res = await window.api.catalog.queueMissingFiles()
+      if (res.ok) {
+        await window.api.download.processPending()
+        toast.success('File mancanti in coda', `${res.queued ?? 0} download avviati — segui la pagina Download`)
+      } else {
+        toast.error('Accodamento fallito', res.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Accodamento fallito', (e as Error).message)
+    } finally {
+      setQueueingMissing(false)
     }
   }
 
@@ -555,6 +592,22 @@ export default function Catalog() {
               ) : (
                 <>
                   <Boxes size={12} /> Importa Collection Nexus
+                </>
+              )}
+            </button>
+            <button
+              onClick={queueMissingFiles}
+              disabled={queueingMissing}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+              title="Scarica i file aggiuntivi delle mod multi-file della collection (main + patch ESL/USSEP/addon) non ancora presenti in locale. Le mod già estratte non vengono toccate."
+            >
+              {queueingMissing ? (
+                <>
+                  <Loader size={12} className="animate-spin" /> Verifica...
+                </>
+              ) : (
+                <>
+                  <Download size={12} /> Scarica file mancanti
                 </>
               )}
             </button>

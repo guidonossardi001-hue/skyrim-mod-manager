@@ -11,6 +11,7 @@
 
 import { httpStatusOf } from '../install/retryPolicy'
 import type { CatalogRow } from '../catalog/vortexImport'
+import type { HttpGetJson } from './downloadLink'
 
 export interface JsonResponse {
   status?: number
@@ -22,7 +23,8 @@ export type HttpPostJson = (
   cfg: { headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<JsonResponse>
 
-const GRAPHQL_URL = 'https://api.nexusmods.com/v2/graphql'
+const API_ORIGIN = 'https://api.nexusmods.com'
+const GRAPHQL_URL = `${API_ORIGIN}/v2/graphql`
 
 // Marker in modlist_catalog.notes: distingue una riga importata da Collection (autoritativa,
 // stessa fonte del download reale) da seed curato o import Vortex.
@@ -161,7 +163,15 @@ export async function fetchCollectionRevision(
       if (typeof modId !== 'number' || modId <= 0) continue
       if (typeof fileId !== 'number' || fileId <= 0) continue
       if (typeof name !== 'string' || !name.trim()) continue
-      const sizeBytes = typeof m.file?.size === 'number' && m.file.size > 0 ? m.file.size : Number(m.file?.sizeInBytes) || 0
+      // `sizeInBytes` è il valore in BYTE (stringa BigInt); `size` è in KB (eredità API v1).
+      // Prima si preferiva `size` leggendolo come byte: ogni stima pesava 1024 volte meno.
+      const inBytes = Number(m.file?.sizeInBytes)
+      const sizeBytes =
+        Number.isFinite(inBytes) && inBytes > 0
+          ? inBytes
+          : typeof m.file?.size === 'number' && m.file.size > 0
+            ? m.file.size * 1024
+            : 0
       mods.push({ modId, fileId, name: name.trim(), version: m.version ?? m.file?.version ?? '', sizeBytes, optional: !!m.optional })
     }
     return {
@@ -185,13 +195,57 @@ export async function fetchCollectionRevision(
 }
 
 /**
- * Recupera il downloadLink dell'ARCHIVIO della revision (contiene collection.json con le
- * scelte FOMOD del curatore — non esposte dal graph sui modFiles). Stessa query minimale.
+ * Il graph NON ritorna un URL scaricabile: `downloadLink` è un path RELATIVO all'origin API
+ * ("/v2/collections/<id>/revisions/<id>/download_link"). Il client ufficiale lo concatena a
+ * BASE_URL (`param.BASE_URL + downloadLink`) — qui la stessa risoluzione, che lascia intatto
+ * un eventuale link già assoluto. Rifiuta host fuori da nexusmods.com: il valore diventa una
+ * URL a cui inviamo la API key, quindi non basta che arrivi da una fonte fidata.
+ */
+export function resolveRevisionLinkUrl(link: string): string {
+  let url: URL
+  try {
+    url = new URL(link, API_ORIGIN)
+  } catch {
+    throw new CollectionFetchError(`downloadLink della revision non interpretabile: "${link}"`)
+  }
+  if (url.protocol !== 'https:' || !/(^|\.)nexusmods\.com$/i.test(url.hostname))
+    throw new CollectionFetchError(`downloadLink della revision non attendibile: "${link}"`)
+  return url.toString()
+}
+
+/**
+ * L'endpoint download_link della revision NON risponde come il v1 dei file di mod (array nudo
+ * di { URI, name, short_name }): ritorna un OGGETTO { download_links: [...] } oppure
+ * { download_link: {...} } (client ufficiale: `res.download_links ?? [res.download_link]`).
+ * Accetta entrambi, più l'array nudo, così un allineamento dell'API al formato v1 non rompe nulla.
+ */
+export function parseCollectionDownloadUrl(data: unknown): string {
+  const d = data as { download_links?: unknown; download_link?: unknown } | null
+  const list: unknown[] = Array.isArray(data)
+    ? data
+    : Array.isArray(d?.download_links)
+      ? d.download_links
+      : d?.download_link != null
+        ? [d.download_link]
+        : []
+  for (const e of list) {
+    const uri = typeof e === 'string' ? e : (e as { URI?: unknown } | null)?.URI
+    if (typeof uri === 'string' && /^https?:\/\//i.test(uri)) return uri
+  }
+  throw new CollectionFetchError("Risposta Nexus priva di un URI per l'archivio della revision")
+}
+
+/**
+ * URL CDN dell'ARCHIVIO della revision (contiene collection.json con le scelte FOMOD del
+ * curatore — non esposte dal graph sui modFiles). Due passi, come il client ufficiale:
+ * graph → downloadLink relativo → GET dell'endpoint download_link → URI del CDN.
  */
 export async function fetchRevisionDownloadLink(
   http: HttpPostJson,
+  httpGet: HttpGetJson,
   opts: { slug: string; revision?: number | null; apiKey: string; signal?: AbortSignal },
 ): Promise<string> {
+  if (!opts.apiKey?.trim()) throw new CollectionFetchError('Nessuna API key Nexus configurata')
   const hasRevision = typeof opts.revision === 'number' && opts.revision > 0
   const decl = hasRevision ? '($slug: String!, $revision: Int, $adult: Boolean)' : '($slug: String!, $adult: Boolean)'
   const args = hasRevision
@@ -199,32 +253,79 @@ export async function fetchRevisionDownloadLink(
     : 'slug: $slug, viewAdultContent: $adult'
   const variables: Record<string, unknown> = { slug: opts.slug, adult: true }
   if (hasRevision) variables.revision = opts.revision
-  const res = await http(
-    GRAPHQL_URL,
-    { query: `query RevLink${decl} { collectionRevision(${args}) { downloadLink } }`, variables },
-    {
-      headers: { apikey: opts.apiKey, 'Content-Type': 'application/json', 'User-Agent': 'SkyrimAEModManager/1.0' },
+  try {
+    const res = await http(
+      GRAPHQL_URL,
+      { query: `query RevLink${decl} { collectionRevision(${args}) { downloadLink } }`, variables },
+      {
+        headers: { apikey: opts.apiKey, 'Content-Type': 'application/json', 'User-Agent': 'SkyrimAEModManager/1.0' },
+        signal: opts.signal,
+      },
+    )
+    const body = res.data as {
+      data?: { collectionRevision?: { downloadLink?: unknown } | null }
+      errors?: { message?: string }[]
+    }
+    const rev = body?.data?.collectionRevision
+    if (!rev) {
+      // Gli errori GraphQL viaggiano con HTTP 200 e `data: null`: senza leggerli qui, un
+      // "Collection not found" diventava un generico "downloadLink non disponibile".
+      const msg = body?.errors?.map((e) => e.message).filter(Boolean).join('; ')
+      throw new CollectionFetchError(msg || `Revision della collezione "${opts.slug}" non trovata`, 404)
+    }
+    if (typeof rev.downloadLink !== 'string' || !rev.downloadLink.trim())
+      throw new CollectionFetchError('downloadLink della revision non disponibile dal graph')
+    const dl = await httpGet(resolveRevisionLinkUrl(rev.downloadLink), {
+      headers: { apikey: opts.apiKey, Accept: 'application/json', 'User-Agent': 'SkyrimAEModManager/1.0' },
       signal: opts.signal,
-    },
-  )
-  const body = res.data as { data?: { collectionRevision?: { downloadLink?: unknown } } }
-  const link = body?.data?.collectionRevision?.downloadLink
-  if (typeof link !== 'string' || !/^https?:\/\//i.test(link))
-    throw new CollectionFetchError('downloadLink della revision non disponibile dal graph')
-  return link
+    })
+    return parseCollectionDownloadUrl(dl.data)
+  } catch (e) {
+    if (e instanceof CollectionFetchError) throw e
+    const status = httpStatusOf(e)
+    if (status === 401) throw new CollectionFetchError('API key Nexus non valida (401)', status)
+    if (status === 403)
+      throw new CollectionFetchError(
+        "Accesso negato (403) all'archivio della revision: collezione privata, per adulti o non tua",
+        status,
+      )
+    if (status === 404)
+      throw new CollectionFetchError(`Archivio della revision "${opts.slug}" non trovato (404)`, status)
+    if (status === 429)
+      throw new CollectionFetchError('Limite richieste Nexus superato (429): riprova più tardi', status)
+    throw new CollectionFetchError(
+      `Recupero archivio della revision fallito${status ? ` (HTTP ${status})` : ''}: ${(e as Error).message}`,
+      status,
+    )
+  }
 }
 
-/** Mappa una collezione già recuperata in righe modlist_catalog (stesso shape dell'import Vortex). */
+/**
+ * Mappa una collezione già recuperata in righe modlist_catalog (stesso shape dell'import Vortex).
+ * UNA RIGA PER FILE, non per mod: 156 mod della collection reale hanno più file required
+ * (main + patch ESL/USSEP, o addirittura main + suoi addon — es. Beyond Skyrim Bruma), e la
+ * vecchia dedup per modId ne buttava 200 tenendo un file arbitrario (a volte la patch senza
+ * il master → missing masters al lancio). La dedup è per coppia (modId, fileId); nomi duplicati
+ * DENTRO lo stesso mod vengono disambiguati col fileId perché il nome diventa la cartella di
+ * estrazione `<nexus_id>-<nome>` (collisione = il secondo install sostituirebbe il primo).
+ */
 export function buildCatalogRowsFromCollection(result: CollectionRevisionResult): CatalogRow[] {
-  const seen = new Set<number>()
+  const seen = new Set<string>()
+  const nameCount = new Map<string, number>()
+  for (const m of result.mods) {
+    const k = `${m.modId} ${m.name.toLowerCase()}`
+    nameCount.set(k, (nameCount.get(k) ?? 0) + 1)
+  }
   const rows: CatalogRow[] = []
   for (const m of result.mods) {
-    if (seen.has(m.modId)) continue
-    seen.add(m.modId)
+    const pair = `${m.modId}:${m.fileId}`
+    if (seen.has(pair)) continue
+    seen.add(pair)
+    const dupName = (nameCount.get(`${m.modId} ${m.name.toLowerCase()}`) ?? 0) > 1
     rows.push({
       nexus_id: m.modId,
       nexus_file_id: m.fileId,
-      name: m.name.slice(0, 300),
+      name: (dupName ? `${m.name} (file ${m.fileId})` : m.name).slice(0, 300),
       category: result.collectionName.slice(0, 100) || 'Collection',
       subcategory: null,
       priority_order: 1000,

@@ -226,6 +226,9 @@ declare global {
           total?: number
           error?: string
         }>
+        // File di collection mancanti in locale (mod multi-file). Never rejects — inspect ok.
+        planMissingFiles(): Promise<{ ok: boolean; missing?: number; totalMB?: number; error?: string }>
+        queueMissingFiles(): Promise<{ ok: boolean; queued?: number; error?: string }>
         // Remove cross-source name duplicates from the catalog. Never rejects.
         dedupe(): Promise<{ success: boolean; removed?: number; total?: number; error?: string }>
         // Svuotamento TOTALE: catalogo + coda download + mods del profilo; spegne l'auto-seed
@@ -326,6 +329,11 @@ declare global {
         updateStatus(id: number, status: string, extra?: Record<string, unknown>): Promise<void>
         // Riprova in blocco tutti i download falliti (la cache archivi viene riusata).
         retryFailed(): Promise<{ retried: number }>
+      }
+      // Motore della coda (preload `download`, singolare — namespace distinto da `downloads`).
+      download: {
+        // Avvia la lavorazione delle righe 'pending' in coda (rispetta la concorrenza).
+        processPending(): Promise<unknown>
       }
       nexus: {
         // The API key lives ONLY in the main process (encrypted secret store);

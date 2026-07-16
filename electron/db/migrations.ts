@@ -299,6 +299,62 @@ export const MIGRATIONS: Migration[] = [
       `)
     },
   },
+  {
+    version: 11,
+    name: 'catalog-multi-file',
+    up: (db) => {
+      // Le Collection Nexus hanno mod con PIÙ file required (main + patch ESL/USSEP, o main +
+      // addon — 156 mod / 200 file sulla collection reale): il vincolo inline `nexus_id UNIQUE`
+      // permetteva UNA sola riga per mod e l'import ne scartava il resto. Si ricostruisce la
+      // tabella senza quel vincolo (SQLite non sa rimuovere un constraint inline) e l'unicità
+      // passa a due indici:
+      //   • (nexus_id, nexus_file_id) — più file per mod, mai lo stesso file due volte;
+      //   • nexus_id parziale su nexus_file_id IS NULL — le righe senza file (seed curato)
+      //     restano una-per-mod come prima, così i re-import non le duplicano.
+      if (tableExists(db, 'modlist_catalog')) {
+        const ddl = (
+          db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='modlist_catalog'").get() as
+            | { sql: string }
+            | undefined
+        )?.sql
+        if (ddl && /nexus_id\s+INTEGER\s+UNIQUE/i.test(ddl)) {
+          // Ricostruzione DINAMICA: le colonne reali includono quelle aggiunte dalle migrazioni
+          // 3 e 8, quindi lo schema nuovo si deriva da PRAGMA table_info, non da una lista fissa.
+          const cols = db.prepare('PRAGMA table_info(modlist_catalog)').all() as {
+            name: string
+            type: string
+            notnull: number
+            dflt_value: string | null
+            pk: number
+          }[]
+          const colDefs = cols
+            .map((c) => {
+              if (c.pk) return `${c.name} INTEGER PRIMARY KEY AUTOINCREMENT`
+              let def = `${c.name} ${c.type || 'TEXT'}`
+              if (c.notnull) def += ' NOT NULL'
+              if (c.dflt_value != null) def += ` DEFAULT ${c.dflt_value}`
+              return def
+            })
+            .join(',\n            ')
+          const colNames = cols.map((c) => c.name).join(', ')
+          db.exec(`
+            CREATE TABLE modlist_catalog_new (
+            ${colDefs}
+            );
+            INSERT INTO modlist_catalog_new (${colNames}) SELECT ${colNames} FROM modlist_catalog;
+            DROP TABLE modlist_catalog;
+            ALTER TABLE modlist_catalog_new RENAME TO modlist_catalog;
+          `)
+        }
+        db.exec(`
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_nexus_file
+            ON modlist_catalog(nexus_id, nexus_file_id);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_nexus_nofile
+            ON modlist_catalog(nexus_id) WHERE nexus_file_id IS NULL;
+        `)
+      }
+    },
+  },
 ]
 
 export interface MigrationResult {

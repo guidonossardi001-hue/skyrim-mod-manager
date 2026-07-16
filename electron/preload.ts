@@ -79,6 +79,10 @@ contextBridge.exposeInMainWorld('api', {
     pruneCollection: (query: string, apply?: boolean) => invoke('catalog:prune-collection', query, apply),
     // Data-integrity check schema download (coda + catalogo, fail-safe: flagga, non cancella).
     validateDownloads: () => invoke('catalog:validate-downloads'),
+    // File di collection mancanti in locale (mod multi-file: main + patch ESL/addon).
+    // plan = solo conteggio; queue = crea le righe mods+downloads (poi downloads.processPending).
+    planMissingFiles: () => invoke('catalog:plan-missing-files'),
+    queueMissingFiles: () => invoke('catalog:queue-missing-files'),
     // Remove cross-source name duplicates (curated placeholder-id row vs the Vortex real-id row).
     dedupe: () => invoke('catalog:dedupe'),
     // Svuotamento TOTALE: catalogo + coda download + mods del profilo; spegne l'auto-seed.

@@ -3,7 +3,13 @@ import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync
 import { join } from 'path'
 import type { SqliteDb } from '../db/sqlite'
 import { extractArchive } from '../install/extract'
-import { parseCollectionManifest, indexChoices, type ParsedCollectionManifest } from './collectionChoices'
+import { expectedModDirName } from '../catalog/missingFiles'
+import {
+  parseCollectionManifest,
+  indexChoices,
+  type CollectionModChoices,
+  type ParsedCollectionManifest,
+} from './collectionChoices'
 import {
   hasFomod,
   fomodApplied,
@@ -23,7 +29,9 @@ export interface FomodEngineOptions {
   getApiKey: () => string | undefined
   getCollectionRef: () => { slug: string | null; revision: number | null }
   fetchRevisionDownloadLink: (slug: string, revision: number | null, apiKey: string) => Promise<string>
-  downloadToFile: (url: string, destPath: string, apiKey: string) => Promise<void>
+  // Senza apiKey di proposito: l'URI del CDN è già firmato e la chiave non deve lasciare
+  // api.nexusmods.com (stessa regola di streamToFile per i download delle mod).
+  downloadToFile: (url: string, destPath: string) => Promise<void>
   bundled7zaPath?: string
   full7zPath?: string
   gameVersion: () => string
@@ -36,6 +44,40 @@ const CHOICES_CACHE = 'collection-choices.json'
 
 export function initFomodEngine(opts: FomodEngineOptions) {
   const choicesCachePath = () => join(opts.resolveChoicesDir(), CHOICES_CACHE)
+
+  // Le scelte del curatore sono PER FILE (un mod multi-file ha scelte diverse per file):
+  // il fileId di una cartella estratta si ricava dalla riga downloads che l'ha creata
+  // (stesso schema nome `<nexus_id>-<nome sanificato>`), col modId dal prefisso come
+  // fallback per le cartelle nate fuori dalla coda (es. massSync).
+  const dirFileIdMap = (): Map<string, number> => {
+    const map = new Map<string, number>()
+    try {
+      const rows = opts.db
+        .prepare(
+          'SELECT nexus_id, file_id, name FROM downloads WHERE nexus_id IS NOT NULL AND file_id IS NOT NULL',
+        )
+        .all() as { nexus_id: number; file_id: number; name: string }[]
+      for (const r of rows) map.set(expectedModDirName(r.nexus_id, r.name), r.file_id)
+    } catch {
+      /* schema legacy senza downloads: si resta sul fallback per modId */
+    }
+    return map
+  }
+
+  const choicesForDir = (
+    idx: ReturnType<typeof indexChoices> | null,
+    byDir: Map<string, number>,
+    dir: string,
+  ): CollectionModChoices | null => {
+    if (!idx) return null
+    const fileId = byDir.get(dir)
+    if (fileId != null) {
+      const hit = idx.byFileId.get(fileId)
+      if (hit) return hit
+    }
+    const modId = Number(dir.split('-')[0])
+    return Number.isInteger(modId) ? (idx.byModId.get(modId) ?? null) : null
+  }
 
   const loadCachedManifest = (): ParsedCollectionManifest | null => {
     try {
@@ -57,7 +99,7 @@ export function initFomodEngine(opts: FomodEngineOptions) {
       const dir = opts.resolveChoicesDir()
       mkdirSync(dir, { recursive: true })
       const archivePath = join(dir, 'revision-archive.bin')
-      await opts.downloadToFile(url, archivePath, apiKey)
+      await opts.downloadToFile(url, archivePath)
       const outDir = join(dir, 'revision-extracted')
       if (existsSync(outDir)) rmSync(outDir, { recursive: true, force: true })
       await extractArchive(archivePath, outDir, {
@@ -94,6 +136,7 @@ export function initFomodEngine(opts: FomodEngineOptions) {
       const modsRoot = opts.resolveModsRoot()
       const manifest = loadCachedManifest()
       const idx = manifest ? indexChoices(manifest) : null
+      const byDir = idx ? dirFileIdMap() : new Map<string, number>()
       const dirs = existsSync(modsRoot)
         ? readdirSync(modsRoot).filter((d) => {
             try {
@@ -108,11 +151,14 @@ export function initFomodEngine(opts: FomodEngineOptions) {
       let withChoices = 0
       for (const d of dirs) {
         const p = join(modsRoot, d)
-        if (!hasFomod(p)) continue
+        // Una mod APPLICATA non ha più la dir fomod/ (rimossa dalla ristrutturazione): il
+        // marker è l'unica prova. Contare solo hasFomod() mostrava "0 già applicate" per
+        // costruzione — l'insieme {fomod/ presente E marker presente} è vuoto.
+        const done = fomodApplied(p)
+        if (!done && !hasFomod(p)) continue
         total++
-        if (fomodApplied(p)) applied++
-        const modId = Number(d.split('-')[0])
-        if (idx && Number.isInteger(modId) && idx.byModId.get(modId)?.choices?.length) withChoices++
+        if (done) applied++
+        else if (choicesForDir(idx, byDir, d)?.choices?.length) withChoices++
       }
       return { ok: true as const, total, applied, withChoices, choicesCached: !!manifest }
     } catch (e) {
@@ -126,6 +172,7 @@ export function initFomodEngine(opts: FomodEngineOptions) {
       const modsRoot = opts.resolveModsRoot()
       const manifest = loadCachedManifest()
       const idx = manifest ? indexChoices(manifest) : null
+      const byDir = idx ? dirFileIdMap() : new Map<string, number>()
       const dirs = readdirSync(modsRoot).filter((d) => {
         try {
           const p = join(modsRoot, d)
@@ -162,9 +209,7 @@ export function initFomodEngine(opts: FomodEngineOptions) {
         const modDir = join(modsRoot, d)
         opts.onProgress?.({ done: i, total: dirs.length, current: d })
         report.processed++
-        const modId = Number(d.split('-')[0])
-        const entry =
-          idx && Number.isInteger(modId) ? (idx.byModId.get(modId) ?? null) : null
+        const entry = choicesForDir(idx, byDir, d)
         const preset = (entry?.choices ?? []) as FomodPreset
         if (!entry?.choices?.length) report.defaultsUsed++
         const run = await runFomodHeadless(modDir, preset, ctx)

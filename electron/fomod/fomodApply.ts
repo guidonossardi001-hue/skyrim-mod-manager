@@ -144,26 +144,52 @@ export async function runFomodHeadless(
   const sup = native.testSupported(files, ['XmlScript'])
   if (!sup.supported) return { ok: false, supported: false, error: 'installer non XmlScript (richiede intervento manuale)' }
   try {
+    // I callback del motore nativo scattano via setImmediate: un throw lì dentro NON è
+    // catturato da questo try/catch (boundary async) e diventa un uncaughtException del main
+    // — caso reale: `cont` non-funzione su alcuni installer ("a is not a function" ripetuto
+    // nel log), col dialogo mai avanzato e `installer.install` in attesa PER SEMPRE
+    // (apply-all fermo su una mod per mezz'ora). Doppia difesa: chiamate guardate/try-catch
+    // nei callback + watchdog sull'install, così una mod patologica fallisce e si prosegue.
     let continueFn: ((fwd: boolean, step: number) => void) | null = null
+    const safeContinue = (fn: unknown, step: number) => {
+      if (typeof fn !== 'function') return
+      setImmediate(() => {
+        try {
+          ;(fn as (fwd: boolean, step: number) => void)(true, step)
+        } catch {
+          /* dialogo già chiuso/step non valido: l'esito arriva comunque da install() o dal watchdog */
+        }
+      })
+    }
     const installer = new native.NativeModInstaller(
       () => ctx.knownPlugins,
       () => '1.0.0',
       () => ctx.gameVersion,
       (ext) => (ext.toUpperCase() === 'SKSE' ? ctx.skseVersion : ''),
       (_name, _img, _sel, cont) => {
-        continueFn = cont
+        continueFn = typeof cont === 'function' ? cont : null
         // Primo avanzamento: le selezioni sono già decise da preset/preselect.
-        setImmediate(() => cont(true, 0))
+        safeContinue(cont, 0)
       },
       () => {
         continueFn = null
       },
       (_steps, current) => {
         // Step successivi visibili: continua finché l'executor non chiude il dialogo.
-        if (continueFn) setImmediate(() => continueFn!(true, current))
+        safeContinue(continueFn, current)
       },
     )
-    const res = await installer.install(files, STOP_PATTERNS, modDir, modDir, preset ?? [], true, false)
+    const INSTALL_TIMEOUT_MS = 180_000
+    const res = await Promise.race([
+      installer.install(files, STOP_PATTERNS, modDir, modDir, preset ?? [], true, false),
+      new Promise<'timeout'>((r) => setTimeout(() => r('timeout'), INSTALL_TIMEOUT_MS).unref?.()),
+    ])
+    if (res === 'timeout')
+      return {
+        ok: false,
+        supported: true,
+        error: `installer bloccato oltre ${INSTALL_TIMEOUT_MS / 1000}s (dialogo mai avanzato): saltato`,
+      }
     if (!res) return { ok: false, supported: true, error: 'installer annullato/esito nullo' }
     return { ok: true, supported: true, message: res.message, instructions: res.instructions }
   } catch (e) {

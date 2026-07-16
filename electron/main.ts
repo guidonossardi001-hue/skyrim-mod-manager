@@ -6,7 +6,7 @@ import { spawn } from 'child_process'
 import Store from 'electron-store'
 import Database from 'better-sqlite3'
 import axios from 'axios'
-import { initDownloadManager } from './downloadManager'
+import { initDownloadManager, assertSafeDirectUrl } from './downloadManager'
 import { initInstallManager } from './installManager'
 import { initBackupManager } from './backupManager'
 import { initWabbajack } from './wabbajack'
@@ -90,8 +90,10 @@ import {
   fetchCollectionRevision,
   fetchRevisionDownloadLink,
   buildCatalogRowsFromCollection,
+  NEXUS_COLLECTION_IMPORT_NOTE,
   type CollectionRevisionResult,
 } from './nexus/collections'
+import { planMissingFiles } from './catalog/missingFiles'
 import { initFomodEngine } from './fomod/engine'
 import { axiosGet, axiosJson, axiosPostJson, axiosText } from './http/axiosAdapters'
 import { initMasterlistEngine } from './plugins/masterlistEngine'
@@ -298,7 +300,10 @@ function initDatabase(): boolean {
 
     CREATE TABLE IF NOT EXISTS modlist_catalog (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      nexus_id INTEGER UNIQUE,
+      -- niente UNIQUE inline su nexus_id: una collection può avere più file per mod.
+      -- L'unicità è sugli indici della migrazione 11: (nexus_id, nexus_file_id) +
+      -- parziale su nexus_id per le righe senza file.
+      nexus_id INTEGER,
       name TEXT NOT NULL,
       category TEXT NOT NULL,
       subcategory TEXT,
@@ -714,12 +719,17 @@ app.whenReady().then(() => {
       revision: (store.get('collectionRevision') as number | undefined) ?? null,
     }),
     fetchRevisionDownloadLink: (slug, revision, apiKey) =>
-      fetchRevisionDownloadLink(axiosPostJson, { slug, revision, apiKey }),
-    downloadToFile: async (url, destPath, apiKey) => {
+      fetchRevisionDownloadLink(axiosPostJson, axiosJson, { slug, revision, apiKey }),
+    // L'URI del CDN arriva dalla risposta dell'API, quindi passa dallo stesso guard degli
+    // altri download diretti (https, niente host interni). NIENTE apikey qui: il link è già
+    // firmato (md5/expires/user_id) e la chiave finirebbe nei log di un host che non è
+    // api.nexusmods.com — e follow-redirects la inoltrerebbe anche cross-host (filtra solo
+    // Authorization/Proxy-Authorization/Cookie). Stessa regola di streamToFile per le mod.
+    downloadToFile: async (url, destPath) => {
       const axios = (await import('axios')).default
-      const res = await axios.get(url, {
+      const res = await axios.get(assertSafeDirectUrl(url), {
         responseType: 'arraybuffer',
-        headers: { apikey: apiKey, 'User-Agent': 'SkyrimAEModManager/1.0' },
+        headers: { 'User-Agent': 'SkyrimAEModManager/1.0' },
         maxContentLength: 512 * 1024 * 1024,
       })
       writeFileSync(destPath, Buffer.from(res.data as ArrayBuffer))
@@ -2352,6 +2362,80 @@ ipcMain.handle('catalog:import-nexus-collection', async (_e, input: string) => {
     imported,
     deduped,
     total: after,
+  }
+})
+
+// File di collection MANCANTI in locale (mod multi-file: main + patch ESL/USSEP/addon che la
+// vecchia dedup per modId scartava). `plan` è read-only (conteggio per la UI); `queue` crea le
+// righe mods+downloads per le coppie (nexus_id, file_id) senza download né cartella estratta —
+// il lavoro già fatto non viene MAI rifatto. La coda parte col solito download:process-pending.
+const buildMissingFilesPlan = () => {
+  const db = getRawDb()
+  const rows = db
+    .prepare(
+      `SELECT nexus_id, nexus_file_id, name, size_mb, required FROM modlist_catalog
+       WHERE notes LIKE ? AND nexus_id IS NOT NULL AND nexus_file_id IS NOT NULL`,
+    )
+    .all(`${NEXUS_COLLECTION_IMPORT_NOTE}%`) as Parameters<typeof planMissingFiles>[0]
+  const existing = db
+    .prepare('SELECT nexus_id, file_id, status FROM downloads WHERE nexus_id IS NOT NULL AND file_id IS NOT NULL')
+    .all() as Parameters<typeof planMissingFiles>[1]
+  const modsRoot = (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods')
+  return planMissingFiles(rows, existing, (dirName) => existsSync(join(modsRoot, dirName)))
+}
+
+ipcMain.handle('catalog:plan-missing-files', () => {
+  try {
+    const plan = buildMissingFilesPlan()
+    return { ok: true as const, missing: plan.length, totalMB: Math.round(plan.reduce((a, p) => a + p.sizeBytes, 0) / 1024 ** 2) }
+  } catch (e) {
+    return { ok: false as const, error: (e as Error).message }
+  }
+})
+
+ipcMain.handle('catalog:queue-missing-files', () => {
+  try {
+    const plan = buildMissingFilesPlan()
+    if (!plan.length) return { ok: true as const, queued: 0 }
+    const db = getRawDb()
+    const profileId = resolveActiveProfileId(db, store)
+    const insMod = db.prepare(
+      `INSERT INTO mods (profile_id, nexus_id, name, is_enabled, is_installed, priority, load_order, nexus_url)
+       VALUES (?, ?, ?, 1, 0, 1000, 1000, ?)`,
+    )
+    const insDl = db.prepare(
+      `INSERT INTO downloads (mod_id, profile_id, nexus_id, file_id, name, total_size, downloaded_size, status)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 'pending')`,
+    )
+    const tx = db.transaction((items: typeof plan) => {
+      for (const p of items) {
+        // Riga mods riusata se già presente (stessa tripla profilo/mod/nome — es. un run
+        // precedente interrotto), così i retry non accumulano duplicati in lista.
+        const prev = db
+          .prepare('SELECT id FROM mods WHERE profile_id=? AND nexus_id=? AND name=?')
+          .get(profileId, p.nexusId, p.name) as { id: number } | undefined
+        const modRowId =
+          prev?.id ??
+          Number(
+            insMod.run(
+              profileId,
+              p.nexusId,
+              p.name,
+              `https://www.nexusmods.com/skyrimspecialedition/mods/${p.nexusId}`,
+            ).lastInsertRowid,
+          )
+        insDl.run(modRowId, profileId, p.nexusId, p.fileId, p.name, p.sizeBytes)
+      }
+    })
+    tx(plan)
+    logger.info(
+      'catalog',
+      `coda file mancanti collection: ${plan.length} file accodati (${Math.round(plan.reduce((a, p) => a + p.sizeBytes, 0) / 1024 ** 2)} MB)`,
+    )
+    return { ok: true as const, queued: plan.length }
+  } catch (e) {
+    logger.warn('catalog', `coda file mancanti fallita: ${(e as Error).message}`)
+    return { ok: false as const, error: (e as Error).message }
   }
 })
 

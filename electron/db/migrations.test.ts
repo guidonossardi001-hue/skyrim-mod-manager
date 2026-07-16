@@ -66,6 +66,72 @@ describe('migration framework', () => {
     }
   })
 
+  it('v11: rimuove UNIQUE(nexus_id) dal catalogo e consente più file per mod, preservando i dati', () => {
+    const db = freshDb()
+    // Schema VECCHIO reale (baseline pre-fix con UNIQUE inline), con dati esistenti.
+    db.exec(`
+      CREATE TABLE modlist_catalog (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nexus_id INTEGER UNIQUE,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL,
+        priority_order INTEGER DEFAULT 999,
+        required INTEGER DEFAULT 0,
+        size_mb INTEGER DEFAULT 0,
+        notes TEXT
+      );
+    `)
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, name, category, notes) VALUES (100, 'Main', 'C', 'n')").run()
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, name, category) VALUES (200, 'Solo', 'C')").run()
+    runMigrations(db)
+    // dati preservati (id inclusi)
+    const rows = db.prepare('SELECT id, nexus_id, name FROM modlist_catalog ORDER BY id').all() as {
+      id: number
+      nexus_id: number
+      name: string
+    }[]
+    expect(rows.map((r) => [r.nexus_id, r.name])).toEqual([
+      [100, 'Main'],
+      [200, 'Solo'],
+    ])
+    // le colonne delle migrazioni 3/8 esistono ancora sulla tabella ricostruita
+    expect(columnExists(db, 'modlist_catalog', 'nexus_file_id')).toBe(true)
+    expect(columnExists(db, 'modlist_catalog', 'deploy_category')).toBe(true)
+    // stesso mod, DUE file: ora permesso
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (100, 1, 'Main f1', 'C')").run()
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (100, 2, 'ESL flag', 'C')").run()
+    // stessa coppia (nexus_id, file_id) due volte: rifiutata da OR IGNORE
+    const dup = db
+      .prepare("INSERT OR IGNORE INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (100, 2, 'dup', 'C')")
+      .run()
+    expect(dup.changes).toBe(0)
+    // righe senza file: una-per-mod come prima (indice parziale)
+    const noFile = db
+      .prepare("INSERT OR IGNORE INTO modlist_catalog (nexus_id, name, category) VALUES (200, 'Solo bis', 'C')")
+      .run()
+    expect(noFile.changes).toBe(0)
+    expect(integrityCheck(db)).toBe(true)
+  })
+
+  it('v11: su un DB fresco (senza UNIQUE inline) crea solo gli indici', () => {
+    const db = freshDb()
+    db.exec(`
+      CREATE TABLE modlist_catalog (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nexus_id INTEGER,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL
+      );
+    `)
+    runMigrations(db)
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (1, 10, 'a', 'C')").run()
+    db.prepare("INSERT INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (1, 20, 'b', 'C')").run()
+    const dup = db
+      .prepare("INSERT OR IGNORE INTO modlist_catalog (nexus_id, nexus_file_id, name, category) VALUES (1, 20, 'c', 'C')")
+      .run()
+    expect(dup.changes).toBe(0)
+  })
+
   it('is idempotent (re-running applies nothing and does not throw)', () => {
     const db = freshDb()
     runMigrations(db)
