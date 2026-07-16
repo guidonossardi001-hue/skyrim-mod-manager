@@ -4,6 +4,10 @@ Formato: [Keep a Changelog](https://keepachangelog.com/) · SemVer.
 
 ## [Unreleased]
 
+### Added — T11: backup profilo compressi gzip (2026-07-17)
+- `electron/backup/manager.ts`: i nuovi backup profilo sono scritti gzip-compressi (`.json.gz`, tipicamente 80%+ più piccoli — rilevante quando se ne accumulano decine su un disco quasi pieno). Retrocompatibile al 100%: `listBackups` e `restoreProfileBackup` riconoscono i vecchi backup `.json` in chiaro tramite sniffing dei magic byte gzip (non dall'estensione) — nessuna migrazione, i backup esistenti restano ripristinabili. `deleteBackup` ripulisce entrambe le varianti + sidecar. Snapshot DB (`.db`, raro, pre-delta) lasciato non compresso: resta un artefatto di recovery manuale. Incrementale scartato: il contenuto è un dump di righe DB, non file — diff incrementale sarebbe complessità senza beneficio su questo volume di dati. +7 test, suite 864.
+- Pulizia backlog: T6 (search catalogo locale), T8 (endpoint `nexus:search` legacy) e T13 (`secrets/release_pub.pem` ridondante) erano già risolti in sessioni precedenti non documentate — verificati e chiusi in TODO.md.
+
 ### Added — TOOLS-01: provisioning strumenti dalle release GitHub ufficiali (2026-07-17)
 - **`electron/tools/provision.ts`**: LOOT (loot/loot), SSEEdit (TES5Edit/TES5Edit) e xLODGen (sheson/xLODGen) scaricati dalle release GitHub ufficiali quando mancanti — owner/repo costanti, asset accettato solo dal dominio release del repo (anti-tamper), estrazione atomica, exe individuato per candidati. Le release xEdit recenti shippano `xTESEdit*.exe` (verificato sull'archivio 4.1.5f reale): creato alias `SSEEdit64.exe` (l'exe adatta il gioco al nome). IPC `tools:provision-missing` + bottone "Scarica strumenti (GitHub)" in Impostazioni. DynDOLOD escluso (non su GitHub — dyndolod.info). **Eseguito sulla macchina reale: LOOT 0.29.1 + SSEEdit 4.1.5f + xLODGen v132 installati in `<userData>/tools` e cablati in config** (Pandora già presente, rilevato). 15 test nuovi, suite 858.
 

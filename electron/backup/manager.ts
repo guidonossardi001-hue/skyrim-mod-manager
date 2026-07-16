@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, statSync, readFileSync } from 'fs'
 import { rmSync } from 'fs'
 import { join } from 'path'
+import { gzipSync, gunzipSync } from 'zlib'
 import type { SqliteDb } from '../db/sqlite'
 import { withTransaction } from '../db/sqlite'
 import { atomicWriteFile, writeChecksumSidecar, verifyChecksum, snapshotDatabase } from './snapshot'
@@ -10,6 +11,15 @@ import { atomicWriteFile, writeChecksumSidecar, verifyChecksum, snapshotDatabase
 // refuses a corrupt point, and an optional whole-DB VACUUM INTO snapshot (C2).
 // LOCKSTEP: BOUND_MOD_COLUMNS is the single source for the writable mods columns —
 // includes the delta identity columns so restores never silently drop them.
+//
+// T11 (2026-07-17): the JSON payload is gzip-compressed (typically 80%+ smaller —
+// meaningful when dozens of backups accumulate on a near-full disk). New backups
+// are written as `.json.gz`; the DB snapshot (rare, manual-recovery artifact) is
+// left plain so a human can copy it back without decompressing first. `listBackups`
+// and `restoreProfileBackup` still recognize legacy plain `.json` files by gzip
+// magic-byte sniffing — no migration needed, old backups keep working.
+
+const GZIP_MAGIC = Buffer.from([0x1f, 0x8b])
 
 export const BOUND_MOD_COLUMNS = [
   'nexus_id',
@@ -72,7 +82,7 @@ export async function createProfileBackup(
   if (!existsSync(backupDir)) mkdirSync(backupDir, { recursive: true })
   const ts = new Date().toISOString().replace(/[:.]/g, '-')
   const name = sanitize(label ? `${label}_${ts}` : `backup_profile${profileId}_${ts}`)
-  const destPath = join(backupDir, `${name}.json`)
+  const destPath = join(backupDir, `${name}.json.gz`)
 
   const profile = db.prepare('SELECT * FROM profiles WHERE id=?').get(profileId)
   const mods = db.prepare('SELECT * FROM mods WHERE profile_id=?').all(profileId)
@@ -81,8 +91,9 @@ export async function createProfileBackup(
     null,
     2,
   )
+  const compressed = gzipSync(payload)
 
-  atomicWriteFile(destPath, payload) // power-loss safe (temp + fsync + rename)
+  atomicWriteFile(destPath, compressed) // power-loss safe (temp + fsync + rename)
   const sha256 = await writeChecksumSidecar(destPath) // detectable corruption
 
   let dbSnapshotPath: string | undefined
@@ -90,17 +101,18 @@ export async function createProfileBackup(
     dbSnapshotPath = join(backupDir, `${name}.db`)
     snapshotDatabase(db, dbSnapshotPath) // whole-DB rollback point (incl. versioning tables)
   }
-  return { success: true, name, path: destPath, size: payload.length, sha256, dbSnapshotPath }
+  return { success: true, name, path: destPath, size: compressed.length, sha256, dbSnapshotPath }
 }
 
 export async function listBackups(backupDir: string): Promise<BackupEntry[]> {
   if (!existsSync(backupDir)) return []
   const out: BackupEntry[] = []
-  for (const f of readdirSync(backupDir).filter((x) => x.endsWith('.json'))) {
+  // `.json.gz` = nuovi backup compressi; `.json` = legacy (pre-T11), ancora leggibili.
+  for (const f of readdirSync(backupDir).filter((x) => x.endsWith('.json.gz') || x.endsWith('.json'))) {
     const p = join(backupDir, f)
     const s = statSync(p)
     out.push({
-      name: f.replace(/\.json$/, ''),
+      name: f.replace(/\.json(\.gz)?$/, ''),
       path: p,
       size: s.size,
       date: s.mtime.toISOString(),
@@ -108,6 +120,15 @@ export async function listBackups(backupDir: string): Promise<BackupEntry[]> {
     })
   }
   return out.sort((a, b) => b.date.localeCompare(a.date))
+}
+
+/** Legge un backup gestendo trasparentemente sia `.json.gz` (nuovi) che `.json` in
+ *  chiaro (legacy): sniffing sui magic byte gzip, mai sull'estensione del file. */
+function readBackupPayload(backupPath: string): string {
+  const raw = readFileSync(backupPath)
+  return raw.length >= 2 && raw[0] === GZIP_MAGIC[0] && raw[1] === GZIP_MAGIC[1]
+    ? gunzipSync(raw).toString('utf8')
+    : raw.toString('utf8')
 }
 
 export async function restoreProfileBackup(
@@ -121,9 +142,9 @@ export async function restoreProfileBackup(
   }
   let payload: { mods?: Record<string, unknown>[] }
   try {
-    payload = JSON.parse(readFileSync(backupPath, 'utf8'))
+    payload = JSON.parse(readBackupPayload(backupPath))
   } catch {
-    return { success: false, error: 'Backup non leggibile (JSON non valido)' }
+    return { success: false, error: 'Backup non leggibile (JSON/gzip non valido)' }
   }
   const mods = payload.mods ?? []
 
@@ -141,7 +162,9 @@ export async function restoreProfileBackup(
 }
 
 export function deleteBackup(backupPath: string): void {
-  for (const p of [backupPath, `${backupPath}.sha256`, backupPath.replace(/\.json$/, '.db')]) {
+  const base = backupPath.replace(/\.json(\.gz)?$/, '')
+  const targets = [`${base}.json`, `${base}.json.gz`, `${base}.db`]
+  for (const p of [...targets, ...targets.map((t) => `${t}.sha256`)]) {
     try {
       if (existsSync(p)) rmSync(p, { force: true })
     } catch {
