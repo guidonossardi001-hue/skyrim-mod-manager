@@ -2,7 +2,7 @@
 
 > Decisione di rilascio. Ultimo aggiornamento: 2026-06-23 → **aggiornato 2026-07-16** (vedi nota stack/packaging sotto).
 
-## DECISIONE: **GO** (GO-LIVE READY per uso reale via `win-unpacked`; installer NSIS distribuibile da riverificare — vedi sezione packaging)
+## DECISIONE: **GO** (GO-LIVE READY: uso reale via `win-unpacked` E installer NSIS 1.0.1 riverificato sullo stack corrente — 2026-07-16)
 
 Tutte le criticità bloccanti sono chiuse e verificate. I residui (RISK_MATRIX.md R1–R10) sono 🟨/🟩, non bloccanti, tracciati in TODO.md.
 
@@ -37,16 +37,18 @@ Il GO resta sostenibile: nella sessione 2026-07-16 l'app è stata usata realment
 - [x] `electron-builder --win --dir` → `release/win-unpacked/Skyrim AE Mod Manager.exe` (168 MB) + `app.asar` (53 MB) *(idem, stack storico)*
 - [x] `better_sqlite3.node` **UNPACKED** via `asarUnpack` (caricabile a runtime)
 - [x] **Smoke runtime reale** (`electron.exe scripts/smoke.ts`): DB+migrazioni v3+integrity+verifica manifest firmato → PASS
-- [ ] **NSIS installer (.exe)**: bloccato in questo ambiente da symlink-privilege Windows (winCodeSign). Fix = abilitare Developer Mode o eseguire come Admin sulla macchina di build, poi `electron-builder --win` (target nsis). NON è un difetto di codice.
+- [x] **NSIS installer (.exe)**: ~~bloccato da symlink-privilege Windows (winCodeSign)~~ → **PRODOTTO 2026-07-16**: `Skyrim-AE-Fantasy-Launcher-Setup-1.0.1.exe`, nessun problema winCodeSign (cache presente); vedi nota RISOLTO sotto.
 
-> **Nota 2026-07-16 — stack e packaging da riverificare.** Lo stack reale oggi è **Electron 43.1.0 / better-sqlite3 12.11.1 / electron-builder 26 / Vite 8 (rolldown) / Vitest 4 / Node 24**, non quello verificato sopra. Inoltre `electron-builder.yml`/config build ha ricevuto due cambi successivi a questa verifica (PIVOT 13): `build.disableAsarIntegrity: true` (necessario perché Windows Smart App Control blocca l'exe Electron ri-patchato/non firmato dopo il patching PE-resource dell'asar-integrity — tradeoff accettato: niente validazione runtime dell'integrità asar, ma l'exe resta quello firmato/reputato di Electron) e `build.npmRebuild: false` (necessario per il modulo nativo FOMOD `@nexusmods/fomod-installer-native`, che shippa prebuilds e verrebbe rotto da un rebuild node-gyp). Questi cambi rendono il pacchetto NSIS documentato qui **da riprodurre/riverificare su questo stack**, non dato per valido automaticamente — non è stato eseguito un build NSIS fresco in questa sessione, quindi lo stato resta "da riverificare" e non "verificato".
+> **Nota 2026-07-16 — stack e packaging da riverificare.** Lo stack reale oggi è **Electron 43.1.0 / better-sqlite3 12.11.1 / electron-builder 26 / Vite 8 (rolldown) / Vitest 4 / Node 24**, non quello verificato sopra. Inoltre `electron-builder.yml`/config build ha ricevuto due cambi successivi a questa verifica (PIVOT 13): `build.disableAsarIntegrity: true` (necessario perché Windows Smart App Control blocca l'exe Electron ri-patchato/non firmato dopo il patching PE-resource dell'asar-integrity — tradeoff accettato: niente validazione runtime dell'integrità asar, ma l'exe resta quello firmato/reputato di Electron) e `build.npmRebuild: false` (necessario per il modulo nativo FOMOD `@nexusmods/fomod-installer-native`, che shippa prebuilds e verrebbe rotto da un rebuild node-gyp). Questi cambi rendevano il pacchetto NSIS documentato qui da riprodurre su questo stack.
+>
+> **RISOLTO 2026-07-16 (sera): build NSIS fresco ESEGUITO e VERIFICATO** su Electron 43.1.0 / electron-builder 26 con `disableAsarIntegrity:true` + `npmRebuild:false`: `release/Skyrim-AE-Fantasy-Launcher-Setup-1.0.1.exe` (132 MB) + `latest.yml` + `.blockmap` coerenti; win-unpacked rigenerata, app avviata e verificata viva (4 processi, provider Nexus attivo, log boot pulito). Nessun problema winCodeSign/symlink. Residuo per auto-update: GitHub Release `v1.0.1` coi 3 artefatti (azione utente); firma opzionale (`CSC_LINK`/`CSC_KEY_PASSWORD`).
 >
 > Il distributable oggi **effettivamente verificato e usato** è `release/win-unpacked/Skyrim AE Mod Manager.exe`, lanciato dallo shortcut Desktop "Skyrim AE Fantasy Launcher.lnk" → SKSE interno: funzionante, provato a scala con installazione reale di una collection da 1739 mod, deploy reale, FOMOD, ENB, crash-watch. Il verdetto GO per l'uso reale si basa su questa evidenza (win-unpacked), non sull'installer NSIS.
 
 ## Checklist DEPLOY (pre-rilascio)
 - [ ] ~~`npm run setup` (electron-rebuild) su macchina di build~~ → **superato**: `build.npmRebuild:false` oggi in config (PIVOT 13, richiesto dal modulo nativo FOMOD che shippa prebuilds); nessun rebuild nativo da eseguire per better-sqlite3/FOMOD
 - [ ] `npm test` verde (749+) · `tsc` 0 errori · `npm run build` (Vite 8)
-- [ ] **Developer Mode / Admin** abilitato → `electron-builder --win` (NSIS) produce l'installer firmabile — **da riverificare su Electron 43/electron-builder 26 con `disableAsarIntegrity:true`**, non ancora rieseguito in questa sessione
+- [x] **`electron-builder --win` (NSIS)** rieseguito e verificato su Electron 43/electron-builder 26 con `disableAsarIntegrity:true` (2026-07-16, build 1.0.1) — nessun privilegio speciale necessario in questo ambiente
 - [ ] Chiave **privata** di firma nel CI secret store (NON nel repo; `secrets/` gitignored)
 - [ ] `pinnedKey.ts`/`NOLVUS_MANIFEST_PUBKEY` = chiave pubblica di rilascio
 - [ ] Manifest catalogo firmato con `scripts/sign_manifest.py` e pubblicato (T2)
