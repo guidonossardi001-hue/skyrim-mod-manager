@@ -9,3 +9,4 @@
 - 58aca02 2026-07-16 chore(claude): hook SessionStart con stato git reale + log automatico commit -- 3 files changed, 66 insertions(+)
 - 9b996a0 2026-07-16 feat(guard): protezione update Steam + verifica deploy (T17) + Save Doctor (T16) -- 23 files changed, 1943 insertions(+), 10 deletions(-)
 - 56f1433 2026-07-16 chore(release): build NSIS fresco 1.0.1 sullo stack corrente (PIVOT-13 chiuso) -- 5 files changed, 11 insertions(+), 4 deletions(-)
+- ba496d5 2026-07-16 docs(go-no-go): packaging NSIS 1.0.1 verificato — GO pieno, PIVOT-13 chiuso -- 2 files changed, 7 insertions(+), 4 deletions(-)

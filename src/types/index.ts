@@ -384,6 +384,18 @@ declare global {
         validate7z(
           path?: string,
         ): Promise<{ path: string | null; exists: boolean; valid: boolean; version: string | null }>
+        // Provisioning dalle release GitHub ufficiali degli strumenti mancanti
+        // (LOOT/SSEEdit/xLODGen). Mirrors ProvisionResult in electron/tools/provision.ts.
+        provisionMissing(): Promise<{
+          results: {
+            ok: boolean
+            key: 'loot' | 'sseedit' | 'xlodgen'
+            label: string
+            version?: string
+            exePath?: string
+            error?: string
+          }[]
+        }>
         pandoraPath(): Promise<{
           path: string | null
           exePath: string | null

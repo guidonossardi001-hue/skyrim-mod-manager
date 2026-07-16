@@ -1,6 +1,6 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage, Menu } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync, cpSync, openSync, readSync, closeSync } from 'fs'
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync, cpSync, openSync, readSync, closeSync, copyFileSync, createWriteStream } from 'fs'
 import { readdir, lstat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
@@ -108,7 +108,8 @@ import { initFomodEngine } from './fomod/engine'
 import { axiosGet, axiosJson, axiosPostJson, axiosText } from './http/axiosAdapters'
 import { initMasterlistEngine } from './plugins/masterlistEngine'
 import { MASTERLIST_CACHE_FILE } from './plugins/masterlistCache'
-import { extractArchive } from './install/extract'
+import { extractArchive, listFilesRel } from './install/extract'
+import { provisionTool, TOOL_SOURCES, type ProvisionDeps, type ProvisionResult } from './tools/provision'
 import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash, randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
@@ -1956,6 +1957,58 @@ app.whenReady().then(() => {
     } catch (e) {
       logger.warn('autodetect', `avvio fallito: ${(e as Error).message}`)
     }
+  })
+
+  // ── Provisioning strumenti da release GitHub ufficiali ───────────────────────
+  // LOOT/SSEEdit/xLODGen mancanti sulla macchina → scaricati da loot/loot,
+  // TES5Edit/TES5Edit, sheson/xLODGen in <userData>/tools e cablati nei settings.
+  // Difese: owner/repo costanti, asset accettato solo dal dominio release del repo,
+  // estrazione atomica esistente. DynDOLOD escluso (non distribuito su GitHub).
+  const provisionDeps: ProvisionDeps = {
+    fetchJson: async (url) =>
+      (
+        await axios.get(url, {
+          timeout: 30000,
+          headers: { 'User-Agent': 'skyrim-ae-fantasy-launcher', Accept: 'application/vnd.github+json' },
+        })
+      ).data,
+    downloadFile: async (url, destPath) => {
+      const res = await axios.get(url, {
+        responseType: 'stream',
+        timeout: 120000,
+        maxContentLength: 512 * 1024 * 1024,
+        headers: { 'User-Agent': 'skyrim-ae-fantasy-launcher' },
+      })
+      await new Promise<void>((resolvePr, rejectPr) => {
+        const ws = createWriteStream(destPath)
+        res.data.pipe(ws)
+        ws.on('finish', () => resolvePr())
+        ws.on('error', rejectPr)
+        res.data.on('error', rejectPr)
+      })
+    },
+    extract: (a, d) => extractArchive(a, d),
+    listFilesRel,
+    copyFile: copyFileSync,
+    mkdirp: (p) => mkdirSync(p, { recursive: true }),
+    rmFile: (p) => rmSync(p, { force: true }),
+    toolsRoot: join(app.getPath('userData'), 'tools'),
+    log: (m) => logger.info('tools', m),
+  }
+  ipcMain.handle('tools:provision-missing', async (): Promise<{ results: ProvisionResult[] }> => {
+    const results: ProvisionResult[] = []
+    for (const s of TOOL_SOURCES) {
+      const cur = store.get(s.settingKey) as string | undefined
+      if (cur && existsSync(cur)) {
+        results.push({ ok: true, key: s.key, label: s.label, exePath: cur, version: 'già configurato' })
+        continue
+      }
+      const r = await provisionTool(s, provisionDeps)
+      if (r.ok && r.exePath) store.set(s.settingKey, r.exePath)
+      else logger.warn('tools', `${s.label}: provisioning fallito — ${r.error}`)
+      results.push(r)
+    }
+    return { results }
   })
 
   ipcMain.handle('vortex:scan', () => runVortexScan())

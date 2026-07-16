@@ -149,6 +149,9 @@ contextBridge.exposeInMainWorld('api', {
     launchPandora: () => invoke('tools:launch-pandora'),
     validate7z: (path?: string) => invoke('tools:validate-7z', path),
     pandoraPath: () => invoke('tools:pandora:path'),
+    // Provisioning dalle release GitHub UFFICIALI (loot/loot, TES5Edit/TES5Edit,
+    // sheson/xLODGen): scarica gli strumenti mancanti e ne cabla i percorsi.
+    provisionMissing: () => invoke('tools:provision-missing'),
   },
 
   // Vortex importer (read-only scan of an existing Vortex Skyrim SE staging folder)

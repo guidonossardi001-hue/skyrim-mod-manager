@@ -991,6 +991,14 @@ export const mockApi = {
       if (path) return { path, exists: false, valid: false, version: null }
       return { path: 'C:\\Program Files\\7-Zip\\7z.exe', exists: true, valid: true, version: '24.07' }
     },
+    // Anteprima: il provisioning reale scarica dalle release GitHub (solo app desktop).
+    provisionMissing: async () => ({
+      results: [
+        { ok: true, key: 'loot' as const, label: 'LOOT', version: '0.29.1', exePath: 'C:\\preview\\tools\\loot\\LOOT.exe' },
+        { ok: true, key: 'sseedit' as const, label: 'SSEEdit (xEdit)', version: '4.1.5f', exePath: 'C:\\preview\\tools\\sseedit\\SSEEdit64.exe' },
+        { ok: true, key: 'xlodgen' as const, label: 'xLODGen', version: 'v132', exePath: 'C:\\preview\\tools\\xlodgen\\xLODGenx64.exe' },
+      ],
+    }),
   },
 
   app: {

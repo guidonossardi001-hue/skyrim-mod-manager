@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { FolderOpen, Save, Key, CheckCircle, XCircle, ScrollText, Wand2, Loader2 } from 'lucide-react'
+import { FolderOpen, Save, Key, CheckCircle, XCircle, ScrollText, Wand2, Loader2, DownloadCloud } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { SEVENZIP_LICENSE, THIRD_PARTY_LICENSES } from '@/data/licenses'
 
@@ -19,6 +19,35 @@ export default function Settings() {
   const [saved, setSaved] = useState(false)
   const [detecting, setDetecting] = useState(false)
   const [detectMsg, setDetectMsg] = useState<{ ok: boolean; text: string } | null>(null)
+  const [provisioning, setProvisioning] = useState(false)
+
+  // Provisioning dalle release GitHub ufficiali: scarica LOOT/SSEEdit/xLODGen mancanti
+  // e cabla i percorsi (DynDOLOD escluso: non distribuito su GitHub).
+  const runProvision = async () => {
+    if (provisioning) return
+    setProvisioning(true)
+    setDetectMsg(null)
+    try {
+      const { results } = await window.api.tools.provisionMissing()
+      const oks = results.filter((r) => r.ok)
+      const fails = results.filter((r) => !r.ok)
+      const applied: Record<string, string> = {}
+      for (const r of oks) {
+        if (r.exePath) applied[`${r.key === 'sseedit' ? 'sseedit' : r.key}Path`] = r.exePath
+      }
+      if (Object.keys(applied).length) setLocal((l) => ({ ...l, ...applied }))
+      setDetectMsg({
+        ok: fails.length === 0,
+        text:
+          `${oks.map((r) => `${r.label} ${r.version ?? ''}`.trim()).join(', ') || 'nessuno'} pronti` +
+          (fails.length ? ` · falliti: ${fails.map((r) => `${r.label} (${r.error})`).join('; ')}` : ''),
+      })
+    } catch (e) {
+      setDetectMsg({ ok: false, text: `Provisioning fallito: ${(e as Error).message}` })
+    } finally {
+      setProvisioning(false)
+    }
+  }
 
   // Auto-detect game + tool paths (Steam registry + filesystem scan). Populates only
   // what it finds and persists it; missing tools stay blank (silent fallback).
@@ -264,6 +293,16 @@ export default function Settings() {
           >
             {detecting ? <Loader2 size={15} className="animate-spin" /> : <Wand2 size={15} />}
             {detecting ? 'Rilevamento…' : 'Rileva Automaticamente'}
+          </button>
+          <button
+            onClick={runProvision}
+            disabled={provisioning || detecting}
+            className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold text-white disabled:opacity-50 transition-all"
+            style={{ background: 'linear-gradient(90deg,#22a55e,#158043)' }}
+            title="Scarica LOOT, SSEEdit (xEdit) e xLODGen dalle release GitHub ufficiali e configura i percorsi. DynDOLOD va installato a mano (dyndolod.info)."
+          >
+            {provisioning ? <Loader2 size={15} className="animate-spin" /> : <DownloadCloud size={15} />}
+            {provisioning ? 'Download strumenti…' : 'Scarica strumenti (GitHub)'}
           </button>
           {detectMsg && (
             <span className={`text-xs ${detectMsg.ok ? 'text-green-400' : 'text-orange-400/90'}`}>
