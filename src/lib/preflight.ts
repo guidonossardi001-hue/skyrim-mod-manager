@@ -57,26 +57,21 @@ export function runPreflight({
     })
   }
 
-  // 3. Install destination (MO2 mods folder)
-  checks.push(
-    settings.modsPath
-      ? { id: 'mods-path', label: 'Cartella mod (destinazione)', status: 'ok', detail: settings.modsPath }
-      : {
-          id: 'mods-path',
-          label: 'Cartella mod (destinazione)',
-          status: 'warn',
-          detail: 'Non configurata: le mod si installano in una cartella di default',
-        },
-  )
+  // 3. Install destination — INFORMATIVO, mai un avviso: senza un percorso esplicito le
+  // mod vanno nella cartella gestita dall'app, che è il funzionamento normale (e il campo
+  // non è impostabile dalle Impostazioni: avvisare di "configurarlo" era un vicolo cieco).
+  checks.push({
+    id: 'mods-path',
+    label: 'Cartella mod (destinazione)',
+    status: 'ok',
+    detail: settings.modsPath || 'Cartella predefinita gestita dall’app',
+  })
 
-  // 4. Mod Organizer 2
-  checks.push(
-    settings.mo2Path
-      ? { id: 'mo2', label: 'Mod Organizer 2', status: 'ok', detail: settings.mo2Path }
-      : { id: 'mo2', label: 'Mod Organizer 2', status: 'warn', detail: 'Percorso non configurato' },
-  )
+  // NB: nessun check su Mod Organizer 2 — il launcher avvia il gioco ESCLUSIVAMENTE via
+  // SKSE interno e distribuisce le mod da sé (deploy hardlink + plugins.txt di sistema).
+  // MO2 non fa parte di nessun percorso: avvisare che manca era rumore non azionabile.
 
-  // 5. Nexus API key
+  // 4. Nexus API key
   checks.push(
     settings.nexusApiKey
       ? { id: 'nexus', label: 'Nexus API Key', status: 'ok', detail: 'Configurata' }
@@ -88,7 +83,7 @@ export function runPreflight({
         },
   )
 
-  // 6. Framework (SKSE / Address Library) present among installed mods
+  // 5. Framework (SKSE / Address Library) present among installed mods
   const hasFramework = mods.some((m) => {
     const n = m.name.toLowerCase()
     return m.is_enabled && FRAMEWORK_KEYWORDS.some((k) => n.includes(k))
@@ -102,7 +97,7 @@ export function runPreflight({
       : 'Nessun framework SKSE attivo: la maggior parte delle mod lo richiede',
   })
 
-  // 7. Disk budget (informational)
+  // 6. Disk budget (informational)
   const remaining = goalGB - totalSizeGB
   checks.push({
     id: 'disk',

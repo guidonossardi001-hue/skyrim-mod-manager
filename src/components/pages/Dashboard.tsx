@@ -707,7 +707,6 @@ export default function Dashboard() {
           <div className="space-y-1.5">
             {[
               { label: 'Skyrim AE', value: settings.gamePath as string | undefined, detected: false },
-              { label: 'Mod Organizer 2', value: settings.mo2Path, detected: false },
               { label: 'DynDOLOD', value: settings.dyndolodPath, detected: false },
               {
                 label: 'Pandora',

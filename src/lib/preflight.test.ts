@@ -81,4 +81,30 @@ describe('runPreflight', () => {
     const checks = runPreflight({ settings: baseSettings, mods: [], totalSizeGB: 0 })
     expect(preflightSummary(checks).ready).toBe(false)
   })
+
+  // ── Voci morte rimosse (2026-07-17): erano avvisi non azionabili ────────────
+  // Entrambe rimandavano alle Impostazioni, dove il campo NON esiste: cliccarle
+  // era un vicolo cieco e l'avviso non si poteva spegnere in alcun modo.
+
+  it('nessun check su Mod Organizer 2: non fa parte di nessun percorso del launcher', () => {
+    const checks = runPreflight({ settings: baseSettings, mods: [], totalSizeGB: 0 })
+    expect(checks.find((c) => c.id === 'mo2')).toBeUndefined()
+    expect(checks.some((c) => /mod organizer/i.test(c.label))).toBe(false)
+  })
+
+  it('cartella mod senza percorso esplicito è informativa, non un avviso', () => {
+    const checks = runPreflight({ settings: { ...baseSettings, modsPath: '' }, mods: [], totalSizeGB: 0 })
+    const c = checks.find((x) => x.id === 'mods-path')!
+    expect(c.status).toBe('ok') // il default gestito dall'app è funzionamento normale
+    expect(c.detail).toMatch(/predefinita/i)
+  })
+
+  it('cartella mod configurata: mostra il percorso reale', () => {
+    const checks = runPreflight({
+      settings: { ...baseSettings, modsPath: 'D:\\mods' },
+      mods: [],
+      totalSizeGB: 0,
+    })
+    expect(checks.find((x) => x.id === 'mods-path')!.detail).toBe('D:\\mods')
+  })
 })

@@ -329,33 +329,20 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
     )
   else c.push(ok('VerifyBackups', 'Backup disponibili', `${env.backups.count} punto/i di ripristino`))
 
-  // 10. LaunchMO2OrSKSE (target resolution)
+  // 10. Risoluzione del target di avvio. DIRETTIVA: SKSE interno, sempre — il launcher È il
+  // mod manager (deploy hardlink + plugins.txt di sistema), MO2 non è mai un target. Il ramo
+  // 'mo2' è quindi irraggiungibile (buildLaunchEnv risolve solo 'skse' o null) e il vecchio
+  // consiglio "configura MO2 nelle Impostazioni" mandava l'utente su un campo inesistente.
   if (env.launchTarget === null)
     c.push(
       fail(
         'LaunchMO2OrSKSE',
         'Nessun target di avvio',
-        'MO2 e SKSE non configurati',
-        'Configura il percorso di Mod Organizer 2 nelle Impostazioni',
+        'SKSE64 non rilevato nella cartella del gioco',
+        'Installa SKSE64 per la tua versione di Skyrim AE (skse.silverlock.org) nella cartella del gioco',
       ),
     )
-  else if (env.launchTarget === 'mo2' && !env.mo2.valid)
-    c.push(
-      fail(
-        'LaunchMO2OrSKSE',
-        'Percorso MO2 non valido',
-        `ModOrganizer.exe non trovato: ${env.mo2.path ?? '(vuoto)'}`,
-        'Reimposta il percorso di Mod Organizer 2',
-      ),
-    )
-  else
-    c.push(
-      ok(
-        'LaunchMO2OrSKSE',
-        'Pronto al lancio',
-        env.launchTarget === 'mo2' ? 'Avvio tramite Mod Organizer 2' : 'Avvio tramite SKSE',
-      ),
-    )
+  else c.push(ok('LaunchMO2OrSKSE', 'Pronto al lancio', 'Avvio tramite SKSE interno del launcher'))
 
   const blocking = c.find((x) => x.status === 'fail' && x.critical) ?? null
   const totals = {

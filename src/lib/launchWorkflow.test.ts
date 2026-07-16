@@ -13,13 +13,15 @@ function goodEnv(over: Partial<LaunchEnv> = {}): LaunchEnv {
     },
     skse: { present: true, version: '2.2.6', gameVersionSupported: true },
     addressLibrary: { present: true, correctForVersion: true },
+    // MO2 resta nell'env solo come informazione diagnostica: NON è un target di avvio
+    // (il launcher usa sempre il proprio SKSE), quindi non influenza mai il verdetto.
     mo2: { path: 'C:/MO2/ModOrganizer.exe', valid: true },
     mods: { total: 5, enabled: 5, installed: 5 },
     plugins: [{ name: 'SkyUI.esp', enabled: true }],
     modlist: { complete: true, missing: [] },
     manifest: { used: false, verified: false, reason: null },
     backups: { count: 2, lastValid: true },
-    launchTarget: 'mo2',
+    launchTarget: 'skse', // l'unico target reale: buildLaunchEnv risolve solo 'skse' o null
     ...over,
   }
 }
@@ -79,11 +81,21 @@ describe('runLaunchWorkflow', () => {
     expect(r.blockingStage).toBe('VerifyDependencies')
   })
 
-  it('MO2 path CORRUPT → critical fail at launch resolution', () => {
-    const r = runLaunchWorkflow(goodEnv({ mo2: { path: 'C:/broken/none.exe', valid: false } }))
+  it('MO2 rotto o assente NON blocca: non è un target di avvio', () => {
+    // Prima questo caso era un fail critico che consigliava "configura MO2 nelle
+    // Impostazioni" — un campo che non esiste, per un tool mai usato all'avvio.
+    for (const mo2 of [{ path: 'C:/broken/none.exe', valid: false }, { path: null, valid: false }]) {
+      const r = runLaunchWorkflow(goodEnv({ mo2 }))
+      expect(r.canLaunch).toBe(true)
+      expect(r.checks.find((c) => c.stage === 'LaunchMO2OrSKSE')?.status).toBe('ok')
+    }
+  })
+
+  it('nessun target: il consiglio punta a SKSE, mai a MO2 (vicolo cieco)', () => {
+    const r = runLaunchWorkflow(goodEnv({ launchTarget: null }))
     expect(r.canLaunch).toBe(false)
-    expect(r.blockingStage).toBe('LaunchMO2OrSKSE')
-    expect(r.firstFix).toMatch(/Mod Organizer 2/i)
+    expect(r.firstFix).toMatch(/SKSE64/i)
+    expect(r.firstFix).not.toMatch(/Mod Organizer/i)
   })
 
   it('Modlist INCOMPLETE → warning, NOT blocking', () => {

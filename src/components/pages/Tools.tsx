@@ -5,7 +5,6 @@ import {
   Info,
   Wrench,
   Zap,
-  Shield,
   Globe,
   Download,
   Upload,
@@ -349,19 +348,9 @@ export default function Tools() {
   // I percorsi degli exe sono risolti dal MAIN (settings store): il renderer chiede
   // solo QUALE tool avviare. Il check sul path serve unicamente per l'UX del messaggio.
   const TOOLS = [
-    {
-      id: 'mo2',
-      name: 'Mod Organizer 2',
-      desc: 'Gestione mod con profili virtuali',
-      color: '#7d4dff',
-      icon: Shield,
-      launch: () =>
-        runTool('mo2', () =>
-          settings.mo2Path
-            ? window.api.tools.launchMO2()
-            : Promise.resolve({ success: false, error: 'Percorso MO2 non configurato' }),
-        ),
-    },
+    // NB: nessuna tile per Mod Organizer 2 — questo launcher È il mod manager (deploy
+    // hardlink + plugins.txt di sistema + avvio via SKSE interno). Il percorso MO2 non è
+    // nemmeno impostabile: la tile falliva sempre con "Percorso MO2 non configurato".
     {
       id: 'loot',
       name: 'LOOT',
@@ -890,7 +879,8 @@ export default function Tools() {
             { n: 3, text: 'Esegui Pandora Behaviour Engine per le animazioni', color: '#ff80cc' },
             { n: 4, text: 'Esegui xLODGen per i LOD del terreno', color: '#4dffaa' },
             { n: 5, text: 'Esegui DynDOLOD per i LOD degli alberi e oggetti', color: '#4de0ff' },
-            { n: 6, text: 'Avvia il gioco tramite Mod Organizer 2', color: '#ff4500' },
+            { n: 6, text: 'Esegui il Deploy dalla Dashboard per collegare le mod al gioco', color: '#ff6a2e' },
+            { n: 7, text: 'Premi GIOCA: il launcher avvia Skyrim col suo SKSE interno', color: '#ff4500' },
           ].map(({ n, text, color }) => (
             <li key={n} className="flex items-center gap-3 text-sm text-dark-300">
               <span
