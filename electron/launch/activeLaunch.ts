@@ -3,6 +3,7 @@ import type { LaunchEnv, LaunchCheck, LaunchStage } from '../../src/lib/launchWo
 import type { EnsureSteamResult } from '../steam/steamControl'
 import type { BootstrapTarget } from './bootstrapper'
 import type { LauncherUpdateInfo } from './launcherUpdate'
+import type { AutoRepairResult } from './autoRepair'
 
 // ACTIVE launch pipeline — the orchestrator behind One-Click Play. Unlike the
 // read-only companion report (runLaunchWorkflow), this drives the full ordered
@@ -53,6 +54,9 @@ export interface ActiveLaunchDeps {
   onProgress?: (ev: LaunchProgress) => void
   /** Called once after the bootstrapper fires successfully (smart-startup memory). */
   recordSuccess?: (target: BootstrapTarget, env: LaunchEnv) => void
+  /** Riparazione automatica pre-verifica (registra estrazioni, deploya, ordina i plugin).
+   *  Opzionale: assente → lo stadio è saltato e la pipeline resta quella di sola verifica. */
+  autoRepair?: () => Promise<AutoRepairResult>
 }
 
 interface StageVerdict {
@@ -91,9 +95,38 @@ function verdictFromChecks(checks: LaunchCheck[], fallbackDetail: string): Stage
 }
 
 export async function runActiveLaunch(deps: ActiveLaunchDeps): Promise<ActiveLaunchResult> {
-  const env = deps.buildEnv()
-  const report = runLaunchWorkflow(env)
+  // `env`/`report` sono RIASSEGNABILI: lo stadio AutoRepair modifica il sistema (registra
+  // estrazioni, deploya, ordina i plugin), quindi l'ambiente va riletto e il verdetto
+  // ricalcolato — altrimenti le verifiche a valle boccerebbero uno stato già riparato.
+  // Gli stadi leggono `env`/`report` al momento dell'esecuzione (run è lazy), non alla
+  // definizione: la riassegnazione li raggiunge tutti.
+  let env = deps.buildEnv()
+  let report = runLaunchWorkflow(env)
   const byStage = (s: LaunchStage): LaunchCheck[] => report.checks.filter((c) => c.stage === s)
+
+  // Riparazione automatica: l'unico stadio che AGISCE prima delle verifiche. Non è mai
+  // critico — se una riparazione fallisce, sono le verifiche a valle a decidere se il
+  // gioco può partire lo stesso.
+  const repairVerdict = async (): Promise<StageVerdict> => {
+    if (!deps.autoRepair) {
+      return { status: 'skipped', detail: 'Riparazione automatica non disponibile', critical: false }
+    }
+    const r = await deps.autoRepair()
+    if (r.changed) {
+      env = deps.buildEnv()
+      report = runLaunchWorkflow(env)
+    }
+    if (!r.enabled) return { status: 'skipped', detail: r.summary, critical: false }
+    if (r.failed) {
+      return {
+        status: 'warning',
+        detail: r.summary,
+        fix: 'Controlla il log: se il gioco non parte, esegui il Deploy manualmente dalla Dashboard',
+        critical: false,
+      }
+    }
+    return { status: 'ok', detail: r.summary, critical: false }
+  }
 
   // Object holder (not a bare `let`): TS won't narrow a property away across the
   // closures below, so the post-loop read stays BootstrapTarget | null.
@@ -105,13 +138,15 @@ export async function runActiveLaunch(deps: ActiveLaunchDeps): Promise<ActiveLau
     const skyrimChecks = byStage('VerifySkyrim')
     const w = pickWorst([...targetChecks, ...skyrimChecks])
     if (w && w.status === 'fail') return { status: 'fail', detail: w.detail, fix: w.fix, critical: true }
-    const hasTarget = !!env.mo2.path || !!env.skyrim.path
-    return hasTarget
+    // Solo il percorso del GIOCO conta: si avvia via SKSE interno, MO2 non è mai un target
+    // (prima un percorso MO2 valido bastava a dichiarare la config a posto — e il consiglio
+    // rimandava a un campo MO2 che nelle Impostazioni non esiste).
+    return env.skyrim.path
       ? { status: 'ok', detail: 'Percorsi di avvio configurati', critical: false }
       : {
           status: 'fail',
-          detail: 'Nessun percorso di gioco o Mod Organizer configurato',
-          fix: 'Imposta il percorso del gioco o di MO2 nelle Impostazioni',
+          detail: 'Nessun percorso del gioco configurato',
+          fix: 'Imposta la cartella di Skyrim AE nelle Impostazioni (o usa "Rileva Automaticamente")',
           critical: true,
         }
   }
@@ -210,6 +245,9 @@ export async function runActiveLaunch(deps: ActiveLaunchDeps): Promise<ActiveLau
   const stages: StageDef[] = [
     { stage: 'CheckLauncherUpdate', label: 'Verifica aggiornamenti launcher', run: updateVerdict },
     { stage: 'VerifyConfig', label: 'Verifica configurazione', run: configVerdict },
+    // PRIMA delle verifiche, non dopo: uno stadio di riparazione messo in coda non servirebbe
+    // a nulla — la pipeline si ferma al primo fail critico e non ci arriverebbe mai.
+    { stage: 'AutoRepair', label: 'Riparazione automatica', run: repairVerdict },
     {
       stage: 'VerifyDependencies',
       label: 'Verifica dipendenze',

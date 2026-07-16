@@ -34,24 +34,24 @@ export interface DeployEngineOptions {
 }
 
 export function initDeployEngine(opts: DeployEngineOptions) {
-  // deploy:run = resolve the profile's instance Data dir → build the override map,
-  // link it in (hardlinks + junctions), write plugins.txt. deployInstance is already
-  // a no-throw boundary; this extra try/catch keeps an unexpected low-level failure
-  // (locked handle, native crash) from ever crossing the IPC channel.
-  ipcMain.handle('deploy:run', async (event, profileId: number): Promise<DeployResult> => {
+  // Motore di deploy CONDIVISO: lo usano sia l'IPC `deploy:run` (bottone Deploy) sia la
+  // riparazione automatica pre-avvio. Unica sede in cui si costruiscono le DeployOptions —
+  // duplicarle nel main significherebbe farle divergere in silenzio dal percorso manuale.
+  // deployInstance è già un confine no-throw; il try/catch qui copre anche i risolutori.
+  const runDeploy = async (
+    profileId: number,
+    onProgress?: (p: unknown) => void,
+  ): Promise<DeployResult> => {
     try {
       const dir = opts.resolveInstanceDataDir(profileId)
       if (!dir) {
-        opts.log?.('warn', `deploy:run: percorso istanza non risolvibile per profilo ${profileId}`)
+        opts.log?.('warn', `deploy: percorso istanza non risolvibile per profilo ${profileId}`)
         return {
           success: false,
           errorKind: 'db',
           error: `profilo ${profileId} non trovato o percorso istanza non configurato`,
         }
       }
-      // Stream progress back to the renderer that invoked us. Guard the send: the
-      // window may have closed mid-deploy, and a throwing sender must not abort the
-      // deploy nor cross the no-throw boundary.
       return await deployInstance(opts.db, dir, {
         profileId,
         stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
@@ -60,19 +60,25 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
         allowHeuristicCleanup: opts.allowHeuristics?.() ?? true,
         log: opts.log,
-        onProgress: (p) => {
-          try {
-            if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', p)
-          } catch {
-            /* renderer gone — ignore */
-          }
-        },
+        onProgress,
       })
     } catch (e) {
-      opts.log?.('warn', `deploy:run errore inatteso: ${(e as Error).message}`)
+      opts.log?.('warn', `deploy errore inatteso: ${(e as Error).message}`)
       return { success: false, errorKind: 'db', error: (e as Error).message }
     }
-  })
+  }
+
+  ipcMain.handle('deploy:run', async (event, profileId: number): Promise<DeployResult> =>
+    // Stream progress back to the renderer that invoked us. Guard the send: the
+    // window may have closed mid-deploy, and a throwing sender must not abort the deploy.
+    runDeploy(profileId, (p) => {
+      try {
+        if (!event.sender.isDestroyed()) event.sender.send('deploy:progress', p)
+      } catch {
+        /* renderer gone — ignore */
+      }
+    }),
+  )
 
   // deploy:purge = rimozione ESATTA (manifest-based) di tutto ciò che il deploy ha creato
   // nell'istanza + ripristino del plugins.txt di sistema dal backup. L'euristica nlink resta
@@ -148,4 +154,8 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       return { ok: false, error: (e as Error).message }
     }
   })
+
+  // Esposto al chiamante (main.ts) perché la riparazione automatica pre-avvio deployi
+  // esattamente come il bottone Deploy, senza reimplementarne le opzioni.
+  return { runDeploy }
 }

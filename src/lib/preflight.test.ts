@@ -5,7 +5,7 @@ import type { AppSettings, Mod } from '@/types'
 const baseSettings: AppSettings = {
   language: 'it',
   theme: 'dark',
-  autoSort: true,
+  autoRepair: true,
   checkConflicts: true,
   autoBackup: true,
   downloadThreads: 4,

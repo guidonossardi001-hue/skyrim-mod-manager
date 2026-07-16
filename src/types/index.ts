@@ -121,8 +121,12 @@ export interface AppSettings {
   activeProfileId?: number
   language: 'it' | 'en'
   theme: 'dark'
-  autoSort: boolean
+  // NB: nessun `autoSort` — il Deploy ordina SEMPRE i plugin (topologico sui master +
+  // regole LOOT) e scrive plugins.txt: non esiste una modalità "non ordinato" da abilitare.
+  /** Riparazione automatica pre-avvio (registra estratte, deploya se serve, riordina). Default ON. */
+  autoRepair?: boolean
   checkConflicts: boolean
+  /** Punto di ripristino automatico prima di una riparazione automatica. */
   autoBackup: boolean
   downloadThreads: number
   downloadRetries?: number

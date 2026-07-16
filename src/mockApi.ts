@@ -240,7 +240,7 @@ const INITIAL_DOWNLOADS: Download[] = [
 const DEFAULT_SETTINGS: Record<string, unknown> = {
   language: 'it',
   theme: 'dark',
-  autoSort: true,
+  autoRepair: true,
   checkConflicts: true,
   autoBackup: true,
   downloadThreads: 4,
@@ -1040,6 +1040,21 @@ export const mockApi = {
         checkUpdate: async () => {
           await sleep(350)
           return { available: false, currentVersion: '1.0.0', latestVersion: null, error: null, checked: false }
+        },
+        // Riparazione automatica: nell'app reale registra le estratte e rideploya (ordinando
+        // i plugin). Qui simula un sistema già a posto — l'anteprima mostra lo stadio vero.
+        autoRepair: async () => {
+          await sleep(500)
+          const enabled = state.settings.autoRepair !== false
+          return {
+            enabled,
+            actions: [],
+            changed: false,
+            failed: false,
+            summary: enabled
+              ? 'Nessuna riparazione necessaria (simulazione)'
+              : 'Riparazione automatica disattivata',
+          }
         },
         resolveTarget: (env) => mockResolveTarget(env),
         launchExe: () => ({ success: true, pid: 4242 }),

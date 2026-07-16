@@ -92,7 +92,7 @@ interface AppStore {
 const defaultSettings: AppSettings = {
   language: 'it',
   theme: 'dark',
-  autoSort: true,
+  autoRepair: true,
   checkConflicts: true,
   autoBackup: true,
   downloadThreads: 4,

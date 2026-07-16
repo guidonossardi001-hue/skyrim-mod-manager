@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { runActiveLaunch, type ActiveLaunchDeps, type LaunchProgress } from './activeLaunch'
 import type { LaunchEnv } from '../../src/lib/launchWorkflow'
 import type { BootstrapTarget } from './bootstrapper'
+import type { AutoRepairResult } from './autoRepair'
 
 function greenEnv(over: Partial<LaunchEnv> = {}): LaunchEnv {
   return {
@@ -88,6 +89,7 @@ describe('runActiveLaunch — happy path', () => {
     expect(stages).toEqual([
       'CheckLauncherUpdate',
       'VerifyConfig',
+      'AutoRepair', // agisce PRIMA delle verifiche: in coda non verrebbe mai raggiunto
       'VerifyDependencies',
       'VerifyGameInstall',
       'EnsureSteam',
@@ -99,7 +101,7 @@ describe('runActiveLaunch — happy path', () => {
       'GameRunning',
     ])
     // every stage also emitted a 'running' event first
-    expect(rec.progress.filter((e) => e.status === 'running')).toHaveLength(10)
+    expect(rec.progress.filter((e) => e.status === 'running')).toHaveLength(11)
   })
 })
 
@@ -185,5 +187,71 @@ describe('runActiveLaunch — early critical check', () => {
     // config depends on a launch target + install; the first critical stage wins
     expect(['VerifyConfig', 'VerifyGameInstall']).toContain(res.blockingStage)
     expect(rec.exeCalls).toBe(0)
+  })
+})
+
+// ── AutoRepair: il sistema si ripara da sé invece di bloccare l'utente ────────
+
+describe('runActiveLaunch — riparazione automatica', () => {
+  const repairResult = (over: Partial<AutoRepairResult> = {}): AutoRepairResult => ({
+    enabled: true,
+    actions: [],
+    changed: false,
+    failed: false,
+    summary: 'Nessuna riparazione necessaria',
+    ...over,
+  })
+
+  it('senza dep autoRepair lo stadio è saltato: la pipeline resta quella di sola verifica', async () => {
+    const { deps, rec } = baseDeps()
+    const res = await runActiveLaunch(deps)
+    expect(res.launched).toBe(true)
+    expect(terminal(rec.progress).find((e) => e.stage === 'AutoRepair')?.status).toBe('skipped')
+  })
+
+  it('dopo una riparazione RILEGGE l’ambiente: le verifiche vedono lo stato riparato', async () => {
+    let repaired = false
+    const { deps } = baseDeps({
+      // Prima della riparazione l'ambiente è rotto (nessun plugin, modlist incompleta);
+      // dopo, torna verde. Senza rebuild le verifiche boccerebbero uno stato già sistemato.
+      buildEnv: () => (repaired ? greenEnv() : greenEnv({ modlist: { complete: false, missing: ['CBBE'] } })),
+      autoRepair: async () => {
+        repaired = true
+        return repairResult({ changed: true, summary: 'Riparato: 10 plugin ordinati e attivati' })
+      },
+    })
+    const res = await runActiveLaunch(deps)
+    expect(res.launched).toBe(true)
+    expect(res.steps.find((s) => s.stage === 'VerifyModdedEnv')?.status).toBe('ok')
+  })
+
+  it('riparazione fallita → warning, NON blocca: decidono le verifiche a valle', async () => {
+    const { deps, rec } = baseDeps({
+      autoRepair: async () => repairResult({ failed: true, summary: 'Riparazione parziale: cross-volume' }),
+    })
+    const res = await runActiveLaunch(deps)
+    const step = terminal(rec.progress).find((e) => e.stage === 'AutoRepair')!
+    expect(step.status).toBe('warning')
+    expect(res.launched).toBe(true) // ambiente comunque valido → si gioca
+  })
+
+  it('riparazione disattivata dall’utente → skipped, nessuna azione', async () => {
+    const { deps, rec } = baseDeps({
+      autoRepair: async () =>
+        repairResult({ enabled: false, summary: 'Riparazione automatica disattivata' }),
+    })
+    await runActiveLaunch(deps)
+    expect(terminal(rec.progress).find((e) => e.stage === 'AutoRepair')?.status).toBe('skipped')
+  })
+
+  it('autoRepair che LANCIA → stadio fallito, mai un crash della pipeline', async () => {
+    const { deps } = baseDeps({
+      autoRepair: async () => {
+        throw new Error('deploy esploso')
+      },
+    })
+    const res = await runActiveLaunch(deps)
+    expect(res.blockingStage).toBe('AutoRepair')
+    expect(res.steps.find((s) => s.stage === 'AutoRepair')?.detail).toBe('deploy esploso')
   })
 })

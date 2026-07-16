@@ -346,9 +346,12 @@ export default function Settings() {
         <div className="space-y-3">
           {(
             [
-              ['autoSort', "Ordina plugin automaticamente con LOOT dopo l'installazione"],
+              [
+                'autoRepair',
+                'Ripara automaticamente prima di giocare (registra le mod estratte, rifà il collegamento se manca o è alterato, riordina e riattiva i plugin)',
+              ],
               ['checkConflicts', 'Rileva conflitti tra mod automaticamente'],
-              ['autoBackup', 'Backup automatico profilo prima di modifiche importanti'],
+              ['autoBackup', 'Crea un punto di ripristino prima di ogni riparazione automatica'],
             ] as [keyof typeof local, string][]
           ).map(([field, label]) => (
             <label key={field} className="flex items-center gap-3 cursor-pointer">

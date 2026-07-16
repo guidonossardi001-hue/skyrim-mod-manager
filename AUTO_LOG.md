@@ -15,3 +15,4 @@
 - c299440 2026-07-17 feat(backup): compressione gzip backup profilo (T11) + pulizia TODO stale -- 5 files changed, 121 insertions(+), 13 deletions(-)
 - f4c6902 2026-07-17 chore(release): build NSIS 1.0.2 con fix GUARD-01/TOOLS-01/T11 -- 4 files changed, 9 insertions(+), 3 deletions(-)
 - ebda8f0 2026-07-17 docs: il launcher non va distribuito — Release/firma non sono residui aperti -- 3 files changed, 14 insertions(+), 3 deletions(-)
+- 5c68efb 2026-07-17 fix(ui): via le voci morte di MO2 e i consigli a vicolo cieco -- 7 files changed, 71 insertions(+), 61 deletions(-)

@@ -34,6 +34,8 @@ import {
   activeDeployDataDir,
 } from './launch/preflight'
 import { readGuardStatus, setGuardProtection, findAppManifest } from './steam/updateGuard'
+import { runAutoRepair, type AutoRepairResult } from './launch/autoRepair'
+import { createProfileBackup } from './backup/manager'
 import { runCompatReport } from './launch/compat'
 import { getLoadOrder, saveLoadOrder } from './pluginManager'
 import type { LoadOrderEntry } from '../src/types'
@@ -660,7 +662,7 @@ app.whenReady().then(() => {
   }
   const deployTargetIsGame = () => ((store.get('deployTarget') as string | undefined) ?? 'game') === 'game'
 
-  initDeployEngine({
+  const deployEngine = initDeployEngine({
     db: requireDb(),
     resolveInstanceDataDir: (profileId) => {
       if (deployTargetIsGame()) return resolveGameDataDir()
@@ -881,6 +883,47 @@ app.whenReady().then(() => {
   // Steam-aware path is launch:active-run below; this is the quick "just play".
   ipcMain.handle('launcher:playGame', () => fireBootstrap())
 
+  // ── Riparazione automatica pre-avvio (stile Nolvus) ──────────────────────────
+  // Compone l'IO reale per runAutoRepair: registra le estrazioni, verifica il deploy e,
+  // se serve, ridistribuisce — ed è il deploy a ordinare i plugin e scrivere plugins.txt.
+  // Usa lo STESSO runDeploy del bottone Deploy (nessuna logica duplicata).
+  const performAutoRepair = (): Promise<AutoRepairResult> =>
+    runAutoRepair({
+      enabled: () => store.get('autoRepair') !== false, // default ON: l'utente può spegnerla
+      registerInstalled: () => {
+        const r = registerInstalledFromDisk()
+        return { inserted: r.inserted, updated: r.updated }
+      },
+      verifyDeploy: () => {
+        const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+        const dir = activeDeployDataDir(getRawDb(), store, gamePath)
+        if (!dir) return null // percorso non risolvibile → nessuna azione al buio
+        const v = verifyDeployLive(dir)
+        return {
+          checked: v.checked,
+          missingCount: v.missingCount,
+          replacedCount: v.replacedCount,
+          junctionsMissingCount: v.junctionsMissingCount,
+        }
+      },
+      deploy: () => deployEngine.runDeploy(resolveActiveProfileId(getRawDb(), store)),
+      // Backup solo se l'utente vuole un punto di ripristino prima di modifiche automatiche.
+      backup:
+        store.get('autoBackup') === true
+          ? async () => {
+              const dir = join(app.getPath('userData'), 'backups')
+              const r = await createProfileBackup(
+                requireDb(),
+                dir,
+                resolveActiveProfileId(getRawDb(), store),
+                'auto-pre-repair',
+              )
+              return { success: r.success }
+            }
+          : undefined,
+      log: (m) => logger.info('auto-repair', m),
+    })
+
   // ── One-Click Play: full ACTIVE launch pipeline ──────────────────────────────
   // Streams per-stage progress to the invoking renderer over 'launch:progress' and
   // returns the terminal ActiveLaunchResult. This is the launcher's primary entry:
@@ -923,6 +966,9 @@ app.whenReady().then(() => {
           /* renderer gone mid-launch — the detached game keeps running */
         }
       },
+      // Il gioco si sistema da solo prima delle verifiche: mod estratte registrate, deploy
+      // rifatto se mancante o derivato, plugin riordinati e riattivati. Nessun click.
+      autoRepair: performAutoRepair,
       recordSuccess: (target) => {
         armPostLaunchCrashWatch()
         recordGameVersion(store, detectSteamEnv().skyrim.version)
@@ -1709,33 +1755,40 @@ app.whenReady().then(() => {
   // DOMAIN su disco NON vengono registrati). Copre le estrazioni storiche fatte PRIMA del ponte
   // mass-sync→mods. Prova sia il nome profile-resolved sia quello raw del backup (le estrazioni
   // pre-texture-profile usavano il nome raw).
+  // Registrazione estrazioni → tabella mods. CONDIVISA tra l'IPC (bottone "Registra estratte")
+  // e la riparazione automatica pre-avvio: il deploy legge `is_installed`, quindi senza questo
+  // passo le mod estratte sul disco resterebbero invisibili al collegamento.
+  const registerInstalledFromDisk = (): { found: number; inserted: number; updated: number; unchanged: number } => {
+    const stockDir = resolveStockTarget()
+    const modsDirNow = stockGameModsDir(stockDir)
+    const all = loadSyncMods() // già sanificata (schema download + collezioni potate)
+    const resolved = resolveMods(all, syncTextureProfile())
+    const byId = new Map(all.map((m) => [m.modId, m]))
+    const candidates: InstalledCandidate[] = []
+    for (const m of resolved) {
+      const dir = modDestDir(modsDirNow, m)
+      if (existsSync(dir)) {
+        candidates.push({ modId: m.modId, name: m.name, installPath: dir, fileSize: m.fileSize })
+        continue
+      }
+      const raw = byId.get(m.modId)
+      if (raw && raw.name !== m.name) {
+        const rawDir = modDestDir(modsDirNow, raw)
+        if (existsSync(rawDir))
+          candidates.push({ modId: raw.modId, name: raw.name, installPath: rawDir, fileSize: raw.fileSize })
+      }
+    }
+    const reg = registerInstalledMods(requireDb(), resolveActiveProfileId(getRawDb(), store), candidates)
+    logger.info(
+      'sync',
+      `registrazione estratte: ${candidates.length} trovate su disco → ${reg.inserted} nuove, ${reg.updated} aggiornate, ${reg.unchanged} invariate`,
+    )
+    return { found: candidates.length, ...reg }
+  }
+
   ipcMain.handle('sync:register-installed', () => {
     try {
-      const stockDir = resolveStockTarget()
-      const modsDirNow = stockGameModsDir(stockDir)
-      const all = loadSyncMods() // già sanificata (schema download + collezioni potate)
-      const resolved = resolveMods(all, syncTextureProfile())
-      const byId = new Map(all.map((m) => [m.modId, m]))
-      const candidates: InstalledCandidate[] = []
-      for (const m of resolved) {
-        const dir = modDestDir(modsDirNow, m)
-        if (existsSync(dir)) {
-          candidates.push({ modId: m.modId, name: m.name, installPath: dir, fileSize: m.fileSize })
-          continue
-        }
-        const raw = byId.get(m.modId)
-        if (raw && raw.name !== m.name) {
-          const rawDir = modDestDir(modsDirNow, raw)
-          if (existsSync(rawDir))
-            candidates.push({ modId: raw.modId, name: raw.name, installPath: rawDir, fileSize: raw.fileSize })
-        }
-      }
-      const reg = registerInstalledMods(requireDb(), resolveActiveProfileId(getRawDb(), store), candidates)
-      logger.info(
-        'sync',
-        `registrazione estratte: ${candidates.length} trovate su disco → ${reg.inserted} nuove, ${reg.updated} aggiornate, ${reg.unchanged} invariate`,
-      )
-      return { ok: true, found: candidates.length, ...reg }
+      return { ok: true, ...registerInstalledFromDisk() }
     } catch (e) {
       return { ok: false, error: (e as Error).message }
     }
