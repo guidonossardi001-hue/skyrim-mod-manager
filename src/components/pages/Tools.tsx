@@ -156,6 +156,42 @@ export default function Tools() {
     }
   }
 
+  // ESL-ify: libera slot FULL (max 254) flaggando light i plugin pure-override.
+  const [eslStatus, setEslStatus] = useState<Awaited<ReturnType<typeof window.api.plugin.eslify>> | null>(null)
+  const [eslBusy, setEslBusy] = useState<'scan' | 'apply' | null>(null)
+
+  const eslRun = async (apply: boolean) => {
+    const profileId = useAppStore.getState().activeProfileId
+    if (!profileId) {
+      toast.warning('Nessun profilo attivo', 'Seleziona un profilo prima')
+      return
+    }
+    if (
+      apply &&
+      !window.confirm(
+        `Flaggare light ${eslStatus?.slotsToFree ?? ''} plugin pure-override?\n\nModifica 4 byte dell'header di ciascun file (backup .smm-esl-bak accanto alla sorgente). Operazione standard e reversibile; sicura sui plugin senza record nuovi.`,
+      )
+    )
+      return
+    setEslBusy(apply ? 'apply' : 'scan')
+    try {
+      const r = await window.api.plugin.eslify(profileId, apply)
+      setEslStatus(r)
+      if (!r.ok) toast.error('ESL-ify fallito', r.error ?? 'errore sconosciuto')
+      else if (apply)
+        toast.success(
+          `${r.flagged?.length ?? 0} plugin flaggati light`,
+          r.error ?? 'Riesegui il Deploy: il budget slot ora rientra',
+        )
+      else if ((r.slotsToFree ?? 0) === 0) toast.success('Budget slot ok', `${r.budget?.full ?? '?'}/${r.budget?.maxFull ?? 254} FULL`)
+      else toast.info(`${r.slotsToFree} slot da liberare`, `${r.eligible?.length ?? 0} candidati pure-override trovati`)
+    } catch (e) {
+      toast.error('ESL-ify fallito', (e as Error).message)
+    } finally {
+      setEslBusy(null)
+    }
+  }
+
   // BodySlide batch build headless: corpi, fisiche e outfit adattati al preset del curatore.
   const [bsStatus, setBsStatus] = useState<Awaited<ReturnType<typeof window.api.bodyslide.status>> | null>(null)
   const [bsPreset, setBsPreset] = useState<string>('')
@@ -629,6 +665,56 @@ export default function Tools() {
             ))}
           </div>
         )}
+      </div>
+
+      {/* ESL-ify: il motore ha 254 slot FULL totali; i plugin pure-override (zero record
+          nuovi) possono passare allo slot FE con un flag — pratica standard, qui verificata
+          sul contenuto reale del file prima di toccare qualsiasi byte. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Zap size={15} className="text-orange-400" /> Slot plugin (ESL-ify)
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Se il deploy si blocca per "Troppi plugin FULL" (max 254), qui i patch <i>pure override</i>{' '}
+          — zero record nuovi, verificato sul file — vengono flaggati light e passano nello slot FE
+          (4096 posti). Backup <code className="text-void-400">.smm-esl-bak</code> accanto a ogni file.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={() => eslRun(false)} disabled={eslBusy !== null} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+            <RefreshCw size={14} className={eslBusy === 'scan' ? 'animate-spin' : ''} />
+            {eslBusy === 'scan' ? 'Analisi…' : 'Analizza budget slot'}
+          </button>
+          <button
+            onClick={() => eslRun(true)}
+            disabled={eslBusy !== null || !eslStatus?.ok || (eslStatus?.slotsToFree ?? 0) === 0}
+            className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg btn-primary disabled:opacity-50"
+          >
+            <Zap size={14} className={eslBusy === 'apply' ? 'animate-pulse' : ''} />
+            {eslBusy === 'apply' ? 'Flag in corso…' : `Libera ${eslStatus?.slotsToFree ?? ''} slot (flag light)`}
+          </button>
+        </div>
+        {eslStatus?.ok && eslStatus.budget && (
+          <div className="mt-3 grid grid-cols-3 gap-3">
+            <Stat label={`FULL su ${eslStatus.budget.maxFull}`} value={eslStatus.budget.full} />
+            <Stat label="Light (slot FE)" value={eslStatus.budget.light} />
+            <Stat label="Candidati pure-override" value={eslStatus.eligible?.length ?? 0} />
+          </div>
+        )}
+        {eslStatus?.ok && (eslStatus.flagged?.length ?? 0) > 0 && (
+          <div className="mt-3 space-y-1 text-xs max-h-32 overflow-y-auto">
+            {eslStatus.flagged!.map((f) => (
+              <p key={f.name} className="text-green-400">
+                {f.name} → light
+              </p>
+            ))}
+            <p className="text-dark-300">Riesegui il Deploy per applicare il nuovo budget.</p>
+          </div>
+        )}
+        {eslStatus?.errors?.map((e) => (
+          <p key={e} className="mt-2 text-xs text-red-300">
+            {e}
+          </p>
+        ))}
       </div>
 
       {/* BodySlide batch build headless: corpi (CBBE/3BA), fisiche (pesi SMP/CBPC nei mesh) e

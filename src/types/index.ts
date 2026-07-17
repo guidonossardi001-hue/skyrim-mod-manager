@@ -702,6 +702,20 @@ declare global {
       plugin: {
         getOrder(): Promise<LoadOrderEntry[]>
         saveOrder(entries: LoadOrderEntry[]): Promise<SaveLoadOrderResult>
+        // ESL-ify: scan (apply=false) o flag light (apply=true) dei pure-override.
+        eslify(
+          profileId: number,
+          apply: boolean,
+          margin?: number,
+        ): Promise<{
+          ok: boolean
+          budget?: { full: number; light: number; maxFull: number }
+          slotsToFree?: number
+          eligible?: { name: string; size: number; totalRecords?: number }[]
+          flagged?: { name: string; size: number }[]
+          errors?: string[]
+          error?: string
+        }>
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).
       stockGame: {

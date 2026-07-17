@@ -1,13 +1,16 @@
 import { ipcMain } from 'electron'
+import { copyFileSync, existsSync, openSync, readSync, writeSync, closeSync, statSync, readFileSync } from 'fs'
 import type { SqliteDb } from '../db/sqlite'
 import {
   deployInstance,
   purgeInstance,
   previewDeploy,
+  planPluginFiles,
   type DeployResult,
   type PurgeResult,
   type DeployPreview,
 } from './deployer'
+import { classifyForEsl, pickToFlag, lightFlagBytes, TES4_FLAGS_OFFSET, type EslCandidate } from '../plugins/eslify'
 
 // Thin ipcMain wrapper around deployInstance (same shape as catalog/engine.ts and
 // install/engine.ts). Path resolution (profileId → instance Data dir) is injected
@@ -154,6 +157,114 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       return { ok: false, error: (e as Error).message }
     }
   })
+
+  // ── ESL-ify (ESLIFY-01): libera slot FULL flaggando light i pure-override ──────────
+  // Il flag light (bit 0x200 del TES4) è sicuro SENZA compattazione SOLO per i plugin a
+  // zero record nuovi (vedi eslify.ts). scan = dry-run; apply scrive 4 byte per file con
+  // backup `.smm-esl-bak` accanto alla sorgente (revert = ripristinare il backup).
+  // NB: la sorgente in mods/ e l'eventuale copia deployata sono lo STESSO inode
+  // (hardlink): la scrittura le aggiorna entrambe, coerenti per costruzione.
+  const ESL_MAX_SCAN_BYTES = 150 * 1024 * 1024
+  ipcMain.handle(
+    'plugins:eslify',
+    (
+      _e,
+      profileId: number,
+      apply: boolean,
+      margin = 6,
+    ): {
+      ok: boolean
+      budget?: { full: number; light: number; maxFull: number }
+      slotsToFree?: number
+      eligible?: { name: string; size: number; totalRecords?: number }[]
+      flagged?: { name: string; size: number }[]
+      errors?: string[]
+      error?: string
+    } => {
+      try {
+        const preview = previewDeploy(opts.db, {
+          profileId,
+          stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
+          masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
+          lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
+        })
+        if (!preview.ok || !preview.pluginBudget)
+          return { ok: false, error: preview.error ?? preview.loadOrderIssue ?? 'budget plugin non calcolabile' }
+        const budget = preview.pluginBudget
+        const slotsToFree = Math.max(0, budget.full - (budget.maxFull - Math.max(0, margin)))
+        if (slotsToFree === 0)
+          return { ok: true, budget, slotsToFree: 0, eligible: [], flagged: [] }
+
+        const candidates: EslCandidate[] = []
+        for (const p of planPluginFiles(opts.db, profileId)) {
+          if (!p.name.toLowerCase().endsWith('.esp')) continue
+          let size: number
+          try {
+            size = statSync(p.src).size
+          } catch {
+            continue
+          }
+          if (size > ESL_MAX_SCAN_BYTES) continue // mai leggere giganti in RAM: non candidato
+          let cls: ReturnType<typeof classifyForEsl>
+          try {
+            cls = classifyForEsl(p.name, readFileSync(p.src))
+          } catch {
+            continue
+          }
+          if (cls.eligible)
+            candidates.push({ name: p.name, src: p.src, size, eligible: true, reason: cls.reason, totalRecords: cls.totalRecords })
+        }
+        candidates.sort((a, b) => a.size - b.size || a.name.localeCompare(b.name))
+        const picked = pickToFlag(candidates, slotsToFree)
+
+        if (!apply) {
+          return {
+            ok: true,
+            budget,
+            slotsToFree,
+            eligible: candidates.map((c) => ({ name: c.name, size: c.size, totalRecords: c.totalRecords })),
+            flagged: [],
+          }
+        }
+
+        const flagged: { name: string; size: number }[] = []
+        const errors: string[] = []
+        for (const c of picked) {
+          try {
+            const bak = c.src + '.smm-esl-bak'
+            if (!existsSync(bak)) copyFileSync(c.src, bak)
+            const fd = openSync(c.src, 'r+')
+            try {
+              const cur = Buffer.alloc(4)
+              readSync(fd, cur, 0, 4, TES4_FLAGS_OFFSET)
+              writeSync(fd, lightFlagBytes(cur.readUInt32LE(0)), 0, 4, TES4_FLAGS_OFFSET)
+            } finally {
+              closeSync(fd)
+            }
+            flagged.push({ name: c.name, size: c.size })
+            opts.log?.('info', `eslify: "${c.name}" flaggato light (backup ${c.name}.smm-esl-bak)`)
+          } catch (e) {
+            errors.push(`${c.name}: ${(e as Error).message}`)
+            opts.log?.('warn', `eslify: flag di "${c.name}" fallito — ${(e as Error).message}`)
+          }
+        }
+        return {
+          ok: flagged.length > 0 || slotsToFree === 0,
+          budget,
+          slotsToFree,
+          eligible: candidates.map((c) => ({ name: c.name, size: c.size, totalRecords: c.totalRecords })),
+          flagged,
+          errors: errors.length ? errors : undefined,
+          error:
+            flagged.length < slotsToFree
+              ? `flaggati ${flagged.length}/${slotsToFree} richiesti: candidati pure-override insufficienti — disabilita manualmente alcune mod ESP`
+              : undefined,
+        }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    },
+  )
 
   // Esposto al chiamante (main.ts) perché la riparazione automatica pre-avvio deployi
   // esattamente come il bottone Deploy, senza reimplementarne le opzioni.

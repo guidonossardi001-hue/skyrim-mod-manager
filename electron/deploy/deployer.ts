@@ -409,6 +409,28 @@ function computePluginBudget(
   }
 }
 
+/**
+ * I file plugin VINCENTI del piano (stessa query e stesso planner del deploy reale),
+ * con path sorgente assoluto. Serve all'ESL-ify per scandire i contenuti: la lista è
+ * quella che il deploy collegherebbe, non un'enumerazione ingenua delle cartelle mod.
+ */
+export function planPluginFiles(db: SqliteDb, profileId?: number): { name: string; src: string }[] {
+  const rows = queryDeployRows(db, profileId)
+  const mods: DeployMod[] = rows
+    .filter((r) => existsSync(r.install_path))
+    .map((r) => ({
+      name: r.name,
+      priority: r.priority,
+      rootDir: r.install_path,
+      files: listFilesRel(r.install_path),
+      category: toDeployCategory(r.deploy_category),
+      resolutionWeight: typeof r.resolution_weight === 'number' ? r.resolution_weight : undefined,
+    }))
+  return computeDeployPlan(mods)
+    .plugins.filter((p): p is typeof p & { src: string } => !!p.src)
+    .map((p) => ({ name: p.name, src: p.src }))
+}
+
 // ── Dry-run del deploy: conflitti reali + budget plugin, ZERO scritture ─────────────────────
 // Alimenta la pagina Conflitti con le sovrascritture VERE del piano (winner/loser dalle regole
 // categoria/peso/priorità) — la risoluzione avanzata alza resolution_weight della mod scelta,
@@ -420,6 +442,8 @@ export interface DeployPreview {
   conflicts?: { file: string; winner: string; loser: string }[]
   pluginBudget?: { full: number; light: number; maxFull: number }
   loadOrderIssue?: string | null
+  /** Stessa semantica del deploy reale: plugin che verrebbero DISATTIVATI (master mancanti). */
+  skippedPlugins?: { plugin: string; masters: string[] }[]
   warnings?: string[]
   error?: string
 }
@@ -450,21 +474,34 @@ export function previewDeploy(
         nexusIdOf.set(r.name, r.nexus_id)
     const ccNames = ccPluginOrder(detectCreationClub(opts.stockGameDataDir))
     const lootCache = loadMasterlistCache(opts.lootMasterlistCachePath)
-    const ordered = orderPluginsLoot(plan.plugins, nexusIdOf, catalogRequires(db), {
+    const orderOpts = {
       externalMasters: ccNames,
       rules: [...loadMasterlist(opts.masterlistPath), ...(lootCache?.rules ?? [])],
       groupRankByPattern: lootCache?.groupRankByPattern,
-    })
+    }
+    // PARITY col deploy reale: stesso drop-loop dei plugin orfani, così l'anteprima
+    // mostra il budget e i disattivati VERI del piano, non un blocco che non avverrà.
+    let activePlugins = plan.plugins
+    const skippedPlugins: { plugin: string; masters: string[] }[] = []
+    let ordered = orderPluginsLoot(activePlugins, nexusIdOf, catalogRequires(db), orderOpts)
+    while (!ordered.ok && ordered.kind === 'missing-master' && activePlugins.length) {
+      const dropNames = new Set(ordered.missing.map((m) => m.plugin.toLowerCase()))
+      skippedPlugins.push(...ordered.missing)
+      activePlugins = activePlugins.filter((p) => !dropNames.has(p.name.toLowerCase()))
+      ordered = orderPluginsLoot(activePlugins, nexusIdOf, catalogRequires(db), orderOpts)
+    }
+    const allOrphans = plan.plugins.length > 0 && !activePlugins.length
     return {
       ok: true,
       modsScanned: rows.length,
       conflicts: plan.resolvedConflicts,
-      pluginBudget: ordered.ok ? computePluginBudget(ccNames, ordered.slots) : undefined,
-      loadOrderIssue: ordered.ok
-        ? null
-        : ordered.kind === 'dependency-cycle'
-          ? `Ciclo di dipendenze: ${ordered.cycle.join(' → ')}`
-          : `Master mancanti: ${ordered.missing.map((m) => `${m.plugin} richiede ${m.masters.join(', ')}`).join('; ')}`,
+      pluginBudget: ordered.ok && !allOrphans ? computePluginBudget(ccNames, ordered.slots) : undefined,
+      loadOrderIssue: allOrphans
+        ? 'Nessun plugin attivabile: tutti hanno master mancanti'
+        : ordered.ok
+          ? null
+          : `Ciclo di dipendenze: ${ordered.kind === 'dependency-cycle' ? ordered.cycle.join(' → ') : ''}`,
+      skippedPlugins: skippedPlugins.length ? skippedPlugins : undefined,
       warnings: ordered.warnings,
     }
   } catch (e) {

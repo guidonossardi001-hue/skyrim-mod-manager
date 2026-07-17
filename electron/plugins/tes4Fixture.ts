@@ -26,3 +26,31 @@ export function buildTes4(opts: { esm?: boolean; light?: boolean; masters?: stri
   head.writeUInt32LE((opts.esm ? 0x1 : 0) | (opts.light ? 0x200 : 0), 8)
   return Buffer.concat([head, payload])
 }
+
+/** Record generico post-TES4 (header 24 byte + payload opaco). */
+export function buildRecord(type: string, formId: number, dataSize = 8): Buffer {
+  const head = Buffer.alloc(24)
+  head.write(type, 0, 'ascii')
+  head.writeUInt32LE(dataSize, 4)
+  head.writeUInt32LE(0, 8) // flags
+  head.writeUInt32LE(formId >>> 0, 12)
+  return Buffer.concat([head, Buffer.alloc(dataSize, 0xab)])
+}
+
+/** GRUP: header 24 byte con groupSize che INCLUDE l'header; contenuto sequenziale. */
+export function buildGrup(label: string, contents: Buffer[]): Buffer {
+  const body = Buffer.concat(contents)
+  const head = Buffer.alloc(24)
+  head.write('GRUP', 0, 'ascii')
+  head.writeUInt32LE(24 + body.length, 4)
+  head.write(label.padEnd(4).slice(0, 4), 8, 'ascii')
+  return Buffer.concat([head, body])
+}
+
+/** Plugin completo: TES4 + GRUP/record. `masterIdx` alto nel formId = spazio proprio. */
+export function buildPlugin(
+  tes4: Parameters<typeof buildTes4>[0],
+  groups: Buffer[],
+): Buffer {
+  return Buffer.concat([buildTes4(tes4), ...groups])
+}

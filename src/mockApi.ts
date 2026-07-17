@@ -1137,6 +1137,17 @@ export const mockApi = {
       written: Array.isArray(entries) ? entries.length : 0,
       backupPath: 'C:/Users/User/AppData/Local/Skyrim Special Edition/plugins.txt.bak',
     }),
+    // Anteprima ESL-ify: budget plausibile per esercitare la card; il flag è desktop-only.
+    eslify: async (_profileId: number, apply: boolean) => ({
+      ok: true,
+      budget: { full: 255, light: 1642, maxFull: 254 },
+      slotsToFree: 7,
+      eligible: [
+        { name: 'CompatPatch A.esp', size: 4096, totalRecords: 12 },
+        { name: 'CompatPatch B.esp', size: 8192, totalRecords: 30 },
+      ],
+      flagged: apply ? [{ name: 'CompatPatch A.esp', size: 4096 }] : [],
+    }),
   },
 
   // Vortex importer — simulated scan of two collections for the browser preview.

@@ -212,6 +212,10 @@ contextBridge.exposeInMainWorld('api', {
   plugin: {
     getOrder: () => invoke('plugin:get-order'),
     saveOrder: (entries: unknown) => invoke('plugin:save-order', entries),
+    // ESL-ify: scan (apply=false) o flag light (apply=true) dei plugin pure-override
+    // per liberare slot FULL. Solo numeri/bool sull'IPC, mai path.
+    eslify: (profileId: number, apply: boolean, margin?: number) =>
+      invoke('plugins:eslify', profileId, apply, margin),
   },
 
   // Download manager
