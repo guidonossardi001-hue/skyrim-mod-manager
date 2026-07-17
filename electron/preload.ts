@@ -22,6 +22,7 @@ const EVENT_CHANNELS = new Set([
   'nxm:confirm-request',
   'crash:detected',
   'fomod:progress',
+  'bodyslide:progress',
 ])
 
 // original listener → ipcRenderer wrapper, so off() accepts either one.
@@ -271,6 +272,13 @@ contextBridge.exposeInMainWorld('api', {
     scan: () => invoke('enb:scan'),
     apply: (presetDir: string, label: string) => invoke('enb:apply', presetDir, label),
     remove: () => invoke('enb:remove'),
+  },
+
+  // Batch build BodySlide: status read-only + build headless (corpi/fisiche/outfit).
+  // Il renderer passa solo profileId e NOME preset — nessun path attraversa il bridge.
+  bodyslide: {
+    status: () => invoke('bodyslide:status'),
+    build: (profileId: number, presetName?: string) => invoke('bodyslide:build', profileId, presetName),
   },
 
   // Installer FOMOD headless (motore Vortex) + scelte del curatore della collection.

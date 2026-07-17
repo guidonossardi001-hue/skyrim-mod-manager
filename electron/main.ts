@@ -93,6 +93,7 @@ import {
 } from './util/openTargets'
 import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
+import { initBodySlideEngine } from './tools/bodyslideEngine'
 import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
 import { launchGame, createDesktopShortcut, resolveLauncherIcon } from './launcher/launcherService'
 import { streamToFile } from './install/downloadStream'
@@ -762,6 +763,33 @@ app.whenReady().then(() => {
       }
     },
     log: (level, msg) => (level === 'warn' ? logger.warn('fomod', msg) : logger.info('fomod', msg)),
+  })
+
+  // Batch build BodySlide (BODYSLIDE-01): corpi/fisiche/outfit della collection costruiti
+  // headless sull'exe DEPLOYATO (--groupbuild), output in una cartella-mod dedicata che
+  // vince i conflitti al Deploy successivo. Mai scritture in-place dentro Data (hardlink).
+  initBodySlideEngine({
+    db: requireDb(),
+    resolveGameDataDir,
+    resolveModsRoot: modsRoot,
+    runExe: (exe, args, cwd) =>
+      new Promise((resolveRun) => {
+        try {
+          const proc = spawn(exe, args, { cwd, windowsHide: false })
+          proc.on('close', (code) => resolveRun({ code }))
+          proc.on('error', (e) => resolveRun({ code: null, error: e.message }))
+        } catch (e) {
+          resolveRun({ code: null, error: (e as Error).message })
+        }
+      }),
+    onProgress: (p) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('bodyslide:progress', p)
+      } catch {
+        /* renderer gone */
+      }
+    },
+    log: (level, msg) => (level === 'warn' ? logger.warn('bodyslide', msg) : logger.info('bodyslide', msg)),
   })
 
   // Auto-analisi post-lancio: al primo crash-*.log NUOVO dopo un GIOCA riuscito, il main

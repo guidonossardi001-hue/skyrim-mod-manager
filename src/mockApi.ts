@@ -861,6 +861,33 @@ export const mockApi = {
     applyAll: async () => ({ ok: false as const, error: 'FOMOD disponibile solo nell’app desktop' }),
   },
 
+  // Anteprima BodySlide: status plausibile per esercitare la card; il build resta desktop-only.
+  bodyslide: {
+    status: async () => ({
+      ok: true as const,
+      exeFound: true,
+      exePath: 'C:\\game\\Data\\CalienteTools\\BodySlide\\BodySlide.exe',
+      deployed: true,
+      groupCount: 94,
+      setsCount: 949,
+      presets: [
+        { name: 'ErinPreset', set: '[Erin] CBBE 3BBB Body Amazing', coverage: 40 },
+        { name: 'HIMBO', set: 'HIMBO', coverage: 3 },
+        { name: 'CBBE Curvy', set: 'CBBE Body', coverage: 2 },
+      ],
+      defaultPreset: 'ErinPreset',
+      prereqs: { body: true, cbpc: true, fsmp: true, skeleton: true },
+      outputRegistered: false,
+    }),
+    build: async () => ({
+      ok: false as const,
+      passes: [],
+      filesBuilt: 0,
+      modRegistered: false,
+      error: 'Batch build BodySlide disponibile solo nell’app desktop',
+    }),
+  },
+
   downloads: {
     list: async (profileId: number) => {
       tickDownloads()

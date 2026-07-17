@@ -156,6 +156,59 @@ export default function Tools() {
     }
   }
 
+  // BodySlide batch build headless: corpi, fisiche e outfit adattati al preset del curatore.
+  const [bsStatus, setBsStatus] = useState<Awaited<ReturnType<typeof window.api.bodyslide.status>> | null>(null)
+  const [bsPreset, setBsPreset] = useState<string>('')
+  const [bsBusy, setBsBusy] = useState(false)
+  const [bsProgress, setBsProgress] = useState<{ pass: number; passes: number; chunk: number; chunks: number; label: string } | null>(null)
+  const [bsReport, setBsReport] = useState<Awaited<ReturnType<typeof window.api.bodyslide.build>> | null>(null)
+
+  const refreshBodySlide = async () => {
+    const s = await window.api.bodyslide.status()
+    setBsStatus(s)
+    if (s.ok && s.defaultPreset) setBsPreset((prev) => prev || s.defaultPreset!)
+  }
+  useEffect(() => {
+    refreshBodySlide()
+    const api = window.api as unknown as {
+      on?: (ch: string, cb: (...a: unknown[]) => void) => unknown
+      off?: (ch: string, cb: unknown) => void
+    }
+    if (!api.on) return
+    const onP = (p?: { pass: number; passes: number; chunk: number; chunks: number; label: string }) => p && setBsProgress(p)
+    const w = api.on('bodyslide:progress', onP as (...a: unknown[]) => void)
+    return () => api.off?.('bodyslide:progress', w)
+  }, [])
+
+  const runBodySlideBuild = async () => {
+    const profileId = useAppStore.getState().activeProfileId
+    if (!profileId) {
+      toast.warning('Nessun profilo attivo', 'Seleziona un profilo prima del build')
+      return
+    }
+    if (
+      !window.confirm(
+        `Batch build BodySlide col preset "${bsPreset || bsStatus?.defaultPreset || ''}"?\n\nCostruisce corpi e TUTTI gli outfit della collection (può richiedere parecchi minuti). L'output va nella mod "BodySlide Output (generato)": al termine riesegui il Deploy per portarlo nel gioco.`,
+      )
+    )
+      return
+    setBsBusy(true)
+    setBsReport(null)
+    try {
+      const r = await window.api.bodyslide.build(profileId, bsPreset || undefined)
+      setBsReport(r)
+      if (r.ok)
+        toast.success('Batch build completato', `${r.filesBuilt} file generati · riesegui il Deploy per applicarli`)
+      else toast.error('Batch build fallito', r.error ?? 'errore sconosciuto')
+      await refreshBodySlide()
+    } catch (e) {
+      toast.error('Batch build fallito', (e as Error).message)
+    } finally {
+      setBsBusy(false)
+      setBsProgress(null)
+    }
+  }
+
   // Preset ENB REALI: scan nelle mod estratte, apply nella root del gioco (backup+manifest).
   const [enbPresets, setEnbPresets] = useState<
     { modName: string; presetDir: string; label: string; files: number; hasCoreDll: boolean }[] | null
@@ -578,6 +631,107 @@ export default function Tools() {
         )}
       </div>
 
+      {/* BodySlide batch build headless: corpi (CBBE/3BA), fisiche (pesi SMP/CBPC nei mesh) e
+          TUTTI gli outfit adattati al preset — l'output è una mod generata che vince i
+          conflitti al Deploy successivo (mai scritture in-place negli hardlink di Data). */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Activity size={15} className="text-pink-400" /> BodySlide — corpi, fisiche e outfit
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Costruisce i corpi e adatta armature/vestiti della collection al preset scelto (batch build
+          headless con morph <code className="text-void-400">.tri</code> per RaceMenu/OStim). Richiede il
+          Deploy già eseguito; al termine <b>riesegui il Deploy</b> per portare i mesh generati nel gioco.
+        </p>
+
+        {bsStatus && !bsStatus.ok && <p className="text-xs text-red-400 mb-3">{bsStatus.error}</p>}
+        {bsStatus?.ok && (
+          <>
+            <div className="flex flex-wrap gap-2 mb-3 text-[11px]">
+              <span className={clsx('px-2 py-1 rounded-lg border', bsStatus.exeFound ? 'border-green-900/50 bg-green-900/20 text-green-400' : 'border-red-900/50 bg-red-900/20 text-red-300')}>
+                {bsStatus.exeFound ? 'BodySlide deployato' : 'BodySlide non deployato'}
+              </span>
+              <span className={clsx('px-2 py-1 rounded-lg border', bsStatus.deployed ? 'border-green-900/50 bg-green-900/20 text-green-400' : 'border-orange-900/50 bg-orange-900/20 text-orange-300')}>
+                {bsStatus.deployed ? 'Deploy attivo' : 'Deploy assente'}
+              </span>
+              {([['Corpo CBBE/3BA', bsStatus.prereqs.body], ['CBPC', bsStatus.prereqs.cbpc], ['FSMP (HDT-SMP)', bsStatus.prereqs.fsmp], ['Scheletro XP32', bsStatus.prereqs.skeleton]] as const).map(
+                ([label, ok]) => (
+                  <span
+                    key={label}
+                    className={clsx('px-2 py-1 rounded-lg border', ok ? 'border-green-900/50 bg-green-900/20 text-green-400' : 'border-orange-900/50 bg-orange-900/20 text-orange-300')}
+                    title={ok ? 'Presente e abilitata' : 'Mod non trovata tra le abilitate'}
+                  >
+                    {ok ? '✓' : '!'} {label}
+                  </span>
+                ),
+              )}
+            </div>
+            <div className="grid grid-cols-3 gap-3 mb-3">
+              <Stat label="Progetti (.osp)" value={bsStatus.setsCount} />
+              <Stat label="Gruppi outfit" value={bsStatus.groupCount} />
+              <Stat label="Preset" value={bsStatus.presets.length} />
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <select
+                value={bsPreset}
+                onChange={(e) => setBsPreset(e.target.value)}
+                disabled={bsBusy || !bsStatus.presets.length}
+                className="input-field text-xs py-1.5 max-w-xs"
+                title="Preset corpo per il pass principale (il pass HIMBO usa il suo preset dedicato)"
+              >
+                {bsStatus.presets.map((p) => (
+                  <option key={p.name} value={p.name}>
+                    {p.name} — copre {p.coverage} gruppi
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={runBodySlideBuild}
+                disabled={bsBusy || !bsStatus.exeFound || !bsStatus.deployed}
+                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg btn-primary disabled:opacity-50"
+              >
+                <Zap size={14} className={bsBusy ? 'animate-pulse' : ''} />
+                {bsBusy ? 'Build in corso…' : 'Batch build corpi + outfit'}
+              </button>
+            </div>
+            {bsProgress && bsBusy && (
+              <div className="mt-3">
+                <div className="flex justify-between text-xs text-dark-400 mb-1">
+                  <span className="truncate">{bsProgress.label}</span>
+                  <span className="font-mono">
+                    pass {bsProgress.pass}/{bsProgress.passes} · lotto {bsProgress.chunk}/{bsProgress.chunks}
+                  </span>
+                </div>
+                <div className="h-1.5 bg-dark-700 rounded-full overflow-hidden">
+                  <div
+                    className="progress-shimmer h-full rounded-full transition-all"
+                    style={{
+                      width: `${((bsProgress.pass - 1 + bsProgress.chunk / Math.max(1, bsProgress.chunks)) / Math.max(1, bsProgress.passes)) * 100}%`,
+                    }}
+                  />
+                </div>
+              </div>
+            )}
+            {bsReport && (
+              <div className="mt-3 space-y-1 text-xs">
+                {bsReport.passes.map((p) => (
+                  <p key={p.label} className={p.failedChunks ? 'text-orange-300' : 'text-dark-300'}>
+                    {p.label}: preset <span className="text-white/85">{p.preset}</span> · {p.groups} gruppi ·{' '}
+                    {p.chunks - p.failedChunks}/{p.chunks} lotti ok
+                  </p>
+                ))}
+                {bsReport.ok && (
+                  <p className="text-green-400">
+                    {bsReport.filesBuilt} file generati in "BodySlide Output (generato)" — riesegui il Deploy per applicarli.
+                  </p>
+                )}
+                {!bsReport.ok && bsReport.error && <p className="text-red-300">{bsReport.error}</p>}
+              </div>
+            )}
+          </>
+        )}
+      </div>
+
       {/* Preset ENB REALI (sostituisce il vecchio mock): scan nelle mod estratte, apply nella
           ROOT del gioco con backup+manifest — il deploy non copre i file fuori da Data. */}
       <div className="card p-5">
@@ -880,7 +1034,8 @@ export default function Tools() {
             { n: 4, text: 'Esegui xLODGen per i LOD del terreno', color: '#4dffaa' },
             { n: 5, text: 'Esegui DynDOLOD per i LOD degli alberi e oggetti', color: '#4de0ff' },
             { n: 6, text: 'Esegui il Deploy dalla Dashboard per collegare le mod al gioco', color: '#ff6a2e' },
-            { n: 7, text: 'Premi GIOCA: il launcher avvia Skyrim col suo SKSE interno', color: '#ff4500' },
+            { n: 7, text: 'Batch build BodySlide (corpi/outfit sul preset), poi riesegui il Deploy', color: '#ff80cc' },
+            { n: 8, text: 'Premi GIOCA: il launcher avvia Skyrim col suo SKSE interno', color: '#ff4500' },
           ].map(({ n, text, color }) => (
             <li key={n} className="flex items-center gap-3 text-sm text-dark-300">
               <span

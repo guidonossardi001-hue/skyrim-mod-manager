@@ -594,6 +594,33 @@ declare global {
         }>
         remove(): Promise<{ ok: boolean; removed: number; restored: number; error?: string }>
       }
+      // Batch build BodySlide headless (corpi/fisiche/outfit). Never rejects.
+      bodyslide: {
+        status(): Promise<{
+          ok: boolean
+          exeFound: boolean
+          exePath?: string
+          deployed: boolean
+          groupCount: number
+          setsCount: number
+          presets: { name: string; set: string; coverage: number }[]
+          defaultPreset: string | null
+          prereqs: { body: boolean; cbpc: boolean; fsmp: boolean; skeleton: boolean }
+          outputRegistered: boolean
+          error?: string
+        }>
+        build(
+          profileId: number,
+          presetName?: string,
+        ): Promise<{
+          ok: boolean
+          passes: { label: string; preset: string; groups: number; chunks: number; failedChunks: number }[]
+          filesBuilt: number
+          outputDir?: string
+          modRegistered: boolean
+          error?: string
+        }>
+      }
       // Installer FOMOD headless (motore Vortex) + scelte del curatore. Never rejects.
       fomod: {
         fetchChoices(): Promise<{ ok: boolean; mods?: number; withChoices?: number; error?: string }>
