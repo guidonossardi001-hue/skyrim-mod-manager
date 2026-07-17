@@ -207,7 +207,11 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   const backupDir = join(app.getPath('userData'), 'backups')
   let backupCount = 0
   try {
-    backupCount = existsSync(backupDir) ? readdirSync(backupDir).filter((f) => f.endsWith('.json')).length : 0
+    // I backup reali sono .json.gz (+ .sha256 a fianco, escluso): il vecchio filtro
+    // .json contava ZERO con la cartella piena → warning "Nessun backup" perenne.
+    backupCount = existsSync(backupDir)
+      ? readdirSync(backupDir).filter((f) => /\.json(\.gz)?$/i.test(f)).length
+      : 0
   } catch {
     /* */
   }
