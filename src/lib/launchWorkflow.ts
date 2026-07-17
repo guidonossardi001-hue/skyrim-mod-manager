@@ -234,6 +234,27 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
   // Il check storico validava solo il tetto (>254): ZERO plugin cadeva nel ramo "ok" e il
   // launcher avviava Skyrim VANILLA con l'intera modlist abilitata. Nessun invariante legava
   // `mods.enabled` a `plugins.length`, quindi il caso peggiore passava come sano.
+  //
+  // 7-bis. GATE RIGOROSO intento-vs-realtà (indipendente dal save): mod abilitate MA nessun
+  // MANIFEST di deploy sul disco = le mod non sono MAI state collegate e il gioco partirebbe
+  // in versione base. Il gate storico (8c) scattava solo con la PROVA del danno al salvataggio:
+  // con un save vecchio o quasi-vanilla taceva, e con 1939 mod abilitate e una plugins.txt da
+  // 1 riga (residuo manuale, quindi NON vuota: il check "zero plugin" non scattava) il gioco è
+  // partito DAVVERO vanilla. Direttiva: l'avvio della versione base con mod abilitate è inibito
+  // SEMPRE — chi vuole il vanilla disabilita le mod, non conta sul deploy assente.
+  // NB: il blocco è sul solo `checked:false` (manifest assente). Il DRIFT (file sostituiti/
+  // mancanti) resta warning in 8b: gli output legittimi di Pandora/BodySlide sostituiscono file
+  // in Data e un blocco lì impedirebbe l'avvio proprio dopo i passaggi corretti di setup.
+  if (env.mods.enabled > 0 && env.deployIntegrity && !env.deployIntegrity.checked) {
+    c.push(
+      fail(
+        'VerifyLoadOrder',
+        'Ambiente moddato non collegato al gioco',
+        `${env.mods.enabled} mod abilitate ma nessun manifest di deploy sul disco (le mod non sono mai state collegate): il gioco partirebbe in versione base (vanilla)`,
+        'Esegui il Deploy dalla Dashboard (o lascia agire la Riparazione automatica); per giocare vanilla disabilita prima le mod del profilo',
+      ),
+    )
+  }
   const slots = countFullSlots(env.plugins)
   if (env.plugins.length === 0 && env.mods.enabled > 0)
     c.push(

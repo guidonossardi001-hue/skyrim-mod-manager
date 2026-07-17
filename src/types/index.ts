@@ -459,6 +459,8 @@ declare global {
           ccFilesLinked?: number
           conflictsResolved?: number
           dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[]
+          // Plugin disattivati (fuori da plugins.txt) per master irrisolvibili: file deployati, inerti.
+          skippedPlugins?: { plugin: string; masters: string[] }[]
           errorKind?:
             | 'no-mods'
             | 'cross-volume'

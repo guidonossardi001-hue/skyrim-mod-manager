@@ -244,6 +244,47 @@ describe('runActiveLaunch — riparazione automatica', () => {
     expect(terminal(rec.progress).find((e) => e.stage === 'AutoRepair')?.status).toBe('skipped')
   })
 
+  it('DEPLOY di riparazione fallito + mod abilitate → BLOCCO CRITICO (mai avvio in versione base)', async () => {
+    const { deps, rec } = baseDeps({
+      autoRepair: async () =>
+        repairResult({
+          failed: true,
+          summary: 'Riparazione parziale: Master mancanti nel deploy',
+          actions: [
+            {
+              id: 'deploy',
+              label: 'Collegamento mod e ordinamento plugin',
+              changed: false,
+              detail: 'deploy non riuscito',
+              error: 'Master mancanti nel deploy: X richiede Y',
+            },
+          ],
+        }),
+    })
+    const res = await runActiveLaunch(deps)
+    expect(res.launched).toBe(false)
+    expect(res.blockingStage).toBe('AutoRepair')
+    expect(terminal(rec.progress).find((e) => e.stage === 'AutoRepair')?.status).toBe('fail')
+    expect(res.message).toMatch(/inibito/)
+  })
+
+  it('DEPLOY di riparazione fallito ma NESSUNA mod abilitata → warning (vanilla voluto)', async () => {
+    const { deps, rec } = baseDeps({
+      buildEnv: () => greenEnv({ mods: { total: 5, enabled: 0, installed: 5 }, plugins: [] }),
+      autoRepair: async () =>
+        repairResult({
+          failed: true,
+          summary: 'Riparazione parziale: deploy non riuscito',
+          actions: [
+            { id: 'deploy', label: 'Collegamento mod', changed: false, detail: 'deploy non riuscito', error: 'x' },
+          ],
+        }),
+    })
+    const res = await runActiveLaunch(deps)
+    expect(terminal(rec.progress).find((e) => e.stage === 'AutoRepair')?.status).toBe('warning')
+    expect(res.launched).toBe(true)
+  })
+
   it('autoRepair che LANCIA → stadio fallito, mai un crash della pipeline', async () => {
     const { deps } = baseDeps({
       autoRepair: async () => {

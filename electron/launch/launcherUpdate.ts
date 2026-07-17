@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { createRequire } from 'module'
 import { logger } from '../logger'
+import { isNewerVersion } from '../util/semver'
 
 // Launcher self-update check — the first stage of the boot pipeline
 // ("Verifica aggiornamenti del launcher"). electron-updater is an OPTIONAL runtime
@@ -43,6 +44,7 @@ function safeVersion(): string {
   }
 }
 
+
 export async function checkForLauncherUpdate(): Promise<LauncherUpdateInfo> {
   const currentVersion = safeVersion()
   // Auto-update only makes sense on a packaged build wired to a publish feed.
@@ -58,7 +60,7 @@ export async function checkForLauncherUpdate(): Promise<LauncherUpdateInfo> {
     const res = await updater.checkForUpdates()
     const latest = res?.updateInfo?.version ?? null
     return {
-      available: !!latest && latest !== currentVersion,
+      available: isNewerVersion(latest, currentVersion),
       currentVersion,
       latestVersion: latest,
       error: null,

@@ -55,7 +55,14 @@ export interface AutoRepairDeps {
   /** Stato del deploy corrente rispetto al manifest. null = non determinabile. */
   verifyDeploy?: () => DeployDrift | null
   /** Ridistribuisce (ordina i plugin + scrive plugins.txt). */
-  deploy?: () => Promise<{ success: boolean; modsLinked?: number; pluginsWritten?: number; error?: string }>
+  deploy?: () => Promise<{
+    success: boolean
+    modsLinked?: number
+    pluginsWritten?: number
+    /** Plugin disattivati dal deploy per master irrisolvibili (file deployati, inerti). */
+    skippedPlugins?: { plugin: string; masters: string[] }[]
+    error?: string
+  }>
   /** Punto di ripristino prima di un deploy automatico (se l'utente lo vuole). */
   backup?: () => Promise<{ success: boolean; error?: string }>
   log?: (msg: string) => void
@@ -155,7 +162,9 @@ export async function runAutoRepair(deps: AutoRepairDeps): Promise<AutoRepairRes
         label: 'Collegamento mod e ordinamento plugin',
         changed: d.success,
         detail: d.success
-          ? `${reason} → ${d.modsLinked ?? 0} mod collegate, ${d.pluginsWritten ?? 0} plugin ordinati e attivati`
+          ? `${reason} → ${d.modsLinked ?? 0} mod collegate, ${d.pluginsWritten ?? 0} plugin ordinati e attivati${
+              d.skippedPlugins?.length ? ` (${d.skippedPlugins.length} disattivati per master mancanti)` : ''
+            }`
           : 'deploy non riuscito',
         error: d.success ? undefined : (d.error ?? 'errore sconosciuto'),
       })

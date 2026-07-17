@@ -17,6 +17,7 @@ interface DeployApi {
       ccFilesLinked?: number
       conflictsResolved?: number
       dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[]
+      skippedPlugins?: { plugin: string; masters: string[] }[]
       errorKind?: string
       error?: string
     }>
@@ -105,6 +106,16 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
           const names = r.dirtyPlugins.map((d) => `${d.plugin} (${d.itm} ITM, ${d.udr} UDR)`).join(', ')
           onLog(`Plugin da pulire con SSEEdit: ${names}`, 'error')
           toast.warning(`${r.dirtyPlugins.length} plugin da pulire`, names)
+        }
+        if (r.skippedPlugins?.length) {
+          const names = r.skippedPlugins
+            .map((s) => `${s.plugin} (richiede ${s.masters.join(', ')})`)
+            .join('; ')
+          onLog(`Plugin disattivati per master mancanti: ${names}`, 'error')
+          toast.warning(
+            `${r.skippedPlugins.length} plugin disattivati (master mancanti)`,
+            `File deployati ma fuori dal load order: ${names}`,
+          )
         }
       } else if (r.errorKind === 'dependency-cycle') {
         onLog(`Deploy bloccato: ${r.error}`, 'error')

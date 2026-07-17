@@ -49,17 +49,42 @@ export interface FomodRunResult {
   error?: string
 }
 
-/** La mod ha un installer FOMOD alla radice? (ModuleConfig.xml sotto fomod/, case-insensitive) */
-export function hasFomod(modDir: string): boolean {
+/** true se dir/fomod/ModuleConfig.xml esiste (case-insensitive). */
+function fomodConfigAt(dir: string): boolean {
   try {
-    const entries = readdirSync(modDir)
+    const entries = readdirSync(dir)
     const fomodDir = entries.find((e) => e.toLowerCase() === 'fomod')
     if (!fomodDir) return false
-    const inner = readdirSync(join(modDir, fomodDir))
+    const inner = readdirSync(join(dir, fomodDir))
     return inner.some((f) => f.toLowerCase() === 'moduleconfig.xml')
   } catch {
     return false
   }
+}
+
+/**
+ * La mod ha un installer FOMOD? Cerca ModuleConfig.xml alla radice E dentro i wrapper
+ * (fino a 2 livelli): 137/1939 mod della collection arrivano come `<mod>/<wrapper>/fomod/…`
+ * (es. `Reverb Overhaul/fomod/ModuleConfig.xml`) e il vecchio check solo-radice le rendeva
+ * invisibili all'engine — asset in cartelle-opzione mai installati, plugin master assenti,
+ * deploy bocciato a catena per "master mancanti". Il motore nativo trova da sé la config
+ * OVUNQUE nella file list e le instruction portano già il prefisso wrapper: basta il gate.
+ */
+export function hasFomod(modDir: string): boolean {
+  if (fomodConfigAt(modDir)) return true
+  try {
+    for (const l1 of readdirSync(modDir, { withFileTypes: true })) {
+      if (!l1.isDirectory()) continue
+      const p1 = join(modDir, l1.name)
+      if (fomodConfigAt(p1)) return true
+      for (const l2 of readdirSync(p1, { withFileTypes: true })) {
+        if (l2.isDirectory() && fomodConfigAt(join(p1, l2.name))) return true
+      }
+    }
+  } catch {
+    /* dir illeggibile → nessun FOMOD rilevabile */
+  }
+  return false
 }
 
 export function fomodApplied(modDir: string): boolean {

@@ -332,6 +332,57 @@ describe('deployInstance', () => {
     expect(lines.indexOf('*Lib.esp')).toBeLessThan(lines.indexOf('*Quest.esp'))
   })
 
+  // ── Master mancanti: DISATTIVAZIONE mirata, non più blocco totale ─────────────
+  // Caso reale 2026-07-17: UN patch senza master (FOMOD del master mai applicato)
+  // bloccava l'intero deploy → plugins.txt mai scritta → gioco avviato VANILLA con
+  // 1939 mod abilitate. Ora il plugin orfano viene escluso da plugins.txt (file
+  // deployato, inerte) e il resto va a segno; il blocco resta solo a zero superstiti.
+
+  it('MASTER MANCANTI: il patch orfano è disattivato, il deploy prosegue e lo riporta', async () => {
+    const { buildTes4 } = await import('../plugins/tes4Fixture')
+    const good = makeMod('GoodMod', 1, { 'meshes/g.nif': 'x' })
+    writeFileSync(join(good, 'Good.esp'), buildTes4({ masters: ['Skyrim.esm'] }))
+    const orphan = makeMod('OrphanPatch', 2, { 'meshes/p.nif': 'x' })
+    writeFileSync(join(orphan, 'Patch.esp'), buildTes4({ masters: ['AssenteLib.esp'] }))
+
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    expect(r.skippedPlugins).toEqual([{ plugin: 'Patch.esp', masters: ['AssenteLib.esp'] }])
+    const lines = readFileSync(r.pluginsPath!, 'utf8').trim().split('\n')
+    expect(lines).toContain('*Good.esp')
+    expect(lines).not.toContain('*Patch.esp')
+    // Il FILE del plugin orfano resta deployato (inerte senza riga in plugins.txt).
+    expect(existsSync(join(instanceData, 'Patch.esp'))).toBe(true)
+  })
+
+  it('MASTER MANCANTI a cascata: chi dipendeva dal disattivato cade con lui', async () => {
+    const { buildTes4 } = await import('../plugins/tes4Fixture')
+    const good = makeMod('GoodMod', 1, { 'meshes/g.nif': 'x' })
+    writeFileSync(join(good, 'Good.esp'), buildTes4({ masters: ['Skyrim.esm'] }))
+    const orphanA = makeMod('OrphanA', 2, { 'meshes/a.nif': 'x' })
+    writeFileSync(join(orphanA, 'A.esp'), buildTes4({ masters: ['Assente.esp'] }))
+    const depA = makeMod('DependsOnA', 3, { 'meshes/b.nif': 'x' })
+    writeFileSync(join(depA, 'B.esp'), buildTes4({ masters: ['A.esp'] }))
+
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    expect((r.skippedPlugins ?? []).map((s) => s.plugin).sort()).toEqual(['A.esp', 'B.esp'])
+    const lines = readFileSync(r.pluginsPath!, 'utf8').trim().split('\n')
+    expect(lines).toContain('*Good.esp')
+    expect(lines).not.toContain('*A.esp')
+    expect(lines).not.toContain('*B.esp')
+  })
+
+  it('MASTER MANCANTI ovunque: zero plugin attivabili → il deploy resta BLOCCATO', async () => {
+    const { buildTes4 } = await import('../plugins/tes4Fixture')
+    const broken = makeMod('Broken', 1, { 'meshes/s.nif': 'x' })
+    writeFileSync(join(broken, 'Solo.esp'), buildTes4({ masters: ['MaiVista.esp'] }))
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(false)
+    expect(r.errorKind).toBe('missing-master')
+    expect(r.error).toMatch(/Nessun plugin attivabile/)
+  })
+
   it('FAIL-SAFE: un ciclo di dipendenze BLOCCA il deploy senza toccare l’istanza', async () => {
     makeMod('CycA', 1, { 'A.esp': '' }, 1, { nexusId: 1 })
     makeMod('CycB', 2, { 'B.esp': '' }, 1, { nexusId: 2 })

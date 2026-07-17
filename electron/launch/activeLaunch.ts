@@ -119,6 +119,19 @@ export async function runActiveLaunch(deps: ActiveLaunchDeps): Promise<ActiveLau
     report = runLaunchWorkflow(env)
     if (!r.enabled) return { status: 'skipped', detail: r.summary, critical: false }
     if (r.failed) {
+      // Il DEPLOY fallito con mod abilitate è CRITICO: senza deploy il gioco partirebbe in
+      // versione base (il gate 7-bis a valle lo bloccherebbe comunque — qui si ferma la
+      // pipeline col messaggio preciso dell'errore invece del verdetto generico). Gli altri
+      // fallimenti di riparazione (registrazione, backup) restano warning: decide il gate.
+      const deployFailed = r.actions.some((a) => a.id === 'deploy' && a.error)
+      if (deployFailed && env.mods.enabled > 0) {
+        return {
+          status: 'fail',
+          detail: r.summary,
+          fix: 'Risolvi l’errore del Deploy (vedi log) — con le mod abilitate l’avvio in versione base è inibito',
+          critical: true,
+        }
+      }
       return {
         status: 'warning',
         detail: r.summary,

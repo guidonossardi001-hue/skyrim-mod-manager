@@ -71,6 +71,8 @@ export interface DeployResult {
   conflictsResolved?: number // file collisions auto-risolte dal planner (audit nel log)
   dirtyPlugins?: { plugin: string; itm: number; udr: number; nav: number; util: string }[] // vedi dirtyPluginCheck
   pluginBudget?: { full: number; light: number; maxFull: number } // occupazione slot motore (base+CC+mod)
+  /** Plugin DISATTIVATI (esclusi da plugins.txt) per master irrisolvibili: file deployati, inerti. */
+  skippedPlugins?: { plugin: string; masters: string[] }[]
   errorKind?: DeployErrorKind
   error?: string
 }
@@ -539,30 +541,50 @@ export async function deployInstance(
     // Masterlist LOOT reale (cache locale, mai un fetch di rete qui) + regole locali: entrambe
     // SOFT, si sommano senza conflitto (lootSort le tratta identicamente).
     const lootCache = loadMasterlistCache(opts.lootMasterlistCachePath)
-    const orderedPlugins = orderPluginsLoot(plan.plugins, nexusIdOf, catalogRequires(db), {
+    const orderOpts = {
       externalMasters: ccPluginOrder(ccPackages),
       rules: [...loadMasterlist(opts.masterlistPath), ...(lootCache?.rules ?? [])],
       groupRankByPattern: lootCache?.groupRankByPattern,
-    })
+    }
+    // Master mancanti: DISATTIVA i plugin orfani e prosegui, invece di bloccare l'intero
+    // deploy. Il blocco totale trasformava UN patch senza master (caso reale: 1 esp su 2278)
+    // in "plugins.txt mai scritta" → gioco avviato VANILLA con 1939 mod abilitate — un
+    // rischio di corruzione save peggiore di qualsiasi patch inattivo. Un plugin FUORI da
+    // plugins.txt è semplicemente inerte (il file resta deployato): stessa semantica di
+    // MO2/Vortex, che non attivano un plugin dal master assente. Il drop è iterativo perché
+    // la rimozione può orfanizzare a cascata i plugin che dipendevano dai rimossi.
+    let activePlugins = plan.plugins
+    const skippedPlugins: { plugin: string; masters: string[] }[] = []
+    let orderedPlugins = orderPluginsLoot(activePlugins, nexusIdOf, catalogRequires(db), orderOpts)
+    while (!orderedPlugins.ok && orderedPlugins.kind === 'missing-master' && activePlugins.length) {
+      const dropNames = new Set(orderedPlugins.missing.map((m) => m.plugin.toLowerCase()))
+      skippedPlugins.push(...orderedPlugins.missing)
+      activePlugins = activePlugins.filter((p) => !dropNames.has(p.name.toLowerCase()))
+      orderedPlugins = orderPluginsLoot(activePlugins, nexusIdOf, catalogRequires(db), orderOpts)
+    }
     for (const w of orderedPlugins.warnings) log('warn', `load order: ${w}`)
+    if (skippedPlugins.length) {
+      const detail = skippedPlugins.map((m) => `${m.plugin} (richiede ${m.masters.join(', ')})`).join('; ')
+      log('warn', `deploy: ${skippedPlugins.length} plugin DISATTIVATI per master mancanti — ${detail}`)
+    }
     if (!orderedPlugins.ok) {
-      if (orderedPlugins.kind === 'dependency-cycle') {
-        const path = orderedPlugins.cycle.join(' → ')
-        log('warn', `deploy BLOCCATO: ciclo di dipendenze nei plugin (${path})`)
-        return {
-          success: false,
-          errorKind: 'dependency-cycle',
-          error: `Ciclo di dipendenze tra i plugin: ${path}. Correggi il campo requires nel catalogo o disabilita una delle mod del ciclo, poi riprova.`,
-        }
+      // Qui può restare solo il ciclo: il ramo missing-master viene consumato dal drop-loop.
+      const path = orderedPlugins.kind === 'dependency-cycle' ? orderedPlugins.cycle.join(' → ') : ''
+      log('warn', `deploy BLOCCATO: ciclo di dipendenze nei plugin (${path})`)
+      return {
+        success: false,
+        errorKind: 'dependency-cycle',
+        error: `Ciclo di dipendenze tra i plugin: ${path}. Correggi il campo requires nel catalogo o disabilita una delle mod del ciclo, poi riprova.`,
       }
-      const detail = orderedPlugins.missing
-        .map((m) => `${m.plugin} richiede ${m.masters.join(', ')}`)
-        .join('; ')
-      log('warn', `deploy BLOCCATO: master mancanti (${detail})`)
+    }
+    // TUTTI i plugin orfani (il piano ne aveva, nessuno è sopravvissuto al drop): ambiente
+    // rotto alla radice — un deploy "riuscito" a zero plugin sarebbe di nuovo il bug vanilla.
+    if (plan.plugins.length > 0 && !activePlugins.length) {
+      log('warn', 'deploy BLOCCATO: ogni plugin ha master irrisolvibili')
       return {
         success: false,
         errorKind: 'missing-master',
-        error: `Master mancanti nel deploy: ${detail}. Installa e abilita le mod che forniscono questi master (il gioco crasherebbe al caricamento), poi riprova.`,
+        error: 'Nessun plugin attivabile: tutti hanno master mancanti. Verifica l’installazione della collection (FOMOD applicati?) e riprova.',
       }
     }
 
@@ -803,6 +825,7 @@ export async function deployInstance(
       conflictsResolved: plan.resolvedConflicts.length,
       dirtyPlugins,
       pluginBudget,
+      skippedPlugins: skippedPlugins.length ? skippedPlugins : undefined,
     }
   } catch (e) {
     return { success: false, errorKind: 'db', error: (e as Error).message }

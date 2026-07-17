@@ -212,6 +212,24 @@ describe('runLaunchWorkflow', () => {
     expect(r.canLaunch).toBe(true)
   })
 
+  // Secondo avvio vanilla REALE (2026-07-17): plugins.txt con 1 riga residua (quindi NON
+  // vuota, il check "zero plugin" non scattava), 1939 mod abilitate, nessun manifest di
+  // deploy, save vecchio senza plugin a rischio → tutte le maglie passavano.
+  it('1 plugin residuo + 1939 mod abilitate + manifest assente → BLOCCA (gate 7-bis)', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({
+        plugins: [{ name: 'AnimeFollower.esp', enabled: true }],
+        pluginsSource: 'system',
+        mods: { total: 1939, enabled: 1939, installed: 1939 },
+        deployIntegrity: { checked: false, totalFiles: 0, missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 },
+        saveDoctor: { checked: true, saveName: 'old.ess', missingCount: 0, missingPlugins: [] },
+      }),
+    )
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
+    expect(r.checks.find((c) => c.label === 'Ambiente moddato non collegato al gioco')?.detail).toMatch(/vanilla/i)
+  })
+
   it('plugins.txt non trovata → il dettaglio lo dice (diagnosi, non "0 plugin")', () => {
     const r = runLaunchWorkflow(
       goodEnv({ plugins: [], mods: { total: 5, enabled: 5, installed: 5 }, pluginsSource: 'none' }),
@@ -231,7 +249,8 @@ describe('runLaunchWorkflow', () => {
     const r = runLaunchWorkflow(goodEnv(risky))
     expect(r.canLaunch).toBe(false)
     expect(r.blockingStage).toBe('VerifyLoadOrder')
-    expect(r.checks.find((c) => c.status === 'fail')?.detail).toMatch(/hero\.ess/)
+    // Bloccano ENTRAMBI i gate: quello rigoroso (manifest assente) e quello del save.
+    expect(r.checks.some((c) => c.status === 'fail' && /hero\.ess/.test(c.detail))).toBe(true)
   })
 
   it('save a rischio MA deploy INTEGRO → nessun blocco (le mod sono collegate ora)', () => {
@@ -250,21 +269,27 @@ describe('runLaunchWorkflow', () => {
     expect(r.canLaunch).toBe(true)
   })
 
-  it('deploy assente ma save SANO → nessun blocco (niente da corrompere)', () => {
+  // Direttiva 2026-07-17 (secondo avvio vanilla reale): il gate rigoroso 7-bis blocca su
+  // manifest ASSENTE + mod abilitate ANCHE senza prova di danno al save — un save sano o
+  // assente non rende accettabile avviare la versione base con 1939 mod abilitate.
+  it('deploy MAI eseguito + mod abilitate → BLOCCA anche con save sano', () => {
     const r = runLaunchWorkflow(
       goodEnv({
         ...risky,
         saveDoctor: { checked: true, saveName: 'hero.ess', missingCount: 0, missingPlugins: [] },
       }),
     )
-    expect(r.canLaunch).toBe(true)
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
+    expect(r.checks.find((c) => c.label === 'Ambiente moddato non collegato al gioco')?.status).toBe('fail')
   })
 
-  it('nessun save verificabile → nessun blocco (partita nuova in vanilla non corrompe)', () => {
+  it('deploy MAI eseguito + mod abilitate → BLOCCA anche senza save verificabile', () => {
     const r = runLaunchWorkflow(
       goodEnv({ ...risky, saveDoctor: { checked: false, saveName: null, missingCount: 0, missingPlugins: [] } }),
     )
-    expect(r.canLaunch).toBe(true)
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
   })
 
   it('save con plugin mancanti → warning con nomi; save coerente → ok; non verificato → silenzio', () => {
