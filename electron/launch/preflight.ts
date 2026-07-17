@@ -14,6 +14,7 @@ import { readGuardStatus, checkVersionDrift, type UpdateGuardFsOps } from '../st
 import { verifyDeployedInstance, type VerifyIo } from '../deploy/verifyDeploy'
 import { resolveDeployDataDir } from '../deploy/resolveTarget'
 import { runSaveDoctor, type SaveDoctorIo } from '../saves/saveDoctor'
+import { readPluginHeader } from '../plugins/espParser'
 
 /** Chiave setting: ultima versione del runtime vista a un lancio riuscito (drift detection). */
 export const LAST_GAME_VERSION_KEY = 'lastKnownGameVersion'
@@ -161,6 +162,20 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   }
   const mo2Plugins = resolveMo2Plugins(mo2Path)
   const realPlugins = resolveRealPlugins(mo2Plugins.plugins)
+  // Flag light REALE dall'header TES4 del file deployato in Data: il conteggio slot per
+  // estensione dava "1771 FULL su 254" con ~1500 .esp ESL-flagged (248 slot reali) —
+  // il deployer conta dai flag e passava, il preflight bocciava. Header illeggibile o
+  // file assente → light undefined (countFullSlots ricade sull'estensione).
+  const dataDirForFlags = gamePath ? join(gamePath, 'Data') : null
+  const pluginsWithFlags = realPlugins.plugins.map((p) => {
+    if (!dataDirForFlags) return p
+    try {
+      const h = readPluginHeader(join(dataDirForFlags, p.name))
+      return h ? { ...p, light: h.isLight } : p
+    } catch {
+      return p
+    }
+  })
 
   // Mods / modlist completeness from the DB (active profile).
   const profileId = resolveActiveProfileId(db, store)
@@ -247,7 +262,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     mo2,
     mods: { total: mods.length, enabled, installed },
     // Load order REALE (plugins.txt di sistema, quella che il gioco legge), non MO2.
-    plugins: realPlugins.plugins,
+    plugins: pluginsWithFlags,
     pluginsSource: realPlugins.source,
     modlist: { complete: missing.length === 0, missing },
     manifest,

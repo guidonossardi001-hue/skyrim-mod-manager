@@ -37,8 +37,10 @@ export interface LaunchEnv {
   addressLibrary: { present: boolean; correctForVersion: boolean | null }
   mo2: { path: string | null; valid: boolean }
   mods: { total: number; enabled: number; installed: number }
-  /** Load order REALE dal plugins.txt che il gioco legge (di sistema), non da MO2. */
-  plugins: { name: string; enabled: boolean }[]
+  /** Load order REALE dal plugins.txt che il gioco legge (di sistema), non da MO2.
+   *  `light` = flag ESL reale dall'header TES4 (arricchito dal main): l'ESTENSIONE
+   *  mente — nella collection ~1500 .esp sono ESL-flagged e vivono nello slot FE. */
+  plugins: { name: string; enabled: boolean; light?: boolean }[]
   /** Provenienza di `plugins`: rende diagnosticabile il caso vuoto invece di confonderlo con "0 plugin". */
   pluginsSource?: 'system' | 'mo2' | 'none'
   modlist: { complete: boolean; missing: string[] }
@@ -77,8 +79,14 @@ export interface LaunchReport {
   totals: { ok: number; warning: number; fail: number; skipped: number }
 }
 
-function countFullSlots(plugins: { name: string; enabled: boolean }[]): number {
-  return plugins.filter((p) => p.enabled && /\.(esp|esm)$/i.test(p.name) && !/\.esl$/i.test(p.name)).length
+// Slot FULL: gli ESL-flagged (.esp col bit light nel TES4) vivono nello slot FE e NON
+// contano. Contare per sola estensione dava "1771/254" con 248 slot REALI occupati —
+// stessa lezione del deployer (che infatti conta dai flag e passava): l'estensione mente.
+// `light` undefined (header illeggibile / env legacy) → fallback all'estensione.
+function countFullSlots(plugins: { name: string; enabled: boolean; light?: boolean }[]): number {
+  return plugins.filter(
+    (p) => p.enabled && /\.(esp|esm)$/i.test(p.name) && !/\.esl$/i.test(p.name) && p.light !== true,
+  ).length
 }
 
 export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {

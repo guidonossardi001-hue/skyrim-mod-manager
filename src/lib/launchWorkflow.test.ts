@@ -230,6 +230,29 @@ describe('runLaunchWorkflow', () => {
     expect(r.checks.find((c) => c.label === 'Ambiente moddato non collegato al gioco')?.detail).toMatch(/vanilla/i)
   })
 
+  // Caso reale 2026-07-17 (terzo blocco): 1817 righe in plugins.txt, ~1500 .esp
+  // ESL-flagged → 248 slot FULL reali. Il conteggio per estensione diceva "1771/254"
+  // e bocciava un load order che il budget del deployer (flag TES4) aveva approvato.
+  it('SLOT dai flag reali: .esp ESL-flagged non contano come FULL', () => {
+    const plugins = [
+      ...Array.from({ length: 1500 }, (_, i) => ({ name: `Light${i}.esp`, enabled: true, light: true })),
+      ...Array.from({ length: 240 }, (_, i) => ({ name: `Full${i}.esp`, enabled: true, light: false })),
+      { name: 'ExtLight.esl', enabled: true }, // .esl per estensione: mai FULL
+    ]
+    const r = runLaunchWorkflow(goodEnv({ plugins, mods: { total: 1939, enabled: 1939, installed: 1939 } }))
+    const check = r.checks.find((c) => c.stage === 'VerifyLoadOrder' && /slot/i.test(c.detail))!
+    expect(check.status).toBe('warning') // 240 > soglia warn 220, ma NIENTE fail
+    expect(check.detail).toContain('240/254')
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('light assente (env legacy) → fallback estensione: oltre 254 .esp non-flagged blocca', () => {
+    const plugins = Array.from({ length: 300 }, (_, i) => ({ name: `P${i}.esp`, enabled: true }))
+    const r = runLaunchWorkflow(goodEnv({ plugins, mods: { total: 300, enabled: 300, installed: 300 } }))
+    expect(r.canLaunch).toBe(false)
+    expect(r.blockingStage).toBe('VerifyLoadOrder')
+  })
+
   it('plugins.txt non trovata → il dettaglio lo dice (diagnosi, non "0 plugin")', () => {
     const r = runLaunchWorkflow(
       goodEnv({ plugins: [], mods: { total: 5, enabled: 5, installed: 5 }, pluginsSource: 'none' }),
