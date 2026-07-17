@@ -2967,16 +2967,55 @@ ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath'
 
 // Pandora Behaviour Engine — the single animation/behaviour manager. Launched as an
 // EXPLICIT step (it regenerates the game's behaviour files); never auto-run silently.
-ipcMain.handle('tools:launch-pandora', () => {
+/** Nome riga mods + cartella della "mod generata" coi behaviour di Pandora. */
+const PANDORA_OUTPUT_MOD_NAME = 'Pandora Output (generato)'
+ipcMain.handle('tools:launch-pandora', async () => {
   // HEADLESS (flag verificati in Pandora CLI/CommandLineParser.cs): --tesv = root del gioco
-  // (cartella con SkyrimSE.exe), -o = Data di output, --auto_run + --auto_close = run completo
-  // senza interazione. Senza gamePath risolvibile si apre la GUI come prima (fallback).
+  // (cartella con SkyrimSE.exe), --auto_run + --auto_close = run completo senza interazione.
+  // -o = cartella-mod DEDICATA, mai la Data del gioco: col deploy hardlink una scrittura
+  // in-place sui behaviour esistenti corromperebbe la copia sorgente della mod (stesso
+  // invariante del BodySlide batch). L'output viene registrato come mod 'patch' a peso
+  // massimo: al Deploy successivo vince ogni conflitto. Senza gamePath → GUI (fallback).
   const gp = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
-  const args = gp
-    ? [`--tesv:${gp}`, `-o:${join(gp, 'Data')}`, '--auto_run', '--auto_close']
-    : []
-  if (gp) logger.info('tools', `Pandora headless: --tesv "${gp}" → output Data (auto_run/auto_close)`)
-  return launchTool(toolPath('pandoraPath'), args)
+  const outDir = join((store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'), 'pandora-output')
+  let args: string[] = []
+  if (gp) {
+    try {
+      mkdirSync(outDir, { recursive: true })
+    } catch {
+      /* spawn fallirà con messaggio chiaro */
+    }
+    args = [`--tesv:${gp}`, `-o:${outDir}`, '--auto_run', '--auto_close']
+    logger.info('tools', `Pandora headless: --tesv "${gp}" → output "${outDir}" (auto_run/auto_close)`)
+  }
+  const res = (await launchTool(toolPath('pandoraPath'), args)) as { success: boolean; code?: number; error?: string }
+  // Registrazione come mod SOLO a run riuscito e con output non vuoto (idempotente).
+  if (gp && res.success) {
+    try {
+      const produced = readdirSync(outDir, { recursive: true, withFileTypes: true }).some((d) => d.isFile())
+      if (produced) {
+        const db = getRawDb()
+        const profileId = resolveActiveProfileId(db, store)
+        const existing = db
+          .prepare('SELECT id FROM mods WHERE profile_id=? AND name=?')
+          .get(profileId, PANDORA_OUTPUT_MOD_NAME) as { id: number } | undefined
+        if (existing) {
+          db.prepare('UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?')
+            .run(outDir, 'patch', 1_000_000, existing.id)
+        } else {
+          const maxPrio = (db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as { mp: number | null }).mp
+          db.prepare(
+            `INSERT INTO mods (profile_id, name, category, install_path, is_enabled, is_installed, priority, deploy_category, resolution_weight)
+             VALUES (?,?,?,?,1,1,?,?,?)`,
+          ).run(profileId, PANDORA_OUTPUT_MOD_NAME, 'Generated', outDir, (maxPrio ?? 0) + 1, 'patch', 1_000_000)
+        }
+        logger.info('tools', `Pandora: output registrato come mod "${PANDORA_OUTPUT_MOD_NAME}" — riesegui il Deploy per applicarlo`)
+      }
+    } catch (e) {
+      logger.warn('tools', `Pandora: registrazione output fallita — ${(e as Error).message}`)
+    }
+  }
+  return res
 })
 
 // Validate / auto-detect 7-Zip: required for .7z/.rar (most heavy mods). Resolves the
