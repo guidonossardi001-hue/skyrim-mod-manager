@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from 'fs'
 import { join } from 'path'
 import { getLibraryPaths, parseAppManifest, parseVdf } from './vdf'
 import { parseAddressLibVersion, parseSkseRuntimeVersion, gameVersionSupported } from './version'
+import { readPeFileVersion } from './peVersion'
 
 // COMPANION MODE Steam probe — strictly read-only. Detects the Steam install,
 // extra library folders, and whether Skyrim SE/AE (AppID 489830) is installed.
@@ -111,9 +112,15 @@ export function findSkyrim(libraries: string[]): SkyrimInfo {
   return { appId: SKYRIM_SE_APPID, installed: false, path: null, version: null }
 }
 
-// Runtime version from the Address Library bin filename (no PE header parsing).
-// If multiple bins are present (e.g. SE 1.5 + AE 1.6), pick the HIGHEST version.
+// Runtime version — FONTE DI VERITÀ: la FileVersion PE di SkyrimSE.exe (è ciò che
+// parte davvero). Il fallback storico sui bin di Address Library resta SOLO per un
+// exe illeggibile: col deploy della collection arriva l'Address Library ALL-IN-ONE
+// (bin per ogni runtime) e "il bin più alto" diventa una stima sempre sbagliata —
+// caso reale: exe 1.6.1170, stima 1.6.1179 → falso drift + falso "SKSE incompatibile"
+// con avvio bloccato a gioco coerente.
 export function readSkyrimVersion(gamePath: string): string | null {
+  const exeVersion = readPeFileVersion(join(gamePath, 'SkyrimSE.exe'))
+  if (exeVersion) return exeVersion
   try {
     const dir = join(gamePath, 'Data', 'SKSE', 'Plugins')
     if (!existsSync(dir)) return null
