@@ -14,8 +14,11 @@ import { DEPLOY_MANIFEST_FILE, parseDeployManifest, type DeployManifest } from '
 
 export interface VerifyIo {
   exists: (p: string) => boolean
-  /** lstat: nlink per i file, isDirectory per le junction (mai seguire il link). */
-  lstat: (p: string) => { nlink: number; isFile: boolean; isDirectory: boolean } | null
+  /** lstat, mai seguire il link: nlink per i file; per le junction serve isSymbolicLink —
+   *  su Windows una junction è un reparse point e lstat dà isDirectory() FALSE anche
+   *  quando è perfettamente sana (bug reale: 5323 junction "scollegate" a ogni avvio,
+   *  con rideploy completo inutile della riparazione automatica ogni volta). */
+  lstat: (p: string) => { nlink: number; isFile: boolean; isDirectory: boolean; isSymbolicLink?: boolean } | null
   readFile: (p: string) => string
 }
 
@@ -95,7 +98,10 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
     const abs = join(instanceDataDir, rel)
     let ok = false
     try {
-      ok = io.exists(abs) && (io.lstat(abs)?.isDirectory ?? false)
+      // Junction sana = reparse point (lstat: isSymbolicLink true, isDirectory FALSE).
+      // isDirectory resta accettato per compatibilità con io legacy senza isSymbolicLink.
+      const st = io.exists(abs) ? io.lstat(abs) : null
+      ok = !!st && (st.isSymbolicLink === true || st.isDirectory)
     } catch {
       ok = false
     }

@@ -32,7 +32,10 @@ const verifyIo: VerifyIo = {
   readFile: (p) => readFileSync(p, 'utf8'),
   lstat: (p) => {
     const st = lstatSync(p)
-    return { nlink: st.nlink, isFile: st.isFile(), isDirectory: st.isDirectory() }
+    // isSymbolicLink è OBBLIGATORIO per giudicare le junction: su Windows lstat di una
+    // junction sana dà isDirectory() false (reparse point) — senza questo campo tutte
+    // le junction risultavano "scollegate" e la riparazione rideployava a ogni avvio.
+    return { nlink: st.nlink, isFile: st.isFile(), isDirectory: st.isDirectory(), isSymbolicLink: st.isSymbolicLink() }
   },
 }
 

@@ -12,6 +12,8 @@ function manifestJson(files: string[], junctions: string[] = []): string {
 interface FakeEntry {
   nlink?: number
   dir?: boolean
+  /** Reparse point (junction reale su Windows): lstat dà isDirectory FALSE. */
+  reparse?: boolean
 }
 
 function fakeIo(manifest: string | null, disk: Record<string, FakeEntry>): VerifyIo {
@@ -25,7 +27,12 @@ function fakeIo(manifest: string | null, disk: Record<string, FakeEntry>): Verif
     lstat: (p) => {
       const e = disk[p]
       if (!e) return null
-      return { nlink: e.nlink ?? 2, isFile: !e.dir, isDirectory: !!e.dir }
+      return {
+        nlink: e.nlink ?? 2,
+        isFile: !e.dir && !e.reparse,
+        isDirectory: !!e.dir && !e.reparse,
+        isSymbolicLink: !!e.reparse,
+      }
     },
   }
 }
@@ -57,6 +64,19 @@ describe('verifyDeployedInstance', () => {
       replacedCount: 0,
       junctionsMissingCount: 0,
     })
+    expect(hasDeployDrift(r)).toBe(false)
+  })
+
+  it('junction REALE Windows (reparse point: lstat isDirectory=false, isSymbolicLink=true) → intatta', () => {
+    // Bug reale 2026-07-17: 5323 junction sane giudicate "scollegate" a ogni avvio
+    // (il check guardava solo isDirectory) → rideploy completo inutile della riparazione.
+    const io = fakeIo(manifestJson(['a.esp'], ['textures\\big', 'meshes\\set']), {
+      [join(DATA, 'a.esp')]: { nlink: 2 },
+      [join(DATA, 'textures\\big')]: { reparse: true },
+      [join(DATA, 'meshes\\set')]: { reparse: true },
+    })
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.junctionsMissingCount).toBe(0)
     expect(hasDeployDrift(r)).toBe(false)
   })
 
