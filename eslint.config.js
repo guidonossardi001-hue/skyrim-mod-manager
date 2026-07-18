@@ -37,7 +37,7 @@ export default tseslint.config(
 
   // ── Processo main Electron + script (Node) ──────────────────────────────────
   {
-    files: ['electron/**/*.ts', 'scripts/**/*.{ts,mjs}'],
+    files: ['electron/**/*.ts', 'scripts/**/*.{ts,mjs}', '.claude/**/*.mjs'],
     languageOptions: { globals: { ...globals.node } },
   },
 
