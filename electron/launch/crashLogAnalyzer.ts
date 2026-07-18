@@ -1,5 +1,7 @@
 // Analizzatore di crash log Skyrim SE (formato Crash Logger SSE/AE/VR e Trainwreck — stesso
-// layout, entrambi discendenti del formato originale di fudgyduff). PURO: parse su stringa,
+// layout, entrambi discendenti del formato originale di fudgyduff). Gestisce SIA il layout
+// v1-12 ("PROBABLE CALL STACK:", frame "[0] 0x…") SIA il v1-24 ("CALL STACK ([P]robable /
+// [S]tack scan):", frame "[ 0][P] 0x…", plugin light "[FE:  0] …"). PURO: parse su stringa,
 // nessun fs qui (il wrapper IPC legge il file). Ispirato a Phostwood's Crash Log Analyzer (tool
 // web pubblico): qui NON è un database vivo di pattern noti, è un'euristica strutturale piccola
 // e onesta — identifica il modulo probabile colpevole dalla call stack e mostra sempre le
@@ -51,7 +53,11 @@ export function findProbableCulprit(callStack: CallStackFrame[]): CallStackFrame
   return null
 }
 
-const HEX_LINE = /^\[\s*([0-9A-Fa-f]+)\s*\]\s+0x([0-9A-Fa-f]+)\s+(\S+)\+([0-9A-Fa-f]+)(?:\s*->\s*\S+)?(?:\t(.*))?$/
+// Formato frame: due layout REALI dello stesso Crash Logger SSE.
+//   vecchio (v1-12):  [0] 0x… Modulo+off -> id+off\tistr
+//   nuovo   (v1-24):  [ 0][P] 0x… Modulo+off -> id+off\tistr   (tag [P]robable / [S]tack scan)
+// Il tag [P]/[S] tra la parentesi dell'indice e l'indirizzo è opzionale: entrambi passano.
+const HEX_LINE = /^\[\s*([0-9A-Fa-f]+)\s*\]\s*(?:\[[PSps]\]\s*)?0x([0-9A-Fa-f]+)\s+(\S+)\+([0-9A-Fa-f]+)(?:\s*->\s*\S+)?(?:\t(.*))?$/
 
 function parseCallStackLine(line: string): CallStackFrame | null {
   const m = line.trim().match(HEX_LINE)
@@ -79,7 +85,8 @@ export function parseCrashLog(text: string): CrashLogReport {
   const callStack: CallStackFrame[] = []
   let inCallStack = false
   for (const raw of lines) {
-    if (/^PROBABLE CALL STACK:/i.test(raw.trim())) {
+    // "PROBABLE CALL STACK:" (v1-12) oppure "CALL STACK ([P]robable / [S]tack scan):" (v1-24).
+    if (/^(?:PROBABLE )?CALL STACK\b/i.test(raw.trim())) {
       inCallStack = true
       continue
     }
@@ -124,8 +131,9 @@ export function parseCrashLog(text: string): CrashLogReport {
         inPlugins = false
         continue
       }
-      const m = trimmed.match(/^\[\s*([0-9A-Fa-f]+)\s*\]\s+(.+\.(?:esm|esp|esl))$/i)
-      if (m) plugins.push(m[2])
+      // Indice scartato: sia "[ 2]" (regular) sia "[FE:  0]" (light/ESL del nuovo formato).
+      const m = trimmed.match(/^\[[0-9A-Fa-f:\s]+\]\s+(.+\.(?:esm|esp|esl))$/i)
+      if (m) plugins.push(m[1])
     }
   }
 

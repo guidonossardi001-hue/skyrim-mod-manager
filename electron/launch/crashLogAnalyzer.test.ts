@@ -36,6 +36,53 @@ PLUGINS:
 	[ 4]     JContainers.esp
 `
 
+// Layout REALE di CrashLoggerSSE v1-24 (verificato su un crash reale dell'utente): header
+// sezione "CALL STACK ([P]robable / [S]tack scan):", frame con tag [P]/[S] e mapping "-> id+off",
+// plugin light "[FE:  0] …". Il vecchio parser (solo "PROBABLE CALL STACK:" + "[0] 0x…") su
+// questo trovava 0 frame e perdeva il colpevole.
+const NEW_FORMAT_LOG = `Skyrim SSE v1.6.1170
+CrashLoggerSSE v1-24-0-0 Jun 28 2026 00:14:22
+
+Unhandled exception "EXCEPTION_ACCESS_VIOLATION" at 0x7FF651A0D88A SkyrimSE.exe+032D88A	mov rax, [rcx]
+
+CALL STACK ([P]robable / [S]tack scan):
+	[ 0][P] 0x7FF651A0D88A                   SkyrimSE.exe+032D88A -> 21488+0x3A	mov rax, [rcx]
+	[ 1][P] 0x7FF651B80C9C                   SkyrimSE.exe+04A0C9C -> 29924+0x6BC	test al, al
+	[ 2][P] 0x7FFCCD8D296B                LexiconSKSE.dll+005296B	mov [rdi], rbx |  ConditionFunction.h:390
+	[ 3][P] 0x7FFDB6C4E957                   KERNEL32.DLL+002E957
+	[ 4][P] 0x7FFDB778AD6C                      ntdll.dll+00AAD6C
+
+REGISTERS:
+	RAX 0x7FF651A0D850     (void*)
+
+SKSE PLUGINS:
+	LexiconSKSE.dll v0.4.0
+	EngineFixes.dll v6.1.1
+
+PLUGINS:
+	Light: 2	Regular: 3	Total: 5
+	[ 0]     Skyrim.esm
+	[ 1]     Update.esm
+	[FE:  0] ccbgssse002-exoticarrows.esl
+`
+
+describe('parseCrashLog (formato v1-24)', () => {
+  it('rileva la call stack col nuovo header e i tag [P]/[S], identifica il colpevole', () => {
+    const r = parseCrashLog(NEW_FORMAT_LOG)
+    expect(r.recognized).toBe(true)
+    expect(r.exceptionType).toBe('EXCEPTION_ACCESS_VIOLATION')
+    expect(r.callStack).toHaveLength(5)
+    expect(r.callStack[2]).toMatchObject({ index: 2, module: 'LexiconSKSE.dll', offset: '005296B' })
+    expect(findProbableCulprit(r.callStack)?.module).toBe('LexiconSKSE.dll')
+    expect(analyzeCrashLog(r).culprit?.module).toBe('LexiconSKSE.dll')
+  })
+
+  it('parsa anche i plugin light "[FE:  0]" oltre ai regular', () => {
+    const r = parseCrashLog(NEW_FORMAT_LOG)
+    expect(r.plugins).toEqual(['Skyrim.esm', 'Update.esm', 'ccbgssse002-exoticarrows.esl'])
+  })
+})
+
 describe('parseCrashLog', () => {
   it('estrae header, eccezione, call stack, plugin SKSE e plugin del load order', () => {
     const r = parseCrashLog(SAMPLE_LOG)
