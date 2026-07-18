@@ -32,6 +32,7 @@ import {
   runSaveDoctorLive,
   verifyDeployLive,
   activeDeployDataDir,
+  documentsGameDir,
 } from './launch/preflight'
 import { readGuardStatus, setGuardProtection, findAppManifest } from './steam/updateGuard'
 import { runAutoRepair, type AutoRepairResult } from './launch/autoRepair'
@@ -699,6 +700,7 @@ app.whenReady().then(() => {
     resolveMasterlistPath: () => join(app.getPath('userData'), 'masterlist.json'),
     // Cache del masterlist LOOT reale (masterlist:refresh la scrive; qui la si legge soltanto).
     resolveLootMasterlistCachePath: () => join(app.getPath('userData'), MASTERLIST_CACHE_FILE),
+    resolveDocumentsIniDir: () => documentsGameDir(),
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
 
@@ -775,14 +777,40 @@ app.whenReady().then(() => {
     db: requireDb(),
     resolveGameDataDir,
     resolveModsRoot: modsRoot,
+    // Timeout+kill: BodySlide.exe può aprire un message box interattivo (visto DAL VIVO
+    // stasera: "Choose output set" sulle collisioni di output) — senza limite un run headless
+    // resterebbe appeso PER SEMPRE, bloccando ogni build futura (un solo chunk patologico
+    // blocca l'intero batch, mai più eseguibile senza kill manuale da Task Manager).
     runExe: (exe, args, cwd) =>
       new Promise((resolveRun) => {
+        const BODYSLIDE_TIMEOUT_MS = 10 * 60 * 1000 // un chunk da decine di gruppi può richiedere minuti
+        let settled = false
+        const finish = (r: { code: number | null; error?: string }) => {
+          if (settled) return
+          settled = true
+          resolveRun(r)
+        }
         try {
           const proc = spawn(exe, args, { cwd, windowsHide: false })
-          proc.on('close', (code) => resolveRun({ code }))
-          proc.on('error', (e) => resolveRun({ code: null, error: e.message }))
+          const timer = setTimeout(() => {
+            finish({ code: null, error: `timeout dopo ${BODYSLIDE_TIMEOUT_MS / 60000} minuti (dialogo bloccante? verifica manualmente BodySlide)` })
+            try {
+              proc.kill('SIGKILL')
+            } catch {
+              /* già terminato */
+            }
+          }, BODYSLIDE_TIMEOUT_MS)
+          timer.unref?.()
+          proc.on('close', (code) => {
+            clearTimeout(timer)
+            finish({ code })
+          })
+          proc.on('error', (e) => {
+            clearTimeout(timer)
+            finish({ code: null, error: e.message })
+          })
         } catch (e) {
-          resolveRun({ code: null, error: (e as Error).message })
+          finish({ code: null, error: (e as Error).message })
         }
       }),
     onProgress: (p) => {

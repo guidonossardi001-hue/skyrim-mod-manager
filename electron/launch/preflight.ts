@@ -57,9 +57,15 @@ const saveDoctorIo: SaveDoctorIo = {
   readFileText: (p) => readFileSync(p, 'utf8'),
 }
 
+/** Cartella standard Documents/My Games/Skyrim Special Edition — dove il runtime legge
+ *  SEMPRE Skyrim.ini/SkyrimPrefs.ini (Bethesda la hardcode, indipendente da dove sta la Data). */
+export function documentsGameDir(): string {
+  return join(app.getPath('documents'), 'My Games', 'Skyrim Special Edition')
+}
+
 /** Cartella saves standard del gioco (Documenti/My Games). */
 export function defaultSavesDir(): string {
-  return join(app.getPath('documents'), 'My Games', 'Skyrim Special Edition', 'Saves')
+  return join(documentsGameDir(), 'Saves')
 }
 
 /** plugins.txt DI SISTEMA (%LOCALAPPDATA%) — quello letto dal gioco avviato via SKSE. */

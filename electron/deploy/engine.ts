@@ -11,6 +11,10 @@ import {
   type DeployPreview,
 } from './deployer'
 import { classifyForEsl, pickToFlag, lightFlagBytes, TES4_FLAGS_OFFSET, type EslCandidate } from '../plugins/eslify'
+import { tryAcquireBusyGate, releaseBusyGate, currentBusyLabel } from '../util/busyGate'
+
+const BUSY_ERROR = (): string =>
+  `Un'altra operazione pesante (${currentBusyLabel()}) è già in corso: attendi che finisca prima di riprovare.`
 
 // Thin ipcMain wrapper around deployInstance (same shape as catalog/engine.ts and
 // install/engine.ts). Path resolution (profileId → instance Data dir) is injected
@@ -30,6 +34,9 @@ export interface DeployEngineOptions {
   resolveMasterlistPath?: () => string | null | undefined
   // Path della cache locale del masterlist LOOT reale (fetch esplicita via masterlist:refresh).
   resolveLootMasterlistCachePath?: () => string | null | undefined
+  // Documents/My Games/Skyrim Special Edition — dove il runtime legge DAVVERO gli INI (mai
+  // la root del gioco). Opzionale/iniettata: assente → deployer ricade sul fallback legacy.
+  resolveDocumentsIniDir?: () => string | null | undefined
   // false quando il target di deploy è una directory CONDIVISA (Data del gioco reale): vieta
   // ogni pulizia/purge euristica nlink — solo manifest esatto. Default true (istanza dedicata).
   allowHeuristics?: () => boolean
@@ -48,15 +55,23 @@ export function initDeployEngine(opts: DeployEngineOptions) {
     profileId: number,
     onProgress?: (p: unknown) => void,
   ): Promise<DeployResult> => {
-    try {
-      if (opts.isGameBusy?.()) {
-        opts.log?.('warn', 'deploy rifiutato: SkyrimSE è in esecuzione')
-        return {
-          success: false,
-          errorKind: 'game-running',
-          error: 'Skyrim è in esecuzione: chiudi il gioco prima di eseguire il Deploy (sostituire i file sotto un processo vivo lascerebbe la Data incoerente).',
-        }
+    if (opts.isGameBusy?.()) {
+      opts.log?.('warn', 'deploy rifiutato: SkyrimSE è in esecuzione')
+      return {
+        success: false,
+        errorKind: 'game-running',
+        error: 'Skyrim è in esecuzione: chiudi il gioco prima di eseguire il Deploy (sostituire i file sotto un processo vivo lascerebbe la Data incoerente).',
       }
+    }
+    // Serializzazione con FOMOD apply-all / batch build BodySlide / ESL-ify apply: senza
+    // questo gate, due IPC lanciate insieme interlacciano scritture sulla stessa Data/modsRoot
+    // (es. un rename FOMOD a metà mentre il deploy legge la stessa cartella). Copre anche la
+    // riparazione automatica, che chiama questa stessa funzione.
+    if (!tryAcquireBusyGate('deploy')) {
+      opts.log?.('warn', 'deploy rifiutato: operazione pesante concorrente in corso')
+      return { success: false, errorKind: 'busy', error: BUSY_ERROR() }
+    }
+    try {
       const dir = opts.resolveInstanceDataDir(profileId)
       if (!dir) {
         opts.log?.('warn', `deploy: percorso istanza non risolvibile per profilo ${profileId}`)
@@ -73,12 +88,15 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         masterlistPath: opts.resolveMasterlistPath?.() ?? undefined,
         lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
         allowHeuristicCleanup: opts.allowHeuristics?.() ?? true,
+        documentsIniDir: opts.resolveDocumentsIniDir?.() ?? undefined,
         log: opts.log,
         onProgress,
       })
     } catch (e) {
       opts.log?.('warn', `deploy errore inatteso: ${(e as Error).message}`)
       return { success: false, errorKind: 'db', error: (e as Error).message }
+    } finally {
+      releaseBusyGate()
     }
   }
 
@@ -204,10 +222,13 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       errors?: string[]
       error?: string
     } => {
+      // Il flag light cambia l'header di plugin che il gioco ha caricato: mai a gioco vivo.
+      // Gate anti-concorrenza SOLO per apply (scrive file): scan/dry-run resta libero.
+      if (apply && opts.isGameBusy?.())
+        return { ok: false, error: 'Skyrim è in esecuzione: chiudi il gioco prima di flaggare i plugin.' }
+      if (apply && !tryAcquireBusyGate('eslify'))
+        return { ok: false, error: BUSY_ERROR() }
       try {
-        // Il flag light cambia l'header di plugin che il gioco ha caricato: mai a gioco vivo.
-        if (apply && opts.isGameBusy?.())
-          return { ok: false, error: 'Skyrim è in esecuzione: chiudi il gioco prima di flaggare i plugin.' }
         const preview = previewDeploy(opts.db, {
           profileId,
           stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
@@ -288,6 +309,8 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         }
       } catch (e) {
         return { ok: false, error: (e as Error).message }
+      } finally {
+        if (apply) releaseBusyGate()
       }
     },
   )

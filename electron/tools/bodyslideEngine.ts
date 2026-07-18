@@ -1,7 +1,8 @@
 import { ipcMain } from 'electron'
-import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync } from 'fs'
+import { existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from 'fs'
 import { join, dirname, basename } from 'path'
 import type { SqliteDb } from '../db/sqlite'
+import { tryAcquireBusyGate, releaseBusyGate, currentBusyLabel } from '../util/busyGate'
 import {
   scanBodySlideAssets,
   planBuildPasses,
@@ -77,9 +78,28 @@ const realBsFs: BsFs = {
   },
 }
 
-function countFilesRec(root: string): number {
+/**
+ * Conta SOLO i file toccati da QUESTO run (mtime ≥ sinceMs, con 2s di tolleranza per skew
+ * filesystem). BUG REALE: outputDir non viene mai svuotata tra un build e l'altro (build
+ * incrementali per preset diversi devono convivere) — countFilesRec sul totale falsava
+ * filesBuilt/anyBuilt/modRegistered con gli avanzi di run PRECEDENTI: un run che non produce
+ * nulla di nuovo (tutti i chunk falliti) risultava comunque "riuscito" se la cartella aveva
+ * già contenuto da prima. Mai svuotare outputDir prima del run: un fallimento a metà non deve
+ * MAI regredire una mod già registrata e funzionante nel gioco a una cartella vuota.
+ */
+function countFreshFilesRec(root: string, sinceMs: number): number {
   try {
-    return readdirSync(root, { recursive: true, withFileTypes: true }).filter((d) => d.isFile()).length
+    let n = 0
+    for (const d of readdirSync(root, { recursive: true, withFileTypes: true })) {
+      if (!d.isFile()) continue
+      try {
+        const abs = join(d.parentPath, d.name)
+        if (statSync(abs).mtimeMs >= sinceMs - 2000) n++
+      } catch {
+        /* file svanito tra readdir e stat: non contarlo */
+      }
+    }
+    return n
   } catch {
     return 0
   }
@@ -149,6 +169,11 @@ export function initBodySlideEngine(opts: BodySlideEngineOptions) {
       modRegistered: false,
       error,
     })
+    // Serializzazione con deploy/FOMOD/ESL-ify: BodySlide legge/scrive sotto Data e modsRoot,
+    // un deploy concorrente vedrebbe uno stato a metà.
+    if (!tryAcquireBusyGate('bodyslide')) {
+      return fail(`Un'altra operazione pesante (${currentBusyLabel()}) è già in corso: attendi che finisca.`)
+    }
     try {
       const dataDir = opts.resolveGameDataDir()
       if (!dataDir) return fail('percorso del gioco non configurato')
@@ -171,6 +196,9 @@ export function initBodySlideEngine(opts: BodySlideEngineOptions) {
 
       const outputDir = join(opts.resolveModsRoot(), BODYSLIDE_OUTPUT_DIR)
       mkdirSync(outputDir, { recursive: true })
+      // Mai svuotata: build incrementali per preset diversi convivono nella stessa cartella.
+      // filesBuilt conta SOLO i file toccati DA QUESTO run (vedi countFreshFilesRec).
+      const buildStartMs = Date.now()
 
       const results: BodySlideBuildResult['passes'] = []
       for (let pi = 0; pi < plan.passes.length; pi++) {
@@ -192,7 +220,7 @@ export function initBodySlideEngine(opts: BodySlideEngineOptions) {
         results.push({ label: pass.label, preset: pass.preset, groups: pass.groups.length, chunks: chunks.length, failedChunks })
       }
 
-      const filesBuilt = countFilesRec(outputDir)
+      const filesBuilt = countFreshFilesRec(outputDir, buildStartMs)
       const anyBuilt = filesBuilt > 0
       let modRegistered = false
       if (anyBuilt) {
@@ -237,6 +265,8 @@ export function initBodySlideEngine(opts: BodySlideEngineOptions) {
       }
     } catch (e) {
       return fail((e as Error).message)
+    } finally {
+      releaseBusyGate()
     }
   })
 }

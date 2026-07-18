@@ -4,6 +4,7 @@ import { join } from 'path'
 import type { SqliteDb } from '../db/sqlite'
 import { extractArchive } from '../install/extract'
 import { expectedModDirName } from '../catalog/missingFiles'
+import { tryAcquireBusyGate, releaseBusyGate, currentBusyLabel } from '../util/busyGate'
 import {
   parseCollectionManifest,
   indexChoices,
@@ -168,6 +169,12 @@ export function initFomodEngine(opts: FomodEngineOptions) {
 
   // Applica gli installer FOMOD a TUTTE le mod estratte flat non ancora processate.
   ipcMain.handle('fomod:apply-all', async () => {
+    // Serializzazione con deploy/BodySlide/ESL-ify: le rename dentro modsRoot non devono
+    // interlacciarsi con un deploy che sta leggendo le stesse cartelle.
+    if (!tryAcquireBusyGate('fomod')) {
+      const busy = currentBusyLabel()
+      return { ok: false as const, error: `Un'altra operazione pesante (${busy}) è già in corso: attendi che finisca.` }
+    }
     try {
       const modsRoot = opts.resolveModsRoot()
       const manifest = loadCachedManifest()
@@ -181,12 +188,30 @@ export function initFomodEngine(opts: FomodEngineOptions) {
           return false
         }
       })
-      // Plugin noti per le fileDependency dei ModuleConfig: i plugin root di ogni mod estratta.
+      // Plugin noti per le fileDependency dei ModuleConfig: usati dal motore FOMOD per
+      // valutare condizioni tipo "installa questa opzione solo se PluginX.esp è presente".
+      // Scansione a 2 livelli (radice + UN wrapper), stesso raggio di hasFomod: un plugin
+      // master può vivere dentro <mod>/<wrapper>/Master.esm invece che alla radice della
+      // mod (137/1939 mod della collection hanno questo layout, vedi fix hasFomod) — prima
+      // restava fuori da knownPlugins e ogni fileDependency su quel master falliva "assente"
+      // anche col plugin realmente installato, producendo scelte FOMOD sbagliate.
+      const PLUGIN_RE = /\.(esp|esm|esl)$/i
       const knownPlugins: string[] = []
       for (const d of readdirSync(modsRoot)) {
+        const modPath = join(modsRoot, d)
         try {
-          for (const f of readdirSync(join(modsRoot, d))) {
-            if (/\.(esp|esm|esl)$/i.test(f)) knownPlugins.push(f)
+          for (const f of readdirSync(modPath)) {
+            if (PLUGIN_RE.test(f)) {
+              knownPlugins.push(f)
+              continue
+            }
+            try {
+              if (statSync(join(modPath, f)).isDirectory()) {
+                for (const f2 of readdirSync(join(modPath, f))) if (PLUGIN_RE.test(f2)) knownPlugins.push(f2)
+              }
+            } catch {
+              /* wrapper illeggibile: skip */
+            }
           }
         } catch {
           /* skip */
@@ -242,6 +267,8 @@ export function initFomodEngine(opts: FomodEngineOptions) {
     } catch (e) {
       opts.log?.('warn', `fomod:apply-all errore inatteso: ${(e as Error).message}`)
       return { ok: false as const, error: (e as Error).message }
+    } finally {
+      releaseBusyGate()
     }
   })
 }

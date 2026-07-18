@@ -165,8 +165,18 @@ export async function runFomodHeadless(
   ctx: FomodContext,
 ): Promise<FomodRunResult> {
   const files = listArchiveStyleFiles(modDir)
-  const native = loadNative()
-  const sup = native.testSupported(files, ['XmlScript'])
+  // loadNative/testSupported ERANO fuori da ogni try: un throw qui (modulo nativo non
+  // caricabile, archivio malformato che manda in eccezione lo scanner) propagava fino al
+  // chiamante e interrompeva l'INTERO apply-all a metà lista — un solo FOMOD patologico tra
+  // ~1900 mod bastava a bloccare tutte le mod successive. Ora fallisce SOLO questa mod.
+  let native: ReturnType<typeof loadNative>
+  let sup: { supported: boolean }
+  try {
+    native = loadNative()
+    sup = native.testSupported(files, ['XmlScript'])
+  } catch (e) {
+    return { ok: false, supported: false, error: `motore FOMOD non disponibile per questa mod: ${(e as Error).message}` }
+  }
   if (!sup.supported) return { ok: false, supported: false, error: 'installer non XmlScript (richiede intervento manuale)' }
   try {
     // I callback del motore nativo scattano via setImmediate: un throw lì dentro NON è
@@ -244,6 +254,11 @@ export function applyFomodInstructions(
   if (!copies.length) return { ok: false, error: 'nessuna instruction copy: installer senza esito utile' }
   const mapped = modDir + '.smm-mapped'
   const journal: { from: string; to: string }[] = []
+  const discard = modDir + '.smm-flat-discard'
+  // true SOLO dopo che modDir è stato rinominato in discard: da quel momento i path del
+  // journal (dentro il vecchio modDir) non esistono più, quindi il rollback file-per-file
+  // sarebbe un no-op silenzioso — la branca `swapped` nel catch usa una strategia diversa.
+  let swapped = false
   try {
     if (existsSync(mapped)) rmSync(mapped, { recursive: true, force: true })
     mkdirSync(mapped, { recursive: true })
@@ -267,9 +282,9 @@ export function applyFomodInstructions(
       'utf8',
     )
     // Swap: flat → .flat-discard, mapped → modDir, poi elimina gli avanzi.
-    const discard = modDir + '.smm-flat-discard'
     if (existsSync(discard)) rmSync(discard, { recursive: true, force: true })
     renameSync(modDir, discard)
+    swapped = true
     renameSync(mapped, modDir)
     let discarded = 0
     try {
@@ -280,7 +295,26 @@ export function applyFomodInstructions(
     }
     return { ok: true, filesMapped: journal.length, discarded }
   } catch (e) {
-    // Rollback: ogni file torna al suo posto, la mod resta flat e intatta.
+    // BUG REALE (fallimento del SECONDO rename dello swap, es. antivirus che tiene un handle
+    // aperto su un file appena spostato): modDir è già stato rinominato in `discard`, quindi
+    // i path del journal (dentro il VECCHIO modDir) non esistono più — il rollback file-per-file
+    // sotto falliva silenzialmente per ognuno (catch "best effort"), e la riga seguente
+    // cancellava `mapped` — che a quel punto era l'UNICA copia buona rimasta: perdita totale
+    // della mod. Qui invece si desfa lo SWAP (discard → modDir) e `mapped` non viene mai
+    // toccata: nel caso peggiore resta un artefatto orfano su disco, mai una mod distrutta.
+    if (swapped) {
+      try {
+        if (!existsSync(modDir) && existsSync(discard)) renameSync(discard, modDir)
+        return { ok: false, error: `swap verso il layout finale fallito, stato originale ripristinato: ${(e as Error).message}` }
+      } catch {
+        return {
+          ok: false,
+          error: `swap fallito e ripristino impossibile — i file originali sono salvi in "${discard}" (rinominala in "${modDir}" a mano): ${(e as Error).message}`,
+        }
+      }
+    }
+    // Fallimento PRIMA dello swap (durante il loop di copia): modDir esiste ancora nel suo
+    // stato originale meno i file già spostati in `mapped` — il rollback file-per-file è corretto qui.
     for (const j of journal.reverse()) {
       try {
         renameSync(j.to, j.from)

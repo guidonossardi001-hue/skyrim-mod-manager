@@ -54,6 +54,7 @@ export type DeployErrorKind =
   | 'missing-master' // un plugin richiede un master (header TES4) né deployato né vanilla/CC → crash al load
   | 'plugin-limit' // slot FULL (ESM/ESP non-light) oltre il limite motore 254 → crash garantito al load
   | 'game-running' // SkyrimSE in esecuzione: rimpiazzare hardlink sotto un processo vivo = Data incoerente
+  | 'busy' // un'altra operazione pesante (deploy/FOMOD/BodySlide/ESL-ify) è già in corso
   | 'cleanup'
   | 'link'
   | 'db'
@@ -110,6 +111,14 @@ export interface DeployOptions {
   // la Data del GIOCO REALE: l'euristica è pensata per un'istanza dedicata, su una Data condivisa
   // potrebbe toccare file non nostri. Default true (retro-compatibile con le istanze).
   allowHeuristicCleanup?: boolean
+  // Cartella REALE dove il runtime Skyrim legge Skyrim.ini/SkyrimPrefs.ini (SEMPRE
+  // Documents/My Games/Skyrim Special Edition — Bethesda la hardcode, indipendente da dove
+  // sta la Data). BUG REALE senza questo campo: il fallback (dirname(instanceDataDir)) con
+  // deployTarget='game' punta alla ROOT del GIOCO, che il runtime non legge mai — ogni chiave
+  // di MOD_REQUIRED_OVERRIDES (bInvalidateOlderFiles, sResourceDataDirsFinal, …) restava
+  // inerte a ogni deploy/riparazione, silenziosamente. Iniettata dal main; il fallback resta
+  // per retro-compatibilità di test/istanza dedicata.
+  documentsIniDir?: string
 }
 
 // Throttle the linking phase so a 100k-file deploy doesn't flood the IPC channel:
@@ -817,7 +826,9 @@ export async function deployInstance(
     let iniFilesWritten = 0
     if (!opts.skipIni) {
       emit({ stage: 'ini' })
-      const profileDir = dirname(instanceDataDir)
+      // documentsIniDir (Documents/My Games/...) è la verità: il runtime legge SEMPRE da lì,
+      // mai dalla root del gioco. dirname(instanceDataDir) resta solo come fallback legacy.
+      const profileDir = opts.documentsIniDir ?? dirname(instanceDataDir)
       const template = resolveIniTemplate(opts.iniTemplate)
       const overrides = mergeIniMaps(MOD_REQUIRED_OVERRIDES, opts.iniOverrides)
       try {

@@ -123,6 +123,12 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
       } else if (r.errorKind === 'missing-master') {
         onLog(`Deploy bloccato: ${r.error}`, 'error')
         toast.error('Master mancanti', r.error ?? 'un plugin richiede master non installati')
+      } else if (r.errorKind === 'game-running') {
+        onLog(`Deploy bloccato: ${r.error}`, 'error')
+        toast.warning('Skyrim è in esecuzione', r.error ?? 'chiudi il gioco prima di eseguire il Deploy')
+      } else if (r.errorKind === 'busy') {
+        onLog(`Deploy bloccato: ${r.error}`, 'error')
+        toast.warning('Operazione in corso', r.error ?? "un'altra operazione pesante è già attiva")
       } else {
         onLog(`Deploy fallito: ${r.error}`, 'error')
         toast.error('Deploy fallito', r.error ?? r.errorKind ?? 'errore sconosciuto')

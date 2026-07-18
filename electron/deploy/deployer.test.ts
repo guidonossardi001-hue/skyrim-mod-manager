@@ -170,6 +170,20 @@ describe('deployInstance', () => {
     expect(readFileSync(join(profileDir, 'SkyrimPrefs.ini'), 'utf8')).toContain('iShadowMapResolution=4096')
   })
 
+  // BUG REALE (target='game'): instanceData = <gamePath>/Data, quindi il fallback
+  // dirname(instanceData) è la ROOT del gioco — il runtime Skyrim NON legge mai gli INI da
+  // lì (li legge SEMPRE da Documents/My Games/…). documentsIniDir deve vincere sul fallback.
+  it('documentsIniDir esplicito vince sul fallback dirname(instanceDataDir)', async () => {
+    makeMod('A', 1, { 'a.esp': '' })
+    const docsDir = join(base, 'FakeDocuments', 'My Games', 'Skyrim Special Edition')
+    const r = await deployInstance(db, instanceData, { profileId: 1, documentsIniDir: docsDir })
+    expect(r.success).toBe(true)
+    expect(existsSync(join(docsDir, 'Skyrim.ini'))).toBe(true)
+    expect(readFileSync(join(docsDir, 'Skyrim.ini'), 'utf8')).toContain('bInvalidateOlderFiles=1')
+    // Il vecchio percorso (root del "gioco" in questo test) NON riceve nulla.
+    expect(existsSync(join(dirname(instanceData), 'Skyrim.ini'))).toBe(false)
+  })
+
   it('respects skipIni (no INI files written)', async () => {
     makeMod('A', 1, { 'a.esp': '' })
     const r = await deployInstance(db, instanceData, { profileId: 1, skipIni: true })

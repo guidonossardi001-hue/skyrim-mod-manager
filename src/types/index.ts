@@ -468,6 +468,7 @@ declare global {
             | 'dependency-cycle'
             | 'missing-master'
             | 'game-running'
+            | 'busy'
             | 'cleanup'
             | 'link'
             | 'db'
