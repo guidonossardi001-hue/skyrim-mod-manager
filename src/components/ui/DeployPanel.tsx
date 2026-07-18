@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link2, Trash2, Loader, FolderSync, ShieldCheck } from 'lucide-react'
+import { Link2, Trash2, Loader, FolderSync, ShieldCheck, Wrench } from 'lucide-react'
 import { toast } from '@/lib/toast'
 
 // Pannello Deployment (hardlink engine): consuma deploy:run / deploy:purge / deploy:progress.
@@ -72,6 +72,11 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
   const [busy, setBusy] = useState<'deploy' | 'purge' | 'register' | 'verify' | null>(null)
   const [progress, setProgress] = useState<{ stage: string; percent?: number; detail?: string } | null>(null)
   const [summary, setSummary] = useState<string | null>(null)
+  // Plugin "dirty" (ITM/UDR) segnalati dall'ultimo deploy — Quick Auto Clean automatizzato per
+  // ognuno (T20), headless via xEdit/SSEEdit. Il gioco deve essere chiuso (gate lato main).
+  const [dirtyPlugins, setDirtyPlugins] = useState<{ plugin: string; itm: number; udr: number; nav: number; util: string }[]>([])
+  const [qacBusy, setQacBusy] = useState<string | null>(null)
+  const [qacResults, setQacResults] = useState<Record<string, string>>({})
   const api = (window.api as unknown as DeployApi).deploy
   const unsubRef = useRef<(() => void) | null>(null)
 
@@ -102,6 +107,8 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
         setSummary(line)
         onLog(line, 'success')
         toast.success('Deploy completato', `${r.filesHardlinked} hardlink, ${r.pluginsWritten} plugin nel load order`)
+        setDirtyPlugins(r.dirtyPlugins ?? [])
+        setQacResults({})
         if (r.dirtyPlugins?.length) {
           const names = r.dirtyPlugins.map((d) => `${d.plugin} (${d.itm} ITM, ${d.udr} UDR)`).join(', ')
           onLog(`Plugin da pulire con SSEEdit: ${names}`, 'error')
@@ -225,6 +232,30 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
     }
   }
 
+  // Quick Auto Clean headless (T20): un plugin alla volta, gate lato main su gioco in
+  // esecuzione. Nessun exit-code contrattuale di xEdit — il main classifica dal log.
+  const runQacClean = async (pluginName: string) => {
+    if (qacBusy) return
+    if (
+      !window.confirm(
+        `Pulire "${pluginName}" con SSEEdit (Quick Auto Clean)?\n\nApre xEdit in background e rimuove ITM/UDR automaticamente. Il gioco deve essere chiuso.`,
+      )
+    )
+      return
+    setQacBusy(pluginName)
+    try {
+      const r = await window.api.plugin.qacClean(pluginName)
+      setQacResults((prev) => ({ ...prev, [pluginName]: r.summary }))
+      if (r.verdict === 'cleaned') toast.success(`${pluginName} pulito`, r.summary)
+      else if (r.verdict === 'nothing-to-clean') toast.info(`${pluginName}: niente da pulire`, r.summary)
+      else toast.error(`Pulizia di ${pluginName} fallita`, r.summary)
+    } catch (e) {
+      toast.error('Quick Auto Clean fallito', (e as Error).message)
+    } finally {
+      setQacBusy(null)
+    }
+  }
+
   return (
     <div className="rounded-xl border border-dark-800 bg-dark-900/40 p-4">
       <div className="flex items-center justify-between mb-2">
@@ -290,6 +321,30 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
         </div>
       )}
       {summary && !busy && <div className="mt-2 text-xs text-green-300/90">{summary}</div>}
+      {dirtyPlugins.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {dirtyPlugins.map((d) => (
+            <div key={d.plugin} className="flex items-center justify-between gap-2 rounded-lg bg-red-900/15 border border-red-900/40 px-3 py-1.5 text-xs">
+              <span className="text-red-300 truncate">
+                {d.plugin} — {d.itm} ITM, {d.udr} UDR{d.nav ? `, ${d.nav} navmesh` : ''}
+              </span>
+              <button
+                onClick={() => runQacClean(d.plugin)}
+                disabled={qacBusy != null}
+                className="flex items-center gap-1 px-2 py-1 rounded bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50 flex-shrink-0"
+                title="Quick Auto Clean headless via SSEEdit (il gioco deve essere chiuso)"
+              >
+                {qacBusy === d.plugin ? <Loader size={11} className="animate-spin" /> : <Wrench size={11} />} Pulisci
+              </button>
+            </div>
+          ))}
+          {Object.entries(qacResults).map(([name, msg]) => (
+            <p key={name} className="text-[11px] text-dark-400 pl-1">
+              {name}: {msg}
+            </p>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

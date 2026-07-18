@@ -22,7 +22,7 @@ import { recoverOnStartup } from './delta/journal'
 import { parseNxmUrl, findNxmUrl, createNxmDownload, validateNxmLink, type NxmLink } from './nexus/nxm'
 import { NxmConsentStore } from './nexus/nxmConsent'
 import { scanVortexMods, buildCatalog, defaultVortexModsRoot, type VortexScan } from './vortex/scan'
-import { detectSteamEnv, detectSkse, SKYRIM_SE_APPID } from './steam/detect'
+import { detectSteamEnv, detectSkse, readSkyrimVersion, SKYRIM_SE_APPID } from './steam/detect'
 import {
   runPreflight,
   executeLaunch,
@@ -118,6 +118,25 @@ import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash, randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
 import { logger } from './logger'
+import { readAndClassifySkseDll } from './launch/skseDllPreflight'
+import { readAndValidateEsp } from './plugins/espValidate'
+import {
+  bethiniPresetTemplate,
+  isValidBethiniTier,
+  BETHINI_TIERS_BY_FLAVOR,
+  type BethiniFlavor,
+  type BethiniTier,
+} from './ini/bethiniPresets'
+import { applyIniSettings } from './ini/iniService'
+import { checkGrassPrereqs, summarizeGrassCache } from './launch/grassCache'
+import {
+  markerFileExists,
+  writeMarkerFile,
+  removeMarkerFileIfExists,
+  listGrassCacheFiles,
+  supervisePrecache,
+} from './launch/grassCacheEngine'
+import { runQuickAutoClean } from './plugins/qacEngine'
 
 // Trust-anchor hardening (fixes the NODE_ENV-spoof vector). The pinned Ed25519 pubkey override
 // and the anti-rollback floor relax themselves outside production (dev/test/ci) via NODE_ENV. In
@@ -3041,6 +3060,123 @@ ipcMain.handle('tools:launch-loot', () => {
 })
 ipcMain.handle('tools:launch-sseedit', () => launchTool(toolPath('sseeditPath')))
 ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath')))
+
+// ── T14 — Preflight DLL SKSE: legge l'export SKSEPlugin_Version di ogni plugin in
+// Data/SKSE/Plugins e lo confronta con la versione runtime dell'exe. Sola lettura.
+ipcMain.handle('skse:preflight-dlls', () => {
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  if (!gamePath) return { ok: false as const, error: 'Percorso del gioco non configurato' }
+  const runtimeVersion = readSkyrimVersion(gamePath)
+  const dir = join(gamePath, 'Data', 'SKSE', 'Plugins')
+  if (!existsSync(dir)) return { ok: true as const, runtimeVersion, reports: [] }
+  const reports = readdirSync(dir)
+    .filter((f) => /\.dll$/i.test(f))
+    .map((f) => readAndClassifySkseDll(join(dir, f), runtimeVersion))
+  return { ok: true as const, runtimeVersion, reports }
+})
+
+// ── T15 — Validazione header ESP: range FormID per plugin ESL + report form43/44,
+// sui plugin realmente deployati nell'istanza attiva. Sola lettura.
+ipcMain.handle('plugins:validate-esp', () => {
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
+  if (!dataDir || !existsSync(dataDir)) return { ok: false as const, error: 'Nessuna Data deployata trovata' }
+  const reports = readdirSync(dataDir)
+    .filter((f) => /\.(esp|esm|esl)$/i.test(f))
+    .map((f) => readAndValidateEsp(join(dataDir, f), f))
+  return { ok: true as const, reports }
+})
+
+// ── T18 — Preset INI derivati da BethINI Pie: applica a Documents/My Games/... (la
+// stessa cartella che il runtime legge davvero, non la root del gioco).
+ipcMain.handle('ini:apply-bethini-preset', async (_e, tier: string, flavor: string) => {
+  if (flavor !== 'bethini' && flavor !== 'vanilla') return { success: false, error: `flavor sconosciuto: ${flavor}` }
+  if (!isValidBethiniTier(flavor as BethiniFlavor, tier))
+    return { success: false, error: `tier "${tier}" non valido per il flavor "${flavor}" (validi: ${BETHINI_TIERS_BY_FLAVOR[flavor as BethiniFlavor].join(', ')})` }
+  try {
+    const template = bethiniPresetTemplate(tier as BethiniTier, flavor as BethiniFlavor)
+    await applyIniSettings(documentsGameDir(), template, {})
+    logger.info('ini', `preset BethINI ${flavor}/${tier} applicato`)
+    return { success: true }
+  } catch (e) {
+    return { success: false, error: (e as Error).message }
+  }
+})
+
+// ── T19 — Grass cache "autopilota": stato/prerequisiti (sola lettura) + avvio
+// supervisionato (lancia il gioco, rilancia sui crash finché il marker non è rimosso).
+// Non genera MAI la cache senza il gioco reale in esecuzione — vedi grassCache.ts.
+ipcMain.handle('grass:status', () => {
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  if (!gamePath) return { ok: false as const, error: 'Percorso del gioco non configurato' }
+  const marker = markerFileExists(gamePath)
+  let skyrimIniText = ''
+  try {
+    skyrimIniText = readFileSync(join(documentsGameDir(), 'Skyrim.ini'), 'utf8')
+  } catch {
+    /* file assente/illeggibile: checkGrassPrereqs gestisce i valori null */
+  }
+  const prereqs = checkGrassPrereqs(skyrimIniText, marker)
+  const summary = summarizeGrassCache(listGrassCacheFiles(gamePath))
+  return { ok: true as const, prereqs, summary }
+})
+
+let grassPrecacheRunning = false
+ipcMain.handle('grass:start-precache', async () => {
+  if (grassPrecacheRunning) return { success: false, error: 'Un precache è già in corso' }
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  if (!gamePath) return { success: false, error: 'Percorso del gioco non configurato' }
+  const target = resolveBootstrapper({ gamePath, mo2Path: null })
+  if (!target || target.mode !== 'exe') return { success: false, error: 'Nessun metodo di avvio SKSE disponibile' }
+
+  grassPrecacheRunning = true
+  try {
+    writeMarkerFile(gamePath)
+    try {
+      await applyIniSettings(documentsGameDir(), { name: 'grass-precache', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 1 } } } }, {})
+    } catch (e) {
+      logger.warn('grass', `impostazione bGenerateGrassDataFiles fallita (procedo comunque): ${(e as Error).message}`)
+    }
+    const result = await supervisePrecache({
+      launch: () => launchGame({ exePath: target.exe!, cwd: target.cwd!, args: target.args ?? [] }),
+      isGameRunning,
+      markerExists: () => markerFileExists(gamePath),
+      sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+      onProgress: (ev) => mainWindow?.webContents.send('grass:progress', ev),
+    })
+    return { success: true, result }
+  } finally {
+    try {
+      await applyIniSettings(documentsGameDir(), { name: 'grass-precache-off', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 0 } } } }, {})
+    } catch {
+      /* best-effort: non deve far fallire la risposta */
+    }
+    grassPrecacheRunning = false
+  }
+})
+
+// Uscita manuale da uno stato bloccato: rimuove il marker senza avviare nulla (es. l'utente
+// ha deciso di interrompere e vuole che un prossimo "Avvia" parta da zero, non da un residuo).
+ipcMain.handle('grass:clear-marker', () => {
+  if (grassPrecacheRunning) return { success: false, error: 'Precache in corso: attendi il termine prima di azzerare il marker' }
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  if (!gamePath) return { success: false, error: 'Percorso del gioco non configurato' }
+  removeMarkerFileIfExists(gamePath)
+  return { success: true }
+})
+
+// ── T20 — Quick Auto Clean headless via xEdit/SSEEdit su UN plugin. Il gioco/MO2
+// devono essere chiusi (raccomandazione community): qui si applica lo stesso gate
+// game-running già usato dal Deploy.
+ipcMain.handle('plugins:qac-clean', async (_e, pluginName: string) => {
+  if (isGameRunning()) return { verdict: 'blocked' as const, summary: 'Skyrim è in esecuzione: chiudilo prima di pulire un plugin', log: null }
+  const xeditPath = toolPath('sseeditPath')
+  if (!xeditPath) return { verdict: 'launch-failed' as const, summary: 'Percorso SSEEdit non configurato', log: null }
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
+  if (!dataDir) return { verdict: 'launch-failed' as const, summary: 'Nessuna Data deployata trovata', log: null }
+  return runQuickAutoClean({ xeditPath, dataPath: dataDir, pluginName })
+})
 
 // Pandora Behaviour Engine — the single animation/behaviour manager. Launched as an
 // EXPLICIT step (it regenerates the game's behaviour files); never auto-run silently.

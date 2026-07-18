@@ -23,6 +23,7 @@ const EVENT_CHANNELS = new Set([
   'crash:detected',
   'fomod:progress',
   'bodyslide:progress',
+  'grass:progress',
 ])
 
 // original listener → ipcRenderer wrapper, so off() accepts either one.
@@ -216,6 +217,10 @@ contextBridge.exposeInMainWorld('api', {
     // per liberare slot FULL. Solo numeri/bool sull'IPC, mai path.
     eslify: (profileId: number, apply: boolean, margin?: number) =>
       invoke('plugins:eslify', profileId, apply, margin),
+    // Validazione header ESP (range FormID ESL + form43/44 informativo) sui plugin deployati.
+    validateEsp: () => invoke('plugins:validate-esp'),
+    // Quick Auto Clean headless via xEdit/SSEEdit su un singolo plugin dirty.
+    qacClean: (pluginName: string) => invoke('plugins:qac-clean', pluginName),
   },
 
   // Download manager
@@ -269,6 +274,32 @@ contextBridge.exposeInMainWorld('api', {
   crash: {
     listRecent: () => invoke('crash:list-recent'),
     analyze: (filePath: string) => invoke('crash:analyze', filePath),
+  },
+
+  // Preflight DLL SKSE: legge l'export SKSEPlugin_Version di ogni plugin (PE puro,
+  // nessun codice del plugin eseguito) e lo confronta con la versione runtime del gioco.
+  skse: {
+    preflightDlls: () => invoke('skse:preflight-dlls'),
+  },
+
+  // Preset INI derivati da BethINI Pie (Grass/Distant Detail/Shadow) + Quick Auto Clean
+  // headless via xEdit/SSEEdit su un singolo plugin dirty.
+  ini: {
+    applyBethiniPreset: (tier: string, flavor: 'bethini' | 'vanilla') => invoke('ini:apply-bethini-preset', tier, flavor),
+  },
+
+  // Grass cache "autopilota": stato/prerequisiti (sola lettura) + avvio supervisionato
+  // (lancia il gioco, rilancia sui crash finché NGIO non rimuove il marker). Non genera
+  // mai la cache senza il gioco reale in esecuzione.
+  grass: {
+    status: () => invoke('grass:status'),
+    startPrecache: () => invoke('grass:start-precache'),
+    clearMarker: () => invoke('grass:clear-marker'),
+    onProgress: (callback: (ev: { attempt: number; status: string }) => void) => {
+      const listener = (_e: IpcRendererEvent, ev: { attempt: number; status: string }) => callback(ev)
+      ipcRenderer.on('grass:progress', listener)
+      return () => ipcRenderer.removeListener('grass:progress', listener)
+    },
   },
 
   // Preset ENB: scan nelle mod estratte, apply/remove nella ROOT del gioco (backup+manifest).

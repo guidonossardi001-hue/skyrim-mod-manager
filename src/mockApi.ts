@@ -849,6 +849,21 @@ export const mockApi = {
     analyze: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
   },
 
+  skse: {
+    preflightDlls: async () => ({ ok: false as const, error: 'Preflight DLL SKSE disponibile solo nell’app desktop' }),
+  },
+
+  ini: {
+    applyBethiniPreset: async () => ({ success: false, error: 'Applicazione preset INI disponibile solo nell’app desktop' }),
+  },
+
+  grass: {
+    status: async () => ({ ok: false as const, error: 'Grass cache disponibile solo nell’app desktop' }),
+    startPrecache: async () => ({ success: false, error: 'Grass cache disponibile solo nell’app desktop' }),
+    clearMarker: async () => ({ success: false, error: 'Grass cache disponibile solo nell’app desktop' }),
+    onProgress: () => () => {},
+  },
+
   enb: {
     scan: async () => ({ ok: true as const, presets: [] }),
     apply: async () => ({ ok: false as const, error: 'Gestione ENB disponibile solo nell’app desktop' }),
@@ -1148,6 +1163,8 @@ export const mockApi = {
       ],
       flagged: apply ? [{ name: 'CompatPatch A.esp', size: 4096 }] : [],
     }),
+    validateEsp: async () => ({ ok: false as const, error: 'Validazione ESP disponibile solo nell’app desktop' }),
+    qacClean: async () => ({ verdict: 'launch-failed' as const, summary: 'Quick Auto Clean disponibile solo nell’app desktop', log: null }),
   },
 
   // Vortex importer — simulated scan of two collections for the browser preview.

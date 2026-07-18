@@ -676,6 +676,60 @@ declare global {
           error?: string
         }>
       }
+      // Preflight DLL SKSE — legge l'export SKSEPlugin_Version (PE puro, nessun codice del
+      // plugin eseguito) e lo confronta con la versione runtime del gioco. Sola lettura.
+      skse: {
+        preflightDlls(): Promise<{
+          ok: boolean
+          error?: string
+          runtimeVersion?: string | null
+          reports?: {
+            file: string
+            verdict: 'ok' | 'warning' | 'incompatible' | 'unknown'
+            reason: string
+            hasLoadExport: boolean
+            data: {
+              dataVersion: number
+              pluginVersion: string
+              name: string
+              author: string
+              addressLibrary: boolean
+              compatibleVersions: string[]
+            } | null
+          }[]
+        }>
+      }
+      // Preset INI derivati da BethINI Pie (Grass/Distant Detail/Shadow — categorie con valori
+      // per-tier verificati da fonte primaria).
+      ini: {
+        applyBethiniPreset(
+          tier: 'poor' | 'low' | 'medium' | 'high' | 'ultra',
+          flavor: 'bethini' | 'vanilla',
+        ): Promise<{ success: boolean; error?: string }>
+      }
+      // Grass cache "autopilota" — stato/prerequisiti (sola lettura) + avvio supervisionato.
+      // NON genera mai la cache senza il gioco reale in esecuzione (25min-2,5h, crash attesi).
+      grass: {
+        status(): Promise<{
+          ok: boolean
+          error?: string
+          prereqs?: {
+            ready: boolean
+            issues: string[]
+            bAllowLoadGrass: boolean | null
+            bGenerateGrassDataFiles: boolean | null
+            markerPresent: boolean
+          }
+          summary?: { totalFiles: number; parsedCount: number; unparsedCount: number; byWorldspace: Record<string, number> }
+        }>
+        startPrecache(): Promise<{
+          success: boolean
+          error?: string
+          result?: { completed: boolean; attempts: number; reason: string }
+        }>
+        clearMarker(): Promise<{ success: boolean; error?: string }>
+        onProgress(callback: (ev: { attempt: number; status: string }) => void): () => void
+      }
       // Incremental (delta) update engine — signed-manifest ingest + gated apply.
       delta: {
         ingest(
@@ -719,6 +773,27 @@ declare global {
           flagged?: { name: string; size: number }[]
           errors?: string[]
           error?: string
+        }>
+        // Validazione header ESP (range FormID ESL + form43/44 informativo) sui plugin deployati.
+        validateEsp(): Promise<{
+          ok: boolean
+          error?: string
+          reports?: {
+            name: string
+            verdict: 'ok' | 'warning' | 'error' | 'unknown'
+            reason: string
+            isLight: boolean
+            hedrVersion: number | null
+            extendedRangeEnabled: boolean
+            outOfRangeObjectIndices: number[]
+            formVersionCounts: Record<number, number>
+          }[]
+        }>
+        // Quick Auto Clean headless via xEdit/SSEEdit su un singolo plugin dirty.
+        qacClean(pluginName: string): Promise<{
+          verdict: 'cleaned' | 'nothing-to-clean' | 'crashed' | 'timeout' | 'launch-failed' | 'blocked'
+          summary: string
+          log: { undeleted: string[]; removed: string[]; skippedNavmeshes: string[]; nothingToClean: boolean } | null
         }>
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).

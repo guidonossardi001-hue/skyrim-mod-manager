@@ -87,6 +87,114 @@ export default function Tools() {
     if (path) await analyzeCrash(path)
   }
 
+  // Preflight DLL SKSE (T14): sola lettura, legge SOLO l'header PE — nessun codice del plugin
+  // viene eseguito. Verifica compatibleVersions[] dichiarate vs la versione runtime del gioco.
+  const [skseBusy, setSkseBusy] = useState(false)
+  const [skseResult, setSkseResult] = useState<Awaited<ReturnType<typeof window.api.skse.preflightDlls>> | null>(null)
+  const runSksePreflight = async () => {
+    setSkseBusy(true)
+    try {
+      const r = await window.api.skse.preflightDlls()
+      setSkseResult(r)
+      if (!r.ok) toast.error('Preflight SKSE fallito', r.error ?? 'errore sconosciuto')
+      else {
+        const bad = (r.reports ?? []).filter((x) => x.verdict === 'incompatible')
+        if (bad.length) toast.warning(`${bad.length} plugin SKSE incompatibili`, bad.map((b) => b.file.split(/[\\/]/).pop()).join(', '))
+        else toast.success('Preflight SKSE ok', `${r.reports?.length ?? 0} plugin analizzati`)
+      }
+    } catch (e) {
+      toast.error('Preflight SKSE fallito', (e as Error).message)
+    } finally {
+      setSkseBusy(false)
+    }
+  }
+
+  // Validazione header ESP (T15): range FormID ESL + form43/44 informativo sui plugin deployati.
+  const [espBusy, setEspBusy] = useState(false)
+  const [espResult, setEspResult] = useState<Awaited<ReturnType<typeof window.api.plugin.validateEsp>> | null>(null)
+  const runEspValidate = async () => {
+    setEspBusy(true)
+    try {
+      const r = await window.api.plugin.validateEsp()
+      setEspResult(r)
+      if (!r.ok) toast.error('Validazione ESP fallita', r.error ?? 'errore sconosciuto')
+      else {
+        const bad = (r.reports ?? []).filter((x) => x.verdict === 'error')
+        if (bad.length) toast.error(`${bad.length} plugin con FormID fuori range`, bad.map((b) => b.name).join(', '))
+        else toast.success('Validazione ESP ok', `${r.reports?.length ?? 0} plugin controllati`)
+      }
+    } catch (e) {
+      toast.error('Validazione ESP fallita', (e as Error).message)
+    } finally {
+      setEspBusy(false)
+    }
+  }
+
+  // Preset INI derivati da BethINI Pie (T18): scrive nei file ini reali (Documents/My Games).
+  const [bethiniFlavor, setBethiniFlavor] = useState<'bethini' | 'vanilla'>('bethini')
+  const [bethiniTier, setBethiniTier] = useState<'poor' | 'low' | 'medium' | 'high' | 'ultra'>('medium')
+  const [bethiniBusy, setBethiniBusy] = useState(false)
+  const BETHINI_TIERS: Record<'bethini' | 'vanilla', string[]> = {
+    bethini: ['poor', 'low', 'medium', 'high', 'ultra'],
+    vanilla: ['low', 'medium', 'high', 'ultra'],
+  }
+  const applyBethiniPreset = async () => {
+    if (
+      !window.confirm(
+        `Applicare il preset "${bethiniFlavor} ${bethiniTier}"?\n\nScrive le chiavi Grass/Distant Detail/Shadow nei file ini reali (Skyrim.ini/SkyrimPrefs.ini in Documents/My Games) — il resto del file resta intatto.`,
+      )
+    )
+      return
+    setBethiniBusy(true)
+    try {
+      const r = await window.api.ini.applyBethiniPreset(bethiniTier, bethiniFlavor)
+      if (r.success) toast.success('Preset applicato', `${bethiniFlavor} ${bethiniTier}`)
+      else toast.error('Applicazione preset fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Applicazione preset fallita', (e as Error).message)
+    } finally {
+      setBethiniBusy(false)
+    }
+  }
+
+  // Grass cache "autopilota" (T19): NON genera mai la cache senza il gioco reale in esecuzione
+  // (25min-2,5h, crash attesi) — qui si lancia/supervisiona/rilancia, mai altro.
+  const [grassStatus, setGrassStatus] = useState<Awaited<ReturnType<typeof window.api.grass.status>> | null>(null)
+  const [grassBusy, setGrassBusy] = useState(false)
+  const [grassProgress, setGrassProgress] = useState<{ attempt: number; status: string } | null>(null)
+  const refreshGrassStatus = async () => setGrassStatus(await window.api.grass.status())
+  useEffect(() => {
+    refreshGrassStatus()
+  }, [])
+  useEffect(() => {
+    const unsub = window.api.grass.onProgress((ev) => setGrassProgress(ev))
+    return unsub
+  }, [])
+  const startGrassPrecache = async () => {
+    if (
+      !window.confirm(
+        'Avviare il precache della grass cache?\n\nIl gioco verrà avviato realmente e può CRASHARE più volte durante il processo (normale, 25 minuti - 2,5 ore in totale): il launcher lo rilancia automaticamente finché NGIO non segnala la fine. Non chiudere il launcher durante l’operazione.',
+      )
+    )
+      return
+    setGrassBusy(true)
+    setGrassProgress(null)
+    try {
+      const r = await window.api.grass.startPrecache()
+      if (r.success && r.result) {
+        if (r.result.completed) toast.success('Grass cache completata', r.result.reason)
+        else toast.warning('Precache interrotto', r.result.reason)
+      } else {
+        toast.error('Avvio precache fallito', r.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Avvio precache fallito', (e as Error).message)
+    } finally {
+      setGrassBusy(false)
+      refreshGrassStatus()
+    }
+  }
+
   // Installer FOMOD headless (motore Vortex) + scelte del curatore della collection.
   const [fomodStatus, setFomodStatus] = useState<{
     total?: number
@@ -1121,6 +1229,170 @@ export default function Tools() {
               </details>
             )}
           </div>
+        )}
+      </div>
+
+      {/* Preflight DLL SKSE (T14): sola lettura, legge SOLO l'header PE del plugin — nessun
+          codice del plugin viene eseguito. Confronta compatibleVersions[] dichiarate vs il
+          runtime del gioco, replicando la stessa logica dichiarativa che SKSE stesso usa. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Activity size={15} className="text-cyan-400" /> Preflight DLL SKSE
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Legge l'export <code className="text-void-400">SKSEPlugin_Version</code> di ogni plugin in{' '}
+          <code className="text-void-400">Data/SKSE/Plugins</code> e lo confronta con la versione del gioco — prima
+          del lancio, senza eseguire nulla del plugin.
+        </p>
+        <button onClick={runSksePreflight} disabled={skseBusy} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+          <RefreshCw size={14} className={skseBusy ? 'animate-spin' : ''} /> {skseBusy ? 'Analisi…' : 'Scansiona plugin SKSE'}
+        </button>
+        {skseResult?.ok && (
+          <div className="mt-4 space-y-1.5 text-xs">
+            {skseResult.runtimeVersion && <p className="text-dark-500">Runtime gioco: {skseResult.runtimeVersion}</p>}
+            {(skseResult.reports ?? []).length === 0 && <p className="text-dark-500">Nessun plugin SKSE trovato.</p>}
+            {(skseResult.reports ?? [])
+              .filter((r) => r.verdict !== 'ok')
+              .map((r) => (
+                <div
+                  key={r.file}
+                  className={clsx(
+                    'rounded-lg px-3 py-2 border',
+                    r.verdict === 'incompatible' && 'bg-red-900/15 border-red-900/40 text-red-300',
+                    r.verdict === 'warning' && 'bg-orange-900/15 border-orange-900/40 text-orange-300',
+                    r.verdict === 'unknown' && 'bg-dark-800/40 border-dark-700 text-dark-400',
+                  )}
+                >
+                  <p className="font-medium text-white/85">{r.file.split(/[\\/]/).pop()}</p>
+                  <p className="mt-0.5">{r.reason}</p>
+                </div>
+              ))}
+            {(skseResult.reports ?? []).filter((r) => r.verdict === 'ok').length > 0 && (
+              <p className="text-green-400">✓ {(skseResult.reports ?? []).filter((r) => r.verdict === 'ok').length} plugin compatibili</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Validazione header ESP (T15): range FormID ESL + form43/44 informativo, sui plugin
+          realmente deployati nell'istanza attiva. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Database size={15} className="text-lime-400" /> Valida plugin ESP
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Controlla il range FormID dei plugin ESL/light (0x800-0xFFF, esteso a 0x001-0xFFF con header 1.71) e
+          riporta il form-version (43/44) per informazione — mai bloccante.
+        </p>
+        <button onClick={runEspValidate} disabled={espBusy} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+          <RefreshCw size={14} className={espBusy ? 'animate-spin' : ''} /> {espBusy ? 'Validazione…' : 'Valida plugin deployati'}
+        </button>
+        {espResult?.ok && (
+          <div className="mt-4 space-y-1.5 text-xs">
+            {(espResult.reports ?? []).length === 0 && <p className="text-dark-500">Nessun plugin deployato trovato.</p>}
+            {(espResult.reports ?? [])
+              .filter((r) => r.verdict === 'error')
+              .map((r) => (
+                <div key={r.name} className="rounded-lg px-3 py-2 border bg-red-900/15 border-red-900/40 text-red-300">
+                  <p className="font-medium text-white/85">{r.name}</p>
+                  <p className="mt-0.5">{r.reason}</p>
+                </div>
+              ))}
+            {(espResult.reports ?? []).filter((r) => r.verdict === 'error').length === 0 && (
+              <p className="text-green-400">✓ {(espResult.reports ?? []).length} plugin nel range valido</p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Preset INI derivati da BethINI Pie (T18): Grass/Distant Detail/Shadow — scrive nei
+          file ini reali (Documents/My Games), stessa firma dell'editor line-oriented usato dal
+          Deploy (preserva commenti/ordine/chiavi non gestite). */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <Palette size={15} className="text-pink-400" /> Preset INI (BethINI Pie)
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Applica valori Grass/Distant Detail/Shadow ricavati da BethINI Pie. "Bethini" sono i valori ottimizzati
+          per performance; "Vanilla" replica i preset ufficiali low/medium/high/ultra di Bethesda.
+        </p>
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            value={bethiniFlavor}
+            onChange={(e) => {
+              const f = e.target.value as 'bethini' | 'vanilla'
+              setBethiniFlavor(f)
+              if (!BETHINI_TIERS[f].includes(bethiniTier)) setBethiniTier('medium')
+            }}
+            className="input-field text-xs py-1.5"
+          >
+            <option value="bethini">Bethini (ottimizzato)</option>
+            <option value="vanilla">Vanilla (ufficiale)</option>
+          </select>
+          <select value={bethiniTier} onChange={(e) => setBethiniTier(e.target.value as typeof bethiniTier)} className="input-field text-xs py-1.5">
+            {BETHINI_TIERS[bethiniFlavor].map((t) => (
+              <option key={t} value={t}>
+                {t}
+              </option>
+            ))}
+          </select>
+          <button onClick={applyBethiniPreset} disabled={bethiniBusy} className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50">
+            <Check size={14} /> {bethiniBusy ? 'Applicazione…' : 'Applica preset'}
+          </button>
+        </div>
+      </div>
+
+      {/* Grass cache "autopilota" (T19): generare il contenuto della cache richiede
+          INEVITABILMENTE il gioco reale in esecuzione (NGIO/GrassControl gira dentro il
+          processo Skyrim) — qui si automatizza solo prerequisiti+lancio+supervisione+rilancio
+          sui crash, mai la generazione stessa. Vedi electron/launch/grassCache.ts. */}
+      <div className="card p-5">
+        <h3 className="font-semibold text-white/80 mb-1 flex items-center gap-2 text-sm">
+          <RefreshCw size={15} className="text-emerald-400" /> Grass Cache — Autopilota
+        </h3>
+        <p className="text-xs text-dark-400 mb-4">
+          Avvia il gioco e lo rilancia automaticamente sui crash attesi finché NGIO non completa il precache
+          dell'erba (25 minuti - 2,5 ore). Non genera nulla senza il gioco reale in esecuzione — nessun tool
+          headless per questo esiste allo stato dell'arte.
+        </p>
+        {grassStatus?.ok && (
+          <div className="mb-4 grid grid-cols-3 gap-3 text-xs">
+            <Stat label="File .cgid" value={grassStatus.summary?.totalFiles ?? 0} />
+            <Stat label="Worldspace" value={Object.keys(grassStatus.summary?.byWorldspace ?? {}).length} />
+            <Stat label="Marker attivo" value={grassStatus.prereqs?.markerPresent ? 1 : 0} />
+          </div>
+        )}
+        {grassStatus?.ok && grassStatus.prereqs && !grassStatus.prereqs.ready && grassStatus.prereqs.issues.length > 0 && (
+          <div className="mb-4 space-y-1.5 text-xs">
+            {grassStatus.prereqs.issues.map((issue, i) => (
+              <div key={i} className="flex items-start gap-2 rounded-lg bg-orange-900/20 border border-orange-900/40 px-3 py-2">
+                <AlertTriangle size={13} className="flex-shrink-0 mt-0.5 text-orange-400" />
+                <span className="text-dark-200">{issue}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-3">
+          <button onClick={startGrassPrecache} disabled={grassBusy} className="btn-primary flex items-center gap-2 text-sm disabled:opacity-50">
+            <RefreshCw size={14} className={grassBusy ? 'animate-spin' : ''} /> {grassBusy ? 'In corso…' : 'Avvia autopilota'}
+          </button>
+          {grassStatus?.ok && grassStatus.prereqs?.markerPresent && !grassBusy && (
+            <button
+              onClick={async () => {
+                await window.api.grass.clearMarker()
+                refreshGrassStatus()
+              }}
+              className="btn-ghost flex items-center gap-2 text-sm"
+              title="Rimuove il file marcatore senza avviare nulla (per ripartire da zero)"
+            >
+              <X size={13} /> Azzera marker
+            </button>
+          )}
+        </div>
+        {grassBusy && grassProgress && (
+          <p className="mt-3 text-xs text-emerald-300">
+            Tentativo {grassProgress.attempt} — {grassProgress.status}
+          </p>
         )}
       </div>
 

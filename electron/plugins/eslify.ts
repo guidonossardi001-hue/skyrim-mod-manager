@@ -34,6 +34,10 @@ export interface PluginScanInfo {
   ownRecords: number
   /** Record totali (TES4 escluso). */
   totalRecords: number
+  /** Conteggio per valore di formVersion (campo u16 a offset 0x14 dell'header record: 43=LE, 44=SE/AE). */
+  formVersionCounts: Record<number, number>
+  /** Object-index (12 bit bassi del FormID) di ogni record PROPRIO — usato da espValidate per il range ESL. */
+  ownRecordObjectIndices: number[]
 }
 
 /**
@@ -42,7 +46,16 @@ export interface PluginScanInfo {
  * → parsed:false (file NON candidato, mai un flag su un parse incerto).
  */
 export function scanPluginRecords(buf: Buffer): PluginScanInfo {
-  const bad: PluginScanInfo = { parsed: false, isEsm: false, isLight: false, masterCount: 0, ownRecords: 0, totalRecords: 0 }
+  const bad: PluginScanInfo = {
+    parsed: false,
+    isEsm: false,
+    isLight: false,
+    masterCount: 0,
+    ownRecords: 0,
+    totalRecords: 0,
+    formVersionCounts: {},
+    ownRecordObjectIndices: [],
+  }
   if (buf.length < RECORD_HEADER_SIZE || buf.toString('ascii', 0, 4) !== 'TES4') return bad
   const tes4Size = buf.readUInt32LE(4)
   const flags = buf.readUInt32LE(8)
@@ -79,6 +92,8 @@ export function scanPluginRecords(buf: Buffer): PluginScanInfo {
 
   let ownRecords = 0
   let totalRecords = 0
+  const formVersionCounts: Record<number, number> = {}
+  const ownRecordObjectIndices: number[] = []
   let pos = RECORD_HEADER_SIZE + tes4Size
   while (pos < buf.length) {
     if (pos + RECORD_HEADER_SIZE > buf.length) return bad
@@ -93,12 +108,26 @@ export function scanPluginRecords(buf: Buffer): PluginScanInfo {
     }
     const dataSize = buf.readUInt32LE(pos + 4)
     const formId = buf.readUInt32LE(pos + 12)
+    const formVersion = buf.readUInt16LE(pos + 20) // offset 0x14, u16LE (vedi RE::FORM/CommonLibSSE-NG)
     totalRecords++
-    if (formId >>> 24 >= masterCount) ownRecords++
+    formVersionCounts[formVersion] = (formVersionCounts[formVersion] ?? 0) + 1
+    if (formId >>> 24 >= masterCount) {
+      ownRecords++
+      ownRecordObjectIndices.push(formId & 0xfff)
+    }
     pos += RECORD_HEADER_SIZE + dataSize
     if (pos > buf.length) return bad
   }
-  return { parsed: pos === buf.length, isEsm, isLight, masterCount, ownRecords, totalRecords }
+  return {
+    parsed: pos === buf.length,
+    isEsm,
+    isLight,
+    masterCount,
+    ownRecords,
+    totalRecords,
+    formVersionCounts,
+    ownRecordObjectIndices,
+  }
 }
 
 export interface EslCandidate {
