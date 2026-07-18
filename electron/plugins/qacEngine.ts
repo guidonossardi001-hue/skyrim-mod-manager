@@ -10,6 +10,7 @@ import { join, dirname } from 'path'
 import { tmpdir } from 'os'
 import { BASE_MASTERS } from '../deploy/plan'
 import { buildQacArgs, isProtectedMaster, qacLogFileNames, classifyQacRun, type QacResult } from './qacRunner'
+import { startDialogWatcher, type DialogWatcherHandle, type WatcherEvent } from './dialogWatcher'
 
 /** plugins.txt minimale: i master di base + SOLO il plugin target, tutti attivi ('*'). Mai il profilo reale dell'utente. */
 function writeTempPluginsTxt(dir: string, pluginName: string): string {
@@ -46,6 +47,12 @@ export interface RunQacOptions {
   postExitFlushMs?: number // default 1000, per dare tempo a xEdit di scrivere il log su disco
   /** Iniettabile nei test: stessa firma di child_process.spawn. Default: spawn reale. */
   spawnImpl?: typeof spawn
+  /** false = disattiva il watcher dei dialog bloccanti xEdit (default: attivo). Mai disattivarlo
+   *  in produzione: esiste proprio perché xEdit non è realmente headless (vedi dialogWatcher.ts). */
+  dialogWatcherEnabled?: boolean
+  /** Iniettabile nei test: stessa firma di startDialogWatcher. Default: watcher reale. */
+  dialogWatcherImpl?: typeof startDialogWatcher
+  onDialogEvent?: (ev: WatcherEvent) => void
 }
 
 /**
@@ -86,12 +93,22 @@ export async function runQuickAutoClean(opts: RunQacOptions): Promise<QacResult>
         timedOut = true
         child.kill()
       }, timeoutMs)
+      // Watcher dei dialog bloccanti xEdit (avviso 64bit, promemoria donazioni — vedi
+      // dialogWatcher.ts per la ricerca che ne motiva l'esistenza). Coperto dallo stesso
+      // timeout del run: se il watcher non basta, il watchdog sopra interviene comunque.
+      let dialogWatcher: DialogWatcherHandle | undefined
+      if (opts.dialogWatcherEnabled !== false && child.pid) {
+        const doStartWatcher = opts.dialogWatcherImpl ?? startDialogWatcher
+        dialogWatcher = doStartWatcher(child.pid, { maxDurationMs: timeoutMs, onEvent: opts.onDialogEvent })
+      }
       child.on('error', () => {
         clearTimeout(watchdog)
+        dialogWatcher?.stop()
         resolve()
       })
       child.on('exit', () => {
         clearTimeout(watchdog)
+        dialogWatcher?.stop()
         resolve()
       })
     })

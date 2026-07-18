@@ -41,3 +41,4 @@
 - 34ef086 2026-07-18 feat(backlog): PIVOT-14 chiuso — preflight SKSE, validazione ESP, preset BethINI, grass cache autopilota, QAC headless -- 23 files changed, 2284 insertions(+), 15 deletions(-)
 - 7f0c64d 2026-07-18 feat(gaps): colma 12 gap architetturali vs Vortex/Nolvus + BodySlide nude/nevernude -- 43 files changed, 2948 insertions(+), 128 deletions(-)
 - 73ae564 2026-07-18 chore(log): traccia commit 7f0c64d in AUTO_LOG.md -- 1 file changed, 1 insertion(+)
+- fd891f9 2026-07-18 fix(qac): timeout onesto + avviso preventivo per dialog xEdit bloccanti -- 4 files changed, 21 insertions(+), 2 deletions(-)

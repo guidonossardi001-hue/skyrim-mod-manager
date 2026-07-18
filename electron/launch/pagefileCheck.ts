@@ -1,5 +1,5 @@
 import { execFileSync } from 'child_process'
-import { join } from 'path'
+import { resolvePowerShellExe } from '../util/paths'
 
 // Preflight pagefile (gap Nolvus): il loro installer avvisa esplicitamente che la dimensione
 // del pagefile è "REALLY IMPORTANT to avoid crashes" prima dell'install — un pagefile fisso
@@ -7,8 +7,7 @@ import { join } from 'path'
 // come consiglio REATTIVO in crashPatterns.ts dopo un crash; qui diventa un check PROATTIVO
 // prima del lancio). Sola lettura, mai un blocco — solo un avviso, come deployIntegrity/8b.
 
-const SYS32 = join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32')
-const POWERSHELL_EXE = join(SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+const POWERSHELL_EXE = resolvePowerShellExe()
 
 export interface PagefileInfo {
   /** null = non rilevabile (probe fallito/PowerShell assente/output inatteso). */

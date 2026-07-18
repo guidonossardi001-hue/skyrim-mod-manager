@@ -1,18 +1,14 @@
 import { execFileSync } from 'child_process'
 import { cpus, totalmem } from 'os'
-import { join } from 'path'
 import type { BethiniTier } from '../ini/bethiniPresets'
+import { resolvePowerShellExe } from '../util/paths'
 
 // Advisory hardware check (gap Nolvus): niente qui BLOCCA mai un preset — è puramente
 // informativo, come il "requisiti min/raccomandati" di un installer curato. Sola lettura,
 // mai un errore che si propaga: un probe GPU/RAM fallito non deve impedire di applicare
 // un preset INI, solo lasciare il consiglio assente (null).
 
-// Absolute System32 path: invocare powershell.exe per nome bare lascerebbe eseguire un
-// eseguibile piantato sul PATH/cwd al posto di quello reale di Windows (binary-planting) —
-// stessa mitigazione di electron/steam/detect.ts (REG_EXE/TASKLIST_EXE).
-const SYS32 = join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32')
-const POWERSHELL_EXE = join(SYS32, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+const POWERSHELL_EXE = resolvePowerShellExe()
 
 export interface HardwareInfo {
   cpuModel: string | null

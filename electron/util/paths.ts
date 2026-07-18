@@ -2,6 +2,20 @@
 // profile / file display name into a safe path segment lives in a single place —
 // the code that writes a path and the code that later matches it can never drift.
 
+import { join } from 'path'
+
+/**
+ * Absolute path to the real Windows PowerShell — invoking it by bare name would let a
+ * planted powershell.exe on PATH/cwd run instead of the real one (binary-planting), same
+ * mitigation as electron/steam/detect.ts's REG_EXE/TASKLIST_EXE. Shared by every module
+ * that shells out to PowerShell (hardwareInfo.ts, pagefileCheck.ts, dialogWatcher.ts) so
+ * the resolution logic lives in exactly one place.
+ */
+export function resolvePowerShellExe(): string {
+  const sys32 = join(process.env.SystemRoot || process.env.windir || 'C:\\Windows', 'System32')
+  return join(sys32, 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+}
+
 // Windows reserved device names: a path segment equal to one of these (optionally
 // with an extension) resolves to a DEVICE, not a file, on Windows.
 const WIN_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.[^.]*)?$/i
