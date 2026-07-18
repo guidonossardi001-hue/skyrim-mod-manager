@@ -34,6 +34,7 @@ import {
   activeDeployDataDir,
   activeSavesDir,
   documentsGameDir,
+  systemPluginsTxtPath,
 } from './launch/preflight'
 import { readGuardStatus, setGuardProtection, findAppManifest } from './steam/updateGuard'
 import { runAutoRepair, type AutoRepairResult } from './launch/autoRepair'
@@ -96,6 +97,12 @@ import {
 import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
 import { initBodySlideEngine } from './tools/bodyslideEngine'
+import {
+  buildXLODGenArgs,
+  xlodgenOutputDir,
+  XLODGEN_OUTPUT_MOD_NAME,
+  XLODGEN_OUTPUT_WEIGHT,
+} from './tools/xlodgen'
 import { autoDetectPaths, type DetectedPaths } from './tools/autoDetect'
 import { launchGame, createDesktopShortcut, resolveLauncherIcon } from './launcher/launcherService'
 import { streamToFile } from './install/downloadStream'
@@ -3085,7 +3092,57 @@ ipcMain.handle('tools:launch-loot', () => {
 })
 ipcMain.handle('tools:launch-sseedit', () => launchTool(toolPath('sseeditPath')))
 ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath')))
-ipcMain.handle('tools:launch-xlodgen', () => launchTool(toolPath('xlodgenPath')))
+
+// xLODGen puntato alla collezione: lancia xLODGenx64.exe GIÀ configurato con la Data deployata,
+// il plugins.txt reale e la cartella INI del gioco, e con l'output reindirizzato in una mod
+// isolata ("xLODGen Output (generato)") che vince i conflitti al Deploy successivo. Senza questi
+// argomenti l'exe si aprirebbe "nudo" (nessun load order della collezione) e scriverebbe di
+// default nella cartella del gioco — rischioso. La generazione LOD resta un'azione manuale nella
+// GUI (scelta worldspace + risoluzioni), ma parte già pronta per questa collezione.
+ipcMain.handle('tools:launch-xlodgen', () => {
+  const exe = toolPath('xlodgenPath')
+  if (!exe) return Promise.resolve({ success: false, error: 'Percorso xLODGen non configurato: impostalo nelle Impostazioni' })
+  const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  if (!gamePath) return Promise.resolve({ success: false, error: 'Percorso del gioco non configurato' })
+
+  // Output isolato come mod generata (stesso pattern di BodySlide): mkdir + registrazione nel
+  // profilo attivo ad alto peso, così il terrain LOD generato vince ogni LOD deployato.
+  const outputDir = xlodgenOutputDir((store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'))
+  try {
+    mkdirSync(outputDir, { recursive: true })
+    const profileId = resolveActiveProfileId(getRawDb(), store)
+    const db = getRawDb()
+    const existing = db.prepare('SELECT id FROM mods WHERE profile_id=? AND name=?').get(profileId, XLODGEN_OUTPUT_MOD_NAME) as
+      | { id: number }
+      | undefined
+    if (existing) {
+      db.prepare('UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?').run(
+        outputDir,
+        'patch',
+        XLODGEN_OUTPUT_WEIGHT,
+        existing.id,
+      )
+    } else {
+      const maxPrio = (db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as { mp: number | null }).mp
+      db.prepare(
+        `INSERT INTO mods (profile_id, name, category, install_path, is_enabled, is_installed, priority, deploy_category, resolution_weight)
+         VALUES (?,?,?,?,1,1,?,?,?)`,
+      ).run(profileId, XLODGEN_OUTPUT_MOD_NAME, 'Generated', outputDir, (maxPrio ?? 0) + 1, 'patch', XLODGEN_OUTPUT_WEIGHT)
+    }
+  } catch (e) {
+    logger.warn('tools', `xLODGen: registrazione mod output fallita (procedo comunque): ${(e as Error).message}`)
+  }
+
+  const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
+  const args = buildXLODGenArgs({
+    outputDir,
+    dataDir,
+    pluginsTxt: systemPluginsTxtPath(),
+    iniDir: documentsGameDir(),
+  })
+  logger.info('tools', `xLODGen avviato con la collezione · output → ${outputDir} · args: ${args.join(' ')}`)
+  return launchTool(exe, args)
+})
 
 // ── T14 — Preflight DLL SKSE: legge l'export SKSEPlugin_Version di ogni plugin in
 // Data/SKSE/Plugins e lo confronta con la versione runtime dell'exe. Sola lettura.

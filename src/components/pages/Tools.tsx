@@ -647,15 +647,22 @@ export default function Tools() {
     {
       id: 'xlodgen',
       name: 'xLODGen',
-      desc: 'LOD per terreni e oggetti statici',
+      desc: 'LOD terreni: parte già puntato alla collezione',
       color: '#4dffaa',
       icon: Globe,
-      launch: () =>
-        runTool('xlodgen', () =>
-          settings.xlodgenPath
-            ? window.api.tools.launchXLODGen()
-            : Promise.resolve({ success: false, error: 'Percorso xLODGen non configurato' }),
-        ),
+      launch: () => {
+        if (!settings.xlodgenPath) {
+          runTool('xlodgen', () => Promise.resolve({ success: false, error: 'Percorso xLODGen non configurato' }))
+          return
+        }
+        if (
+          !window.confirm(
+            'Avviare xLODGen configurato per questa collezione?\n\nSi apre già puntato alla Data deployata, al load order reale (plugins.txt) e alla cartella INI del gioco. L\'output è reindirizzato nella mod "xLODGen Output (generato)", non nel gioco.\n\nNella GUI: seleziona i worldspace (Tamriel + eventuali DLC/mod), imposta le risoluzioni LOD e premi Generate. Al termine chiudi xLODGen e RIESEGUI IL DEPLOY per portare il terrain LOD nel gioco.\n\nRichiede il Deploy già eseguito, altrimenti genera LOD sulla Data vanilla.',
+          )
+        )
+          return
+        runTool('xlodgen', () => window.api.tools.launchXLODGen())
+      },
       // Gratis, release ufficiali su GitHub (sheson/xLODGen) — "Scarica strumenti mancanti"
       // in Impostazioni lo scarica ed configura in automatico; questo resta il link diretto.
       url: 'https://github.com/sheson/xLODGen/releases/latest',
