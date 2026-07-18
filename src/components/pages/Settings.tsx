@@ -11,6 +11,7 @@ import {
   DownloadCloud,
   ClipboardCopy,
   Stethoscope,
+  ExternalLink,
 } from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { SEVENZIP_LICENSE, THIRD_PARTY_LICENSES } from '@/data/licenses'
@@ -353,17 +354,27 @@ export default function Settings() {
             ['gamePath', 'Cartella Skyrim Anniversary Edition', 'dir', 'Seleziona cartella Skyrim AE'],
             ['lootPath', 'LOOT (LOOT.exe)', 'file', 'Seleziona LOOT.exe'],
             ['sseeditPath', 'SSEEdit (SSEEdit.exe)', 'file', 'Seleziona SSEEdit.exe'],
-            ['dyndolodPath', 'DynDOLOD (DynDOLODx64.exe)', 'file', 'Seleziona DynDOLODx64.exe'],
+            [
+              'dyndolodPath',
+              'DynDOLOD (DynDOLODx64.exe)',
+              'file',
+              'Seleziona DynDOLODx64.exe',
+              // Gratis ma solo su Nexus (nessuna release GitHub per DynDOLOD, verificato su
+              // dyndolod.info/Downloads): niente download automatico, ma almeno un link diretto
+              // alla pagina ufficiale invece di lasciare l'utente a cercarla da solo.
+              'https://www.nexusmods.com/skyrimspecialedition/mods/DynDOLOD-3/68518',
+            ],
             ['xlodgenPath', 'xLODGen (xLODGen.exe)', 'file', 'Seleziona xLODGen.exe'],
             ['pandoraPath', 'Pandora Behaviour Engine (Pandora.exe)', 'file', 'Seleziona Pandora.exe'],
-          ] as [keyof typeof local, string, 'dir' | 'file', string][]
-        ).map(([field, label, type, title]) => (
+          ] as [keyof typeof local, string, 'dir' | 'file', string, string?][]
+        ).map(([field, label, type, title, downloadUrl]) => (
           <PathRow
             key={field}
             label={label}
             value={(local[field] as string) ?? ''}
             onChange={(v) => setLocal((l) => ({ ...l, [field]: v }))}
             onBrowse={() => (type === 'dir' ? pickDir(field, title) : pickFile(field, title))}
+            downloadUrl={downloadUrl}
           />
         ))}
       </Section>
@@ -722,11 +733,13 @@ function PathRow({
   value,
   onChange,
   onBrowse,
+  downloadUrl,
 }: {
   label: string
   value: string
   onChange: (v: string) => void
   onBrowse: () => void
+  downloadUrl?: string
 }) {
   return (
     <div>
@@ -742,6 +755,16 @@ function PathRow({
           <FolderOpen size={13} />
           Sfoglia
         </button>
+        {downloadUrl && (
+          <button
+            onClick={() => window.api.fs.openExternal(downloadUrl)}
+            title="Apri la pagina Nexus ufficiale (gratis, download manuale)"
+            className="btn-ghost flex items-center gap-1.5 px-3 flex-shrink-0"
+          >
+            <ExternalLink size={13} />
+            Nexus
+          </button>
+        )}
       </div>
     </div>
   )

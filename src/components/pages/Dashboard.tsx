@@ -707,21 +707,35 @@ export default function Dashboard() {
           <div className="space-y-1.5">
             {[
               { label: 'Skyrim AE', value: settings.gamePath as string | undefined, detected: false },
-              { label: 'DynDOLOD', value: settings.dyndolodPath, detected: false },
+              {
+                label: 'DynDOLOD',
+                value: settings.dyndolodPath,
+                detected: false,
+                // Gratis ma solo su Nexus (nessuna release GitHub — verificato su
+                // dyndolod.info/Downloads): badge cliccabile invece di un vicolo cieco.
+                downloadUrl: 'https://www.nexusmods.com/skyrimspecialedition/mods/DynDOLOD-3/68518',
+              },
               {
                 label: 'Pandora',
                 value: pandora?.exeFound ? (pandora.exePath ?? 'rilevato') : '',
                 detected: !!pandora?.exeFound,
               },
-            ].map(({ label, value, detected }) => (
+            ].map(({ label, value, detected, downloadUrl }) => (
               <div
                 key={label}
                 className="flex items-center justify-between p-2 rounded-lg bg-white/3 text-xs"
-                title={value || ''}
+                title={value || (downloadUrl ? 'Apri la pagina Nexus ufficiale (gratis)' : '')}
               >
                 <span className="text-dark-400">{label}</span>
                 {value ? (
                   <span className="text-green-400">{detected ? '✓ Rilevato' : '✓ Config.'}</span>
+                ) : downloadUrl ? (
+                  <button
+                    onClick={() => window.api.fs.openExternal(downloadUrl)}
+                    className="text-orange-400/80 hover:text-orange-300 hover:underline"
+                  >
+                    Non config. ↗
+                  </button>
                 ) : (
                   <span className="text-orange-400/80">Non config.</span>
                 )}
