@@ -6,6 +6,7 @@ import { verifyCatalog } from './verify'
 import { validateCatalog } from './validate'
 import { effectiveBaseline, monotonicNow } from '../net/freshness'
 import { pinnedCatalogFloor } from '../delta/pinnedKey'
+import { compareVersions } from '../delta/version'
 import type { ModCatalog, SignedCatalog, CatalogIngestResult } from './types'
 
 // Reference mod catalog ingestor (profile-independent metadata, distinct from
@@ -16,6 +17,9 @@ import type { ModCatalog, SignedCatalog, CatalogIngestResult } from './types'
 
 export interface CatalogServiceOptions {
   publicKeyPem: string
+  /** Versione dell'app corrente (app.getVersion()). Assente = il gate min_app_version è
+   *  saltato (retro-compatibile con costruzioni esistenti/di test che non la passano). */
+  appVersion?: string
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -92,6 +96,17 @@ export class CatalogService {
     if (!val.ok) {
       this.log('warn', `catalogo non valido: ${val.errors.join('; ')}`)
       return { success: false, errorKind: 'schema', error: val.errors.join('; ') }
+    }
+
+    // Gap Vortex/Nolvus: un'app più vecchia della minima richiesta dal catalogo RIFIUTA
+    // l'ingest invece di applicare silenziosamente uno schema che potrebbe capire solo in
+    // parte — fail-closed, stessa filosofia di firma/freshness sopra. Nessun dato → nessun
+    // requisito (retro-compatibile) né gate (this.opts.appVersion non iniettata → salta).
+    const minVersion = v.catalog.min_app_version
+    if (minVersion && this.opts.appVersion && compareVersions(this.opts.appVersion, minVersion) < 0) {
+      const msg = `catalogo richiede app >= ${minVersion}, versione corrente ${this.opts.appVersion}`
+      this.log('warn', `catalogo rifiutato: ${msg}`)
+      return { success: false, errorKind: 'incompatible', error: msg }
     }
 
     try {

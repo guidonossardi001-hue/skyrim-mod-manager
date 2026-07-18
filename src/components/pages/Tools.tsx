@@ -138,10 +138,22 @@ export default function Tools() {
     bethini: ['poor', 'low', 'medium', 'high', 'ultra'],
     vanilla: ['low', 'medium', 'high', 'ultra'],
   }
+  // Advisory hardware (sola lettura, mai un blocco): avvisa se il tier scelto eccede quanto
+  // GPU/VRAM/RAM rilevati suggeriscono — l'utente può comunque procedere.
+  const TIER_RANK = ['poor', 'low', 'medium', 'high', 'ultra']
+  const [hardwareInfo, setHardwareInfo] = useState<Awaited<ReturnType<typeof window.api.system.detectHardware>> | null>(null)
+  useEffect(() => {
+    window.api.system?.detectHardware().then(setHardwareInfo).catch(() => setHardwareInfo(null))
+  }, [])
+  const tierExceedsHardware =
+    !!hardwareInfo?.suggestedMaxTier && TIER_RANK.indexOf(bethiniTier) > TIER_RANK.indexOf(hardwareInfo.suggestedMaxTier)
   const applyBethiniPreset = async () => {
+    const hwWarning = tierExceedsHardware
+      ? `\n\n⚠ ATTENZIONE: il tier "${bethiniTier}" è sopra quanto il tuo hardware (${hardwareInfo?.gpuName ?? 'GPU non rilevata'}${hardwareInfo?.gpuVramGB ? `, ${hardwareInfo.gpuVramGB}GB VRAM` : ''}) suggerisce (consigliato: "${hardwareInfo?.suggestedMaxTier}"). Puoi comunque procedere.`
+      : ''
     if (
       !window.confirm(
-        `Applicare il preset "${bethiniFlavor} ${bethiniTier}"?\n\nScrive le chiavi Grass/Distant Detail/Shadow nei file ini reali (Skyrim.ini/SkyrimPrefs.ini in Documents/My Games) — il resto del file resta intatto.`,
+        `Applicare il preset "${bethiniFlavor} ${bethiniTier}"?\n\nScrive le chiavi Grass/Distant Detail/Shadow nei file ini reali (Skyrim.ini/SkyrimPrefs.ini in Documents/My Games) — il resto del file resta intatto.${hwWarning}`,
       )
     )
       return
@@ -303,6 +315,7 @@ export default function Tools() {
   // BodySlide batch build headless: corpi, fisiche e outfit adattati al preset del curatore.
   const [bsStatus, setBsStatus] = useState<Awaited<ReturnType<typeof window.api.bodyslide.status>> | null>(null)
   const [bsPreset, setBsPreset] = useState<string>('')
+  const [bsNudity, setBsNudity] = useState<'nude' | 'nevernude'>('nude')
   const [bsBusy, setBsBusy] = useState(false)
   const [bsProgress, setBsProgress] = useState<{ pass: number; passes: number; chunk: number; chunks: number; label: string } | null>(null)
   const [bsReport, setBsReport] = useState<Awaited<ReturnType<typeof window.api.bodyslide.build>> | null>(null)
@@ -310,7 +323,8 @@ export default function Tools() {
   const refreshBodySlide = async () => {
     const s = await window.api.bodyslide.status()
     setBsStatus(s)
-    if (s.ok && s.defaultPreset) setBsPreset((prev) => prev || s.defaultPreset!)
+    // bsPreset resta '' = "Automatico" di default: il build lo mappa a undefined → preset
+    // consigliato lato engine. L'utente non deve scegliere niente per far partire il batch.
   }
   useEffect(() => {
     refreshBodySlide()
@@ -324,22 +338,48 @@ export default function Tools() {
     return () => api.off?.('bodyslide:progress', w)
   }, [])
 
+  const openBodySlide = async () => {
+    const profileId = useAppStore.getState().activeProfileId
+    if (!profileId) {
+      toast.warning('Nessun profilo attivo', 'Seleziona un profilo prima di aprire BodySlide')
+      return
+    }
+    if (
+      !window.confirm(
+        'Aprire BodySlide per impostare il corpo a mano?\n\nScegli corpo/preset e usa "Build" o "Batch Build" dentro BodySlide: i mesh generati finiscono nella mod "BodySlide Output (generato)", non dentro il gioco. Al termine chiudi BodySlide e riesegui il Deploy.\n\nNon lanciare Deploy o altre build finché BodySlide è aperto.',
+      )
+    )
+      return
+    setBsBusy(true)
+    try {
+      const r = await window.api.bodyslide.open(profileId)
+      if (r.ok) toast.success('BodySlide aperto', 'Costruisci il corpo, poi chiudi e riesegui il Deploy')
+      else toast.error('Apertura BodySlide fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Apertura BodySlide fallita', (e as Error).message)
+    } finally {
+      setBsBusy(false)
+    }
+  }
+
   const runBodySlideBuild = async () => {
     const profileId = useAppStore.getState().activeProfileId
     if (!profileId) {
       toast.warning('Nessun profilo attivo', 'Seleziona un profilo prima del build')
       return
     }
+    const presetLabel = bsPreset || `automatico (${bsStatus?.defaultPreset ?? 'consigliato'})`
+    const nudityLabel = bsNudity === 'nude' ? 'CORPI NUDI' : 'corpi nevernude (bra/mutande)'
     if (
       !window.confirm(
-        `Batch build BodySlide col preset "${bsPreset || bsStatus?.defaultPreset || ''}"?\n\nCostruisce corpi e TUTTI gli outfit della collection (può richiedere parecchi minuti). L'output va nella mod "BodySlide Output (generato)": al termine riesegui il Deploy per portarlo nel gioco.`,
+        `Batch build BodySlide col preset "${presetLabel}" · ${nudityLabel}?\n\nCostruisce corpi e TUTTI gli outfit della collection in automatico (può richiedere parecchi minuti). Non devi impostare nulla per i singoli gruppi. L'output va nella mod "BodySlide Output (generato)": al termine riesegui il Deploy per portarlo nel gioco.`,
       )
     )
       return
     setBsBusy(true)
     setBsReport(null)
     try {
-      const r = await window.api.bodyslide.build(profileId, bsPreset || undefined)
+      const r = await window.api.bodyslide.build(profileId, bsPreset || undefined, bsNudity)
       setBsReport(r)
       if (r.ok)
         toast.success('Batch build completato', `${r.filesBuilt} file generati · riesegui il Deploy per applicarli`)
@@ -833,9 +873,11 @@ export default function Tools() {
           <Activity size={15} className="text-pink-400" /> BodySlide — corpi, fisiche e outfit
         </h3>
         <p className="text-xs text-dark-400 mb-4">
-          Costruisce i corpi e adatta armature/vestiti della collection al preset scelto (batch build
-          headless con morph <code className="text-void-400">.tri</code> per RaceMenu/OStim). Richiede il
-          Deploy già eseguito; al termine <b>riesegui il Deploy</b> per portare i mesh generati nel gioco.
+          Costruisce i corpi e adatta <b>tutti</b> gli outfit della collection in automatico (batch headless
+          con morph <code className="text-void-400">.tri</code> per RaceMenu/OStim). Lascia il preset su
+          <b> Automatico</b> e premi Build: non serve impostare nulla per i singoli gruppi. Vuoi scegliere il
+          corpo a mano? Usa <b>Apri BodySlide</b>. Richiede il Deploy già eseguito; al termine <b>riesegui il
+          Deploy</b> per portare i mesh nel gioco.
         </p>
 
         {bsStatus && !bsStatus.ok && <p className="text-xs text-red-400 mb-3">{bsStatus.error}</p>}
@@ -871,14 +913,36 @@ export default function Tools() {
                 onChange={(e) => setBsPreset(e.target.value)}
                 disabled={bsBusy || !bsStatus.presets.length}
                 className="input-field text-xs py-1.5 max-w-xs"
-                title="Preset corpo per il pass principale (il pass HIMBO usa il suo preset dedicato)"
+                title="Automatico usa il preset consigliato (copre più outfit). Il pass HIMBO usa comunque il suo preset dedicato."
               >
+                <option value="">
+                  ⚡ Automatico — preset consigliato{bsStatus.defaultPreset ? ` (${bsStatus.defaultPreset})` : ''}
+                </option>
                 {bsStatus.presets.map((p) => (
                   <option key={p.name} value={p.name}>
                     {p.name} — copre {p.coverage} gruppi
                   </option>
                 ))}
               </select>
+              {/* Nude vs nevernude: il corpo base è un outfit che scrive femalebody.nif; nude e
+                  nevernude condividono file/gruppo, quindi l'app ricostruisce per ultimo la
+                  variante scelta. Default NUDE. */}
+              <div className="inline-flex rounded-lg border border-void-800 overflow-hidden text-xs">
+                {(['nude', 'nevernude'] as const).map((v) => (
+                  <button
+                    key={v}
+                    onClick={() => setBsNudity(v)}
+                    disabled={bsBusy}
+                    className={clsx(
+                      'px-2.5 py-1.5 transition-all disabled:opacity-50',
+                      bsNudity === v ? 'bg-pink-500/25 text-pink-200' : 'bg-void-950/40 text-void-400 hover:text-white',
+                    )}
+                    title={v === 'nude' ? 'Corpi nudi (default)' : 'Corpi con bra/mutande (nevernude)'}
+                  >
+                    {v === 'nude' ? 'Nudo' : 'Nevernude'}
+                  </button>
+                ))}
+              </div>
               <button
                 onClick={runBodySlideBuild}
                 disabled={bsBusy || !bsStatus.exeFound || !bsStatus.deployed}
@@ -886,6 +950,14 @@ export default function Tools() {
               >
                 <Zap size={14} className={bsBusy ? 'animate-pulse' : ''} />
                 {bsBusy ? 'Build in corso…' : 'Batch build corpi + outfit'}
+              </button>
+              <button
+                onClick={openBodySlide}
+                disabled={bsBusy || !bsStatus.exeFound || !bsStatus.deployed}
+                className="flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+                title="Apri l'interfaccia di BodySlide per scegliere corpo e preset a mano. L'output resta isolato nella mod generata."
+              >
+                <Activity size={14} /> Apri BodySlide
               </button>
             </div>
             {bsProgress && bsBusy && (
@@ -1340,6 +1412,15 @@ export default function Tools() {
             <Check size={14} /> {bethiniBusy ? 'Applicazione…' : 'Applica preset'}
           </button>
         </div>
+        {tierExceedsHardware && (
+          <div className="flex items-start gap-2 rounded-lg bg-orange-900/15 border border-orange-900/40 px-3 py-2 mt-3 text-xs text-orange-300">
+            <AlertTriangle size={14} className="flex-shrink-0 mt-0.5" />
+            <span>
+              Tier "{bethiniTier}" sopra quanto {hardwareInfo?.gpuName ?? 'la GPU rilevata'} suggerisce (consigliato:
+              "{hardwareInfo?.suggestedMaxTier}"). Solo un avviso: puoi applicarlo comunque.
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Grass cache "autopilota" (T19): generare il contenuto della cache richiede

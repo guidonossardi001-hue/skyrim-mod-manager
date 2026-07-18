@@ -355,6 +355,28 @@ export const MIGRATIONS: Migration[] = [
       }
     },
   },
+  {
+    version: 12,
+    name: 'file-conflict-rules',
+    up: (db) => {
+      // Regole di conflitto FILE-level scritte dall'utente (gap Vortex: la risoluzione
+      // automatica di plan.ts, per categoria→peso→priorità, resta il default — questa tabella
+      // permette di FISSARE il vincitore per un percorso specifico indipendentemente da quelle
+      // regole, es. "textures/armor/steel.dds deve sempre venire da CompatPatch", persistente
+      // e sopravvive a un aggiornamento di versione delle mod coinvolte).
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS file_conflict_rules (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          profile_id  INTEGER NOT NULL,
+          rel_path    TEXT NOT NULL,   -- percorso Data-relative, confronto case-insensitive
+          winner_mod  TEXT NOT NULL,   -- nome mod: se presente tra i candidati per rel_path, vince SEMPRE
+          created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE (profile_id, rel_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_file_conflict_rules_profile ON file_conflict_rules(profile_id);
+      `)
+    },
+  },
 ]
 
 export interface MigrationResult {

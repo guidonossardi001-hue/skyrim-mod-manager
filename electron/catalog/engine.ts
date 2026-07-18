@@ -68,9 +68,10 @@ export function triggerBootCatalogUpdate(): void {
   )
 }
 
-export function initCatalogEngine(db: SqliteDb) {
+export function initCatalogEngine(db: SqliteDb, appVersion?: string) {
   service = new CatalogService(db, {
     publicKeyPem: pinnedPublicKey(),
+    appVersion,
     log: (level, msg) => (level === 'warn' ? logger.warn('catalog', msg) : logger.info('catalog', msg)),
   })
 

@@ -3,6 +3,9 @@ import { join } from 'path'
 import {
   parseSliderPresets,
   parseGroupNames,
+  parseBodySets,
+  planBodyEnforcement,
+  renderSliderGroupsXml,
   scanBodySlideAssets,
   planBuildPasses,
   presetCoverage,
@@ -11,8 +14,12 @@ import {
   renderBodySlideConfig,
   checkPhysicsPrereqs,
   BODYSLIDE_DIR_REL,
+  SMM_FEMALE_BODY_GROUP,
+  SMM_MALE_BODY_GROUP,
   type BsFs,
+  type BodySet,
   type BodySlideAssets,
+  type BodySlidePreset,
 } from './bodyslide'
 
 const PRESET_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -106,7 +113,30 @@ describe('scanBodySlideAssets', () => {
 
   it('albero assente → risultato vuoto, mai throw', () => {
     const a = scanBodySlideAssets(DATA, fakeFs({}, {}))
-    expect(a).toEqual({ exePath: null, presets: [], groups: [], setsCount: 0 })
+    expect(a).toEqual({ exePath: null, presets: [], groups: [], setsCount: 0, bodySets: [] })
+  })
+
+  it('raccoglie i set-corpo (femalebody/malebody) coi flag nevernude, ignora gli outfit', () => {
+    const osp = `
+      <SliderSet name="CBBE Body"><OutputPath>meshes\\actors\\character\\character assets</OutputPath><OutputFile>femalebody</OutputFile></SliderSet>
+      <SliderSet name="CBBE NeverNude"><OutputFile>femalebody</OutputFile></SliderSet>
+      <SliderSet name="HIMBO Body"><OutputFile>malebody</OutputFile></SliderSet>
+      <SliderSet name="Some Dress"><OutputFile>armor\\dress</OutputFile></SliderSet>`
+    const fs = fakeFs({ [`${BS}/SliderSets/x.osp`]: osp }, { [`${BS}/SliderSets`]: ['x.osp'] })
+    const a = scanBodySlideAssets(DATA, fs)
+    expect(a.bodySets).toEqual([
+      { name: 'CBBE Body', output: 'femalebody', nevernude: false },
+      { name: 'CBBE NeverNude', output: 'femalebody', nevernude: true },
+      { name: 'HIMBO Body', output: 'malebody', nevernude: false },
+    ])
+  })
+
+  it('esclude i nostri gruppi sintetici (SMM …) dai gruppi della collection', () => {
+    const fs = fakeFs(
+      { [`${BS}/SliderGroups/g.xml`]: '<SliderGroups><Group name="CBBE"><Member name="x"/></Group><Group name="SMM Base Body (femminile)"><Member name="y"/></Group></SliderGroups>' },
+      { [`${BS}/SliderGroups`]: ['g.xml'] },
+    )
+    expect(scanBodySlideAssets(DATA, fs).groups).toEqual(['CBBE'])
   })
 })
 
@@ -119,6 +149,7 @@ const assets = (over: Partial<BodySlideAssets> = {}): BodySlideAssets => ({
   ],
   groups: ['3BA', 'CBBE', 'HIMBO', 'HIMBO Outfits'],
   setsCount: 10,
+  bodySets: [],
   ...over,
 })
 
@@ -199,6 +230,99 @@ describe('renderBodySlideConfig', () => {
     expect(xml).toContain('<GameDataPath>C:\\giochi\\Skyrim &amp; AE\\Data\\</GameDataPath>')
     expect(xml).toContain('<SkyrimSpecialEdition>C:\\giochi\\Skyrim &amp; AE\\Data\\</SkyrimSpecialEdition>')
     expect(xml).toContain('<BSATextureScan>false</BSATextureScan>')
+  })
+})
+
+describe('parseBodySets', () => {
+  it('estrae nome/output e deduce nevernude dai nomi reali della collection', () => {
+    const osp = `
+      <SliderSet name="CBBE 3BBB Body Amazing"><OutputFile GenWeights="true">femalebody</OutputFile></SliderSet>
+      <SliderSet name="[Erin] CBBE 3BBB Amazing NeverNude"><OutputFile>femalebody</OutputFile></SliderSet>
+      <SliderSet name="HIMBO Body - Vanilla Nevernude"><OutputFile>malebody</OutputFile></SliderSet>
+      <SliderSet name="CBBE Underwear"><OutputFile>meshes\\x\\femalebody</OutputFile></SliderSet>`
+    expect(parseBodySets(osp)).toEqual([
+      { name: 'CBBE 3BBB Body Amazing', output: 'femalebody', nevernude: false },
+      { name: '[Erin] CBBE 3BBB Amazing NeverNude', output: 'femalebody', nevernude: true },
+      { name: 'HIMBO Body - Vanilla Nevernude', output: 'malebody', nevernude: true },
+      { name: 'CBBE Underwear', output: 'femalebody', nevernude: true },
+    ])
+  })
+})
+
+const preset = (name: string, set: string): BodySlidePreset => ({ name, set, groups: [], file: 'f' })
+
+describe('planBodyEnforcement', () => {
+  const bodies: BodySet[] = [
+    { name: 'CBBE Body', output: 'femalebody', nevernude: false },
+    { name: '[Erin] CBBE 3BBB Body Amazing', output: 'femalebody', nevernude: false },
+    { name: '[Erin] CBBE 3BBB Amazing NeverNude', output: 'femalebody', nevernude: true },
+    { name: 'HIMBO Body', output: 'malebody', nevernude: false },
+    { name: 'HIMBO Body - Vanilla Nevernude', output: 'malebody', nevernude: true },
+  ]
+
+  it('default nude: costruisce SOLO i corpi nudi, il set del preset per ULTIMO (vince femalebody)', () => {
+    const passes = planBodyEnforcement(bodies, {
+      femalePreset: preset('ErinPreset', '[Erin] CBBE 3BBB Body Amazing'),
+      malePreset: preset('HIMBO', 'HIMBO Body'),
+    })
+    const fem = passes.find((p) => p.group === SMM_FEMALE_BODY_GROUP)!
+    expect(fem.members).not.toContain('[Erin] CBBE 3BBB Amazing NeverNude') // nevernude escluso
+    expect(fem.members[fem.members.length - 1]).toBe('[Erin] CBBE 3BBB Body Amazing') // vincitore = set del preset
+    expect(fem.preset).toBe('ErinPreset')
+    // Pass finale a MEMBRO SINGOLO: garanzia deterministica che il corpo preferito vinca lo slot
+    // principale a prescindere dall'ordine di build interno di BodySlide.
+    const femFinal = passes.find((p) => p.group === `${SMM_FEMALE_BODY_GROUP} — principale`)!
+    expect(femFinal.members).toEqual(['[Erin] CBBE 3BBB Body Amazing'])
+    expect(passes.indexOf(femFinal)).toBeGreaterThan(passes.indexOf(fem)) // dopo il bulk
+    // Un solo corpo maschile nudo → nessun pass "principale" ridondante.
+    const male = passes.find((p) => p.group === SMM_MALE_BODY_GROUP)!
+    expect(male.members).toEqual(['HIMBO Body'])
+    expect(passes.some((p) => p.group === `${SMM_MALE_BODY_GROUP} — principale`)).toBe(false)
+  })
+
+  it('nevernude: costruisce SOLO i corpi nevernude', () => {
+    const passes = planBodyEnforcement(bodies, {
+      nudity: 'nevernude',
+      femalePreset: preset('ErinPreset', '[Erin] CBBE 3BBB Body Amazing'),
+    })
+    const fem = passes.find((p) => p.group === SMM_FEMALE_BODY_GROUP)!
+    expect(fem.members).toEqual(['[Erin] CBBE 3BBB Amazing NeverNude'])
+  })
+
+  it('senza preset o senza corpi della nudità scelta: nessun pass (mai un gruppo vuoto)', () => {
+    expect(planBodyEnforcement(bodies, { nudity: 'nude' })).toEqual([]) // preset assenti
+    expect(
+      planBodyEnforcement([{ name: 'CBBE Body', output: 'femalebody', nevernude: false }], {
+        nudity: 'nevernude',
+        femalePreset: preset('P', 'CBBE Body'),
+      }),
+    ).toEqual([]) // nessun corpo nevernude
+  })
+})
+
+describe('renderSliderGroupsXml', () => {
+  it('genera un SliderGroups valido con i Member, entità escapate', () => {
+    const xml = renderSliderGroupsXml([{ name: 'SMM X', members: ['A & B', 'C'] }])
+    expect(xml).toContain('<Group name="SMM X">')
+    expect(xml).toContain('<Member name="A &amp; B"/>')
+    expect(xml).toContain('<Member name="C"/>')
+  })
+})
+
+describe('planBuildPasses — enforcement corpo base', () => {
+  it("appende i pass di enforcement dopo i pass principali; il gruppo sintetico è nei pass ma non nei gruppi collection", () => {
+    const a = assets({
+      bodySets: [
+        { name: 'CBBE Body', output: 'femalebody', nevernude: false },
+        { name: 'CBBE NeverNude', output: 'femalebody', nevernude: true },
+      ],
+    })
+    const plan = planBuildPasses(a, undefined, 'nude')
+    expect(plan.enforce).toHaveLength(1)
+    expect(plan.enforce[0].group).toBe(SMM_FEMALE_BODY_GROUP)
+    expect(plan.enforce[0].members).toEqual(['CBBE Body']) // nevernude escluso
+    // il pass principale non contiene il gruppo sintetico (assets.groups è filtrato a monte)
+    expect(plan.passes[0].groups).not.toContain(SMM_FEMALE_BODY_GROUP)
   })
 })
 

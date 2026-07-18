@@ -5,6 +5,7 @@ import Database from 'better-sqlite3'
 import type Store from 'electron-store'
 import { logger } from './logger'
 import { streamToFile } from './install/downloadStream'
+import { createRateLimiter } from './install/rateLimiter'
 import { resolveDownloadLink } from './nexus/downloadLink'
 import { classifyDownloadFailure, backoffWithJitter, CircuitBreaker } from './install/retryPolicy'
 import { sanitizePathSegment } from './util/paths'
@@ -109,6 +110,13 @@ export function initDownloadManager(
   const errorThreshold = () => Math.max(1, Number(store.get('errorThreshold')) || 50)
   // Shared retry/circuit-breaker policy (same module the mass-sync orchestrator uses).
   const breaker = new CircuitBreaker(errorThreshold())
+  // Gap Vortex: limite banda AGGREGATO (bytes/sec) su TUTTI i download attivi — un solo
+  // limiter condiviso, non uno per-download (altrimenti N download concorrenti userebbero
+  // N volte il budget configurato). 0/assente = illimitato (comportamento preesistente).
+  const rateLimiter = createRateLimiter(() => {
+    const kbps = Number(store.get('downloadBandwidthLimitKBps')) || 0
+    return kbps > 0 ? kbps * 1024 : 0
+  })
 
   const getRow = (id: number) =>
     db.prepare('SELECT * FROM downloads WHERE id=?').get(id) as DownloadRow | undefined
@@ -342,6 +350,7 @@ export function initDownloadManager(
         // backpressure can pause on a healthy transfer — too low a value would false-trip
         // under heavy concurrent writes to one slow disk.
         stallTimeoutMs: Math.max(30_000, Number(store.get('downloadStallTimeoutMs')) || 120_000),
+        rateLimiter,
         onProgress: (downloaded, total) => {
           if (total > 0 && total !== knownTotal) {
             knownTotal = total

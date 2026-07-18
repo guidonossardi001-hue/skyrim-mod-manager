@@ -10,24 +10,28 @@ import {
   renameSync,
   rmSync,
   rmdirSync,
-  writeFileSync,
   copyFileSync,
 } from 'fs'
 import { join, dirname } from 'path'
 import type { SqliteDb } from '../db/sqlite'
-import { columnExists } from '../db/sqlite'
+import { columnExists, tableExists } from '../db/sqlite'
 import { toLongPath, listFilesRel } from '../install/extract'
 import { sameVolume } from '../install/stockGame'
+import { sanitizePathSegment } from '../util/paths'
+import { atomicWriteFile } from '../backup/snapshot'
 import {
   computeDeployPlan,
   buildPluginsTxt,
   toDeployCategory,
+  conflictWinner,
   parseDeployManifest,
+  computeModsFingerprint,
   DEPLOY_MANIFEST_FILE,
   VANILLA_BACKUP_SUFFIX,
   BASE_MASTERS,
   type DeployManifest,
   type DeployMod,
+  type FileConflictRule,
 } from './plan'
 import { orderPluginsLoot } from './lootOrder'
 import { loadMasterlist } from '../plugins/masterlist'
@@ -64,6 +68,8 @@ export interface DeployResult {
   instanceDataDir?: string
   modsLinked?: number
   filesHardlinked?: number
+  /** Sottoinsieme di filesHardlinked deployato per COPIA (fallback cross-volume EXDEV), non hardlink. */
+  filesCopied?: number
   junctionsCreated?: number
   pluginsWritten?: number
   pluginsPath?: string
@@ -119,6 +125,12 @@ export interface DeployOptions {
   // inerte a ogni deploy/riparazione, silenziosamente. Iniettata dal main; il fallback resta
   // per retro-compatibilità di test/istanza dedicata.
   documentsIniDir?: string
+  // Opt-in (default false/undefined): redirige i salvataggi in Saves/<profilo sanificato>/ via
+  // SLocalSavePath (gap Vortex: isolamento save per-profilo — senza, un save fatto sotto un
+  // profilo appare comunque nel menu "Carica" di un altro profilo, load order diverso). OFF di
+  // default: i salvataggi esistenti nella cartella Saves/ condivisa restano visibili finché
+  // l'utente non lo attiva esplicitamente nelle Impostazioni.
+  perProfileSaves?: boolean
 }
 
 // Throttle the linking phase so a 100k-file deploy doesn't flood the IPC channel:
@@ -246,7 +258,8 @@ function purgeByManifest(
   const manifestPath = join(instanceDataDir, DEPLOY_MANIFEST_FILE)
   let manifest: DeployManifest | null = null
   try {
-    if (existsSync(manifestPath)) manifest = parseDeployManifest(readFileSync(manifestPath, 'utf8'))
+    if (existsSync(manifestPath))
+      manifest = parseDeployManifest(readFileSync(manifestPath, 'utf8'), instanceDataDir)
   } catch {
     manifest = null
   }
@@ -406,6 +419,66 @@ function queryDeployRows(db: SqliteDb, profileId?: number): ModRow[] {
     .all(...params) as ModRow[]
 }
 
+/** Regole di conflitto file-level del profilo (migration v12) — fail-soft: tabella assente
+ *  (schema pre-v12) o query fallita → nessuna regola, mai un errore che blocchi il deploy. */
+function queryFileConflictRules(db: SqliteDb, profileId?: number): FileConflictRule[] {
+  try {
+    if (!tableExists(db, 'file_conflict_rules')) return []
+    const where = profileId != null ? 'WHERE profile_id=?' : ''
+    const params = profileId != null ? [profileId] : []
+    return db
+      .prepare(`SELECT rel_path AS relPath, winner_mod AS winnerMod FROM file_conflict_rules ${where}`)
+      .all(...params) as FileConflictRule[]
+  } catch {
+    return []
+  }
+}
+
+/** Nome del profilo — fail-soft: profilo assente/query fallita → null (il chiamante ricade sul
+ *  comportamento senza isolamento save, mai un errore che blocchi il deploy per questo). */
+function queryProfileName(db: SqliteDb, profileId?: number): string | null {
+  if (profileId == null) return null
+  try {
+    const row = db.prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as { name: string } | undefined
+    return row?.name ?? null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Risolve, SENZA rideploy completo, quale mod vince OGGI il conflitto per un singolo file
+ * `rel` — usato dalla risoluzione drift (deploy:resolve-drift) per "restore". Usa DIRETTAMENTE
+ * conflictWinner (stessa regola categoria→peso→priorità→nome del deploy reale) invece di
+ * passare da computeDeployPlan: quest'ultimo, alimentato con un solo file per candidato,
+ * promuoverebbe spuriamente la directory a junction "a proprietario unico" — irrilevante qui,
+ * dato che stiamo ripristinando UN file già tracciato come hardlink individuale nel manifest,
+ * non un'intera sottocartella.
+ * Ritorna null se nessuna mod abilitata fornisce più quel file (rimossa/disabilitata dal deploy).
+ */
+export function resolveWinningSourceForRel(
+  db: SqliteDb,
+  rel: string,
+  profileId?: number,
+): { src: string; mod: string } | null {
+  const rows = queryDeployRows(db, profileId)
+  const candidates: DeployMod[] = []
+  for (const r of rows) {
+    if (!existsSync(join(r.install_path, rel))) continue
+    candidates.push({
+      name: r.name,
+      priority: r.priority,
+      rootDir: r.install_path,
+      files: [rel],
+      category: toDeployCategory(r.deploy_category),
+      resolutionWeight: typeof r.resolution_weight === 'number' ? r.resolution_weight : undefined,
+    })
+  }
+  if (!candidates.length) return null
+  const winner = candidates.reduce((a, b) => (conflictWinner(a, b) === a ? a : b))
+  return { src: join(winner.rootDir, rel), mod: winner.name }
+}
+
 /** Budget slot del motore: 5 master base + CC (estensione) + mod (flag reali TES4). */
 function computePluginBudget(
   ccNames: string[],
@@ -436,7 +509,7 @@ export function planPluginFiles(db: SqliteDb, profileId?: number): { name: strin
       category: toDeployCategory(r.deploy_category),
       resolutionWeight: typeof r.resolution_weight === 'number' ? r.resolution_weight : undefined,
     }))
-  return computeDeployPlan(mods)
+  return computeDeployPlan(mods, queryFileConflictRules(db, profileId))
     .plugins.filter((p): p is typeof p & { src: string } => !!p.src)
     .map((p) => ({ name: p.name, src: p.src }))
 }
@@ -477,7 +550,7 @@ export function previewDeploy(
         resolutionWeight: typeof r.resolution_weight === 'number' ? r.resolution_weight : undefined,
       })
     }
-    const plan = computeDeployPlan(mods)
+    const plan = computeDeployPlan(mods, queryFileConflictRules(db, opts.profileId))
     const nexusIdOf = new Map<string, number>()
     for (const r of rows)
       if (typeof r.nexus_id === 'number' && Number.isInteger(r.nexus_id) && r.nexus_id > 0)
@@ -539,15 +612,14 @@ export async function deployInstance(
     const ccPackages = detectCreationClub(opts.stockGameDataDir)
     const ccList = ccFiles(ccPackages)
 
-    // 2) Cross-volume guard (hardlinks cannot span drive letters).
+    // 2) Cross-volume mods: gli hardlink richiedono lo stesso volume (EXDEV altrimenti). Non
+    // più un blocco totale del deploy — i file di queste mod vengono deployati per COPIA
+    // (fallback EXDEV nei loop di linking sotto, punto 5), tracciati in manifest.copied così
+    // verifyDeployedInstance non li scambia per "sostituiti esternamente" (nlink===1 normale
+    // per una copia). Solo un avviso qui, per diagnosi.
     for (const r of rows) {
-      if (!sameVolume(r.install_path, instanceDataDir)) {
-        return {
-          success: false,
-          errorKind: 'cross-volume',
-          error: `mod "${r.name}" (${r.install_path}) è su un volume diverso dall'istanza (${instanceDataDir}); gli hardlink richiedono lo stesso volume`,
-        }
-      }
+      if (!sameVolume(r.install_path, instanceDataDir))
+        log('warn', `mod "${r.name}" (${r.install_path}) su volume diverso dall'istanza: deployata per copia, non hardlink`)
     }
 
     // 3) Scan each mod's tree; a missing source folder is a hard error.
@@ -575,7 +647,7 @@ export async function deployInstance(
       })
     }
 
-    const plan = computeDeployPlan(mods)
+    const plan = computeDeployPlan(mods, queryFileConflictRules(db, opts.profileId))
 
     // 3.5) Load order LOOT-like — PRIMA di qualsiasi scrittura: su ciclo o missing master il
     // deploy si BLOCCA con l'istanza intatta, invece di generare un plugins.txt che crasha il
@@ -693,6 +765,10 @@ export async function deployInstance(
     const backedUp: string[] = []
     const extraLinkedRels: string[] = [] // file linkati fuori dal piano hardlinks (fallback junction)
     const junctionRelsCreated: string[] = [] // SOLO le junction realmente nate (le degradate no)
+    // File deployati per COPIA invece che hardlink (fallback cross-volume, EXDEV): tracciati
+    // separatamente perché verifyDeployedInstance non li scambi per "sostituiti esternamente"
+    // (nlink===1 è normale per una copia, non un segnale di manomissione — vedi DeployManifest.copied).
+    const copiedRels: string[] = []
     const backupIfExists = (destAbs: string, rel: string): void => {
       if (!existsSync(toLongPath(destAbs))) return
       const bak = destAbs + VANILLA_BACKUP_SUFFIX
@@ -701,6 +777,18 @@ export async function deployInstance(
       if (existsSync(toLongPath(bak))) unlinkSync(toLongPath(destAbs))
       else renameSync(toLongPath(destAbs), toLongPath(bak))
       backedUp.push(rel)
+    }
+    // Hardlink normale; su EXDEV (sorgente/destinazione su volumi diversi — mod installata su
+    // un altro disco, filesystem senza hardlink come exFAT) degrada a copia invece di far
+    // fallire l'intero deploy. Altri errori (permessi, path troppo lungo…) restano fatali.
+    const linkOrCopy = (src: string, dest: string, rel: string): void => {
+      try {
+        linkSync(toLongPath(src), toLongPath(dest))
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+        copyFileSync(toLongPath(src), toLongPath(dest))
+        copiedRels.push(rel)
+      }
     }
     try {
       for (const j of plan.junctions) {
@@ -720,7 +808,7 @@ export async function deployInstance(
             const fileDest = join(instanceDataDir, fileRel)
             mkdirSync(toLongPath(dirname(fileDest)), { recursive: true })
             backupIfExists(fileDest, fileRel)
-            linkSync(toLongPath(join(j.src, rel)), toLongPath(fileDest))
+            linkOrCopy(join(j.src, rel), fileDest, fileRel)
             filesHardlinked++
             extraLinkedRels.push(fileRel)
           }
@@ -732,7 +820,7 @@ export async function deployInstance(
         const dest = join(instanceDataDir, h.rel)
         mkdirSync(toLongPath(dirname(dest)), { recursive: true })
         backupIfExists(dest, h.rel)
-        linkSync(toLongPath(h.src), toLongPath(dest))
+        linkOrCopy(h.src, dest, h.rel)
         filesHardlinked++
         emitLinking(h.rel)
       }
@@ -741,6 +829,8 @@ export async function deployInstance(
       const kind: DeployErrorKind = code === 'EXDEV' ? 'cross-volume' : 'link'
       return { success: false, errorKind: kind, error: (e as Error).message }
     }
+    if (copiedRels.length)
+      log('info', `${copiedRels.length} file deployati per copia (volume diverso dall'istanza, non hardlink)`)
 
     // 5.5) Creation Club: hardlink each System-DLC file UNLESS a mod already provides
     // that exact name (a CC-specific patch — the mod wins). Graceful & source-immaculate:
@@ -781,7 +871,7 @@ export async function deployInstance(
     const txt = buildPluginsTxt(orderedPlugins.plugins, ccPluginOrder(ccPackages))
     try {
       mkdirSync(toLongPath(dirname(pluginsPath)), { recursive: true })
-      writeFileSync(pluginsPath, txt, 'utf8')
+      atomicWriteFile(pluginsPath, txt)
       pluginsWritten = orderedPlugins.plugins.length
     } catch (e) {
       return { success: false, errorKind: 'link', error: `scrittura plugins.txt fallita: ${(e as Error).message}` }
@@ -794,7 +884,7 @@ export async function deployInstance(
         mkdirSync(toLongPath(opts.systemPluginsDir), { recursive: true })
         const bak = `${sysPath}.pre-smm.bak`
         if (existsSync(sysPath) && !existsSync(bak)) copyFileSync(sysPath, bak)
-        writeFileSync(sysPath, txt, 'utf8')
+        atomicWriteFile(sysPath, txt)
         systemPluginsTxt = sysPath
       } catch (e) {
         log('warn', `plugins.txt di sistema non scritto (fail-soft): ${(e as Error).message}`)
@@ -812,9 +902,11 @@ export async function deployInstance(
       backups: backedUp.length ? backedUp : undefined,
       pluginsTxt: pluginsPath,
       systemPluginsTxt,
+      modsFingerprint: computeModsFingerprint(rows.map((r) => ({ name: r.name, priority: r.priority }))),
+      copied: copiedRels.length ? copiedRels : undefined,
     }
     try {
-      writeFileSync(join(instanceDataDir, DEPLOY_MANIFEST_FILE), JSON.stringify(manifest, null, 2), 'utf8')
+      atomicWriteFile(join(instanceDataDir, DEPLOY_MANIFEST_FILE), JSON.stringify(manifest, null, 2))
     } catch (e) {
       log('warn', `manifest di deploy NON scritto (${(e as Error).message}): il prossimo purge userà l'euristica nlink`)
     }
@@ -830,7 +922,21 @@ export async function deployInstance(
       // mai dalla root del gioco. dirname(instanceDataDir) resta solo come fallback legacy.
       const profileDir = opts.documentsIniDir ?? dirname(instanceDataDir)
       const template = resolveIniTemplate(opts.iniTemplate)
-      const overrides = mergeIniMaps(MOD_REQUIRED_OVERRIDES, opts.iniOverrides)
+      let overrides = mergeIniMaps(MOD_REQUIRED_OVERRIDES, opts.iniOverrides)
+      // Isolamento save per-profilo (opt-in, gap Vortex): SLocalSavePath redirige i salvataggi
+      // in una sottocartella dedicata, così un save fatto sotto un profilo non appare nel menu
+      // "Carica" di un altro con un load order diverso. Fail-soft su nome profilo non risolvibile
+      // (mai bloccare il deploy per questo) — resta il comportamento condiviso preesistente.
+      if (opts.perProfileSaves) {
+        const profileName = queryProfileName(db, opts.profileId)
+        if (profileName) {
+          overrides = mergeIniMaps(overrides, {
+            'Skyrim.ini': { General: { SLocalSavePath: `Saves\\${sanitizePathSegment(profileName, 'profile')}\\` } },
+          })
+        } else {
+          log('warn', 'isolamento save per-profilo attivo ma nome profilo non risolvibile: salvataggi condivisi')
+        }
+      }
       try {
         await applyIniSettings(profileDir, template, overrides)
         iniFilesWritten = managedFileCount(template, overrides)
@@ -865,6 +971,7 @@ export async function deployInstance(
       instanceDataDir,
       modsLinked: mods.length,
       filesHardlinked,
+      filesCopied: copiedRels.length || undefined,
       junctionsCreated,
       pluginsWritten,
       pluginsPath,

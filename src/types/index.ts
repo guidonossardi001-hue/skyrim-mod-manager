@@ -131,8 +131,15 @@ export interface AppSettings {
   downloadThreads: number
   downloadRetries?: number
   errorThreshold?: number
+  /** Limite banda AGGREGATO (KB/s) su tutti i download attivi; 0/assente = illimitato. */
+  downloadBandwidthLimitKBps?: number
   textureQualityProfile?: '2K' | '4K' // mass-installer texture quality/space profile (default 4K)
   enableAutoTranslate?: boolean // mass-installer: auto-apply the ITA translation overlay (default ON)
+  /** Opt-in (default OFF): il Deploy redirige i salvataggi in Saves/<profilo>/ (SLocalSavePath)
+   *  invece della cartella Saves/ condivisa — evita di caricare per sbaglio un save di un altro
+   *  profilo. OFF di default: i salvataggi esistenti nella cartella condivisa restano visibili
+   *  finché l'utente non lo attiva esplicitamente. */
+  perProfileSaves?: boolean
 }
 
 export interface ConflictInfo {
@@ -527,6 +534,22 @@ declare global {
           replacedCount: number
           junctionsMissingCount: number
         }>
+        // Risoluzione MIRATA di UNA voce di drift segnalata da verify(). Mirrors
+        // electron/deploy/driftResolve.ts. 'restore' su kind:'junction' torna sempre ok:false
+        // (serve un Deploy completo); 'accept' funziona per entrambi i kind.
+        resolveDrift(
+          profileId: number,
+          rel: string,
+          kind: 'file' | 'junction',
+          action: 'restore' | 'accept',
+        ): Promise<{ ok: boolean; action: 'restore' | 'accept'; rel: string; error?: string }>
+        // Regole conflitto FILE-level (fissano il vincitore per un percorso esatto). Mirrors
+        // file_conflict_rules (migration v12, electron/db/migrations.ts).
+        conflictRules: {
+          list(profileId: number): Promise<{ id: number; relPath: string; winnerMod: string }[] | { error: string }>
+          set(profileId: number, relPath: string, winnerMod: string): Promise<{ ok: boolean; error?: string }>
+          remove(ruleId: number): Promise<{ ok: boolean; error?: string }>
+        }
       }
       // Protezione aggiornamenti Steam: appmanifest_489830.acf read-only → Steam non può
       // aggiornare Skyrim e rompere SKSE. Mirrors electron/steam/updateGuard.ts.
@@ -611,11 +634,13 @@ declare global {
           defaultPreset: string | null
           prereqs: { body: boolean; cbpc: boolean; fsmp: boolean; skeleton: boolean }
           outputRegistered: boolean
+          bodyVariants: { femaleNude: number; femaleNevernude: number; maleNude: number; maleNevernude: number }
           error?: string
         }>
         build(
           profileId: number,
           presetName?: string,
+          nudity?: 'nude' | 'nevernude',
         ): Promise<{
           ok: boolean
           passes: { label: string; preset: string; groups: number; chunks: number; failedChunks: number }[]
@@ -624,6 +649,7 @@ declare global {
           modRegistered: boolean
           error?: string
         }>
+        open(profileId: number): Promise<{ ok: boolean; outputDir?: string; error?: string }>
       }
       // Installer FOMOD headless (motore Vortex) + scelte del curatore. Never rejects.
       fomod: {
@@ -706,6 +732,21 @@ declare global {
           tier: 'poor' | 'low' | 'medium' | 'high' | 'ultra',
           flavor: 'bethini' | 'vanilla',
         ): Promise<{ success: boolean; error?: string }>
+      }
+      // Advisory hardware (sola lettura, mai un blocco). Mirrors electron/system/hardwareInfo.ts.
+      system: {
+        detectHardware(): Promise<{
+          cpuModel: string | null
+          cpuCores: number
+          ramGB: number | null
+          gpuName: string | null
+          gpuVramGB: number | null
+          suggestedMaxTier: 'poor' | 'low' | 'medium' | 'high' | 'ultra' | null
+        }>
+      }
+      // Report diagnostico esportabile (sola lettura). Mirrors electron/diagnostics/report.ts.
+      diagnostics: {
+        generateReport(): Promise<{ report: string }>
       }
       // Grass cache "autopilota" — stato/prerequisiti (sola lettura) + avvio supervisionato.
       // NON genera mai la cache senza il gioco reale in esecuzione (25min-2,5h, crash attesi).

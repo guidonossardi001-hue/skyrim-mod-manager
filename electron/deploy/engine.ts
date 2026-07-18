@@ -1,15 +1,31 @@
 import { ipcMain } from 'electron'
-import { copyFileSync, existsSync, openSync, readSync, writeSync, closeSync, statSync, readFileSync } from 'fs'
+import {
+  copyFileSync,
+  existsSync,
+  openSync,
+  readSync,
+  writeSync,
+  closeSync,
+  statSync,
+  readFileSync,
+  unlinkSync,
+  mkdirSync,
+  linkSync,
+} from 'fs'
 import type { SqliteDb } from '../db/sqlite'
 import {
   deployInstance,
   purgeInstance,
   previewDeploy,
   planPluginFiles,
+  resolveWinningSourceForRel,
   type DeployResult,
   type PurgeResult,
   type DeployPreview,
 } from './deployer'
+import { resolveDriftedFile, type DriftKind, type DriftAction, type ResolveDriftResult } from './driftResolve'
+import { atomicWriteFile } from '../backup/snapshot'
+import { toLongPath } from '../install/extract'
 import { classifyForEsl, pickToFlag, lightFlagBytes, TES4_FLAGS_OFFSET, type EslCandidate } from '../plugins/eslify'
 import { tryAcquireBusyGate, releaseBusyGate, currentBusyLabel } from '../util/busyGate'
 
@@ -43,6 +59,9 @@ export interface DeployEngineOptions {
   /** true = il GIOCO è in esecuzione: deploy/purge/eslify vietati (Data incoerente sotto un
    *  processo vivo). Iniettata dal main (tasklist); assente = nessun gate (test/istanza). */
   isGameBusy?: () => boolean
+  /** Setting `perProfileSaves` (opt-in, default OFF): isolamento save per-profilo via
+   *  SLocalSavePath. Assente/false = comportamento preesistente (cartella Saves/ condivisa). */
+  resolvePerProfileSaves?: () => boolean
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -89,6 +108,7 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         lootMasterlistCachePath: opts.resolveLootMasterlistCachePath?.() ?? undefined,
         allowHeuristicCleanup: opts.allowHeuristics?.() ?? true,
         documentsIniDir: opts.resolveDocumentsIniDir?.() ?? undefined,
+        perProfileSaves: opts.resolvePerProfileSaves?.() ?? false,
         log: opts.log,
         onProgress,
       })
@@ -183,6 +203,61 @@ export function initDeployEngine(opts: DeployEngineOptions) {
     },
   )
 
+  // deploy:conflict-rules:* = regole FILE-level scritte dall'utente (gap Vortex): a differenza
+  // di deploy:prefer (peso dell'INTERA mod), qui si fissa il vincitore per UN percorso esatto,
+  // indipendentemente da categoria/peso/priorità — vedi FileConflictRule in plan.ts. Persistenti
+  // (tabella file_conflict_rules, migration v12), consultate dal planner ad ogni deploy/preview.
+  interface ConflictRuleRow {
+    id: number
+    relPath: string
+    winnerMod: string
+  }
+  ipcMain.handle(
+    'deploy:conflict-rules:list',
+    (_e, profileId: number): ConflictRuleRow[] | { error: string } => {
+      try {
+        return opts.db
+          .prepare(
+            'SELECT id, rel_path AS relPath, winner_mod AS winnerMod FROM file_conflict_rules WHERE profile_id=? ORDER BY rel_path ASC',
+          )
+          .all(profileId) as ConflictRuleRow[]
+      } catch (e) {
+        return { error: (e as Error).message }
+      }
+    },
+  )
+  ipcMain.handle(
+    'deploy:conflict-rules:set',
+    (_e, profileId: number, relPath: string, winnerMod: string): { ok: boolean; error?: string } => {
+      try {
+        const rel = relPath.trim().replace(/\\/g, '/').replace(/^\/+/, '')
+        const winner = winnerMod.trim()
+        if (!rel || !winner) return { ok: false, error: 'percorso e mod sono obbligatori' }
+        opts.db
+          .prepare(
+            `INSERT INTO file_conflict_rules (profile_id, rel_path, winner_mod) VALUES (?,?,?)
+             ON CONFLICT(profile_id, rel_path) DO UPDATE SET winner_mod=excluded.winner_mod`,
+          )
+          .run(profileId, rel, winner)
+        opts.log?.('info', `regola conflitto: "${rel}" fissata su "${winner}"`)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    },
+  )
+  ipcMain.handle(
+    'deploy:conflict-rules:delete',
+    (_e, ruleId: number): { ok: boolean; error?: string } => {
+      try {
+        opts.db.prepare('DELETE FROM file_conflict_rules WHERE id=?').run(ruleId)
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    },
+  )
+
   // deploy:preview = dry-run: conflitti file REALI (winner/loser dalle regole del planner),
   // budget plugin e problemi di load order — ZERO scritture. Alimenta la pagina Conflitti.
   ipcMain.handle('deploy:preview', (_e, profileId: number): DeployPreview => {
@@ -198,6 +273,67 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       return { ok: false, error: (e as Error).message }
     }
   })
+
+  // deploy:resolve-drift = chiusura MIRATA di UNA voce di drift esterno segnalata da deploy:verify:
+  // 'restore' ricollega il nostro file gestito (vincitore RICALCOLATO dal plan corrente, mai una
+  // copia storica potenzialmente superata — vedi resolveWinningSourceForRel), 'accept' riconosce
+  // il file/dir esterno come intenzionale e lo esclude dalle verifiche successive. Un elemento
+  // alla volta, scelto dall'utente — mai un'azione di massa silenziosa.
+  const driftIo = {
+    exists: existsSync,
+    readFile: (p: string) => readFileSync(p, 'utf8'),
+    writeFileAtomic: atomicWriteFile,
+    unlink: (p: string) => unlinkSync(toLongPath(p)),
+    mkdir: (p: string) => mkdirSync(toLongPath(p), { recursive: true }),
+    // Hardlink normale; su EXDEV (vincitore su un volume diverso dall'istanza) degrada a copia —
+    // stesso fallback usato dal deploy pieno (deployer.ts linkOrCopy), coerente qui.
+    link: (src: string, dest: string) => {
+      try {
+        linkSync(toLongPath(src), toLongPath(dest))
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'EXDEV') throw e
+        copyFileSync(toLongPath(src), toLongPath(dest))
+      }
+    },
+  }
+  ipcMain.handle(
+    'deploy:resolve-drift',
+    (_e, profileId: number, rel: string, kind: DriftKind, action: DriftAction): ResolveDriftResult => {
+      try {
+        if (action === 'restore' && opts.isGameBusy?.())
+          return {
+            ok: false,
+            action,
+            rel,
+            error: 'Skyrim è in esecuzione: chiudi il gioco prima di ripristinare un file.',
+          }
+        const dir = opts.resolveInstanceDataDir(profileId)
+        if (!dir)
+          return {
+            ok: false,
+            action,
+            rel,
+            error: `profilo ${profileId} non trovato o percorso istanza non configurato`,
+          }
+        if (action === 'restore' && !tryAcquireBusyGate('deploy'))
+          return { ok: false, action, rel, error: BUSY_ERROR() }
+        try {
+          const winningSource =
+            kind === 'file' && action === 'restore' ? resolveWinningSourceForRel(opts.db, rel, profileId) : null
+          const res = resolveDriftedFile(dir, rel, kind, action, winningSource, driftIo)
+          opts.log?.(
+            res.ok ? 'info' : 'warn',
+            `deploy:resolve-drift ${action} "${rel}" (${kind}): ${res.ok ? 'ok' : res.error}`,
+          )
+          return res
+        } finally {
+          if (action === 'restore') releaseBusyGate()
+        }
+      } catch (e) {
+        return { ok: false, action, rel, error: (e as Error).message }
+      }
+    },
+  )
 
   // ── ESL-ify (ESLIFY-01): libera slot FULL flaggando light i pure-override ──────────
   // Il flag light (bit 0x200 del TES4) è sicuro SENZA compattazione SOLO per i plugin a

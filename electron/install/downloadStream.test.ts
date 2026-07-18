@@ -8,6 +8,7 @@ import { Readable } from 'node:stream'
 import axios from 'axios'
 import { parseContentRange, planResume, streamToFile, StallError, type HttpGet } from './downloadStream'
 import { isRetryableError } from './retryPolicy'
+import { createRateLimiter } from './rateLimiter'
 
 const http: HttpGet = (url, cfg) => axios.get(url, cfg as never) as never
 
@@ -79,6 +80,41 @@ describe('downloadStream: real socket transfer', () => {
     expect(existsSync(dest + '.part')).toBe(false) // promoted
     expect(readFileSync(dest).equals(body)).toBe(true)
     expect(progressed).toBe(true)
+  })
+
+  it('rateLimiter: rallenta davvero il trasferimento (backpressure reale, non solo la scrittura)', async () => {
+    const throttledBody = Buffer.from('X'.repeat(2000))
+    const url = await serve(throttledBody)
+    const dest = join(dir, 'mod-throttled.7z')
+    const rateLimiter = createRateLimiter(() => 4000) // 4000 B/s → 2000 B richiedono ~0.5s (bucket parte vuoto)
+    const startedAt = Date.now()
+    const r = await streamToFile({ url, destPath: dest, http, rateLimiter })
+    const elapsedMs = Date.now() - startedAt
+    expect(r.bytes).toBe(throttledBody.length)
+    expect(readFileSync(dest).equals(throttledBody)).toBe(true) // integrità: nessun byte perso/corrotto dal throttle
+    expect(elapsedMs).toBeGreaterThanOrEqual(300) // un trasferimento locale non-throttled impiega <10ms
+  }, 10_000)
+
+  it('senza rateLimiter il trasferimento resta rapido (nessuna regressione sul percorso esistente)', async () => {
+    const fastBody = Buffer.from('Y'.repeat(2000))
+    const url = await serve(fastBody)
+    const dest = join(dir, 'mod-fast.7z')
+    const startedAt = Date.now()
+    await streamToFile({ url, destPath: dest, http })
+    expect(Date.now() - startedAt).toBeLessThan(300)
+  })
+
+  it('rateLimiter presente ma con limite 0 (setting spento) → resta rapido, mai un throttle spurio', async () => {
+    // Riflette il vero uso in downloadManager.ts: il rateLimiter è SEMPRE passato, ma il suo
+    // budget (letto da store.get('downloadBandwidthLimitKBps')) può essere 0 = illimitato.
+    const unthrottledBody = Buffer.from('Z'.repeat(2000))
+    const url = await serve(unthrottledBody)
+    const dest = join(dir, 'mod-unthrottled.7z')
+    const offRateLimiter = createRateLimiter(() => 0)
+    const startedAt = Date.now()
+    const r = await streamToFile({ url, destPath: dest, http, rateLimiter: offRateLimiter })
+    expect(r.bytes).toBe(unthrottledBody.length)
+    expect(Date.now() - startedAt).toBeLessThan(300)
   })
 
   it('resumes from a .part via Range and reassembles the exact file', async () => {

@@ -10,11 +10,14 @@ import { resolveMo2Plugins } from '../steam/mo2'
 import { runLaunchWorkflow, type LaunchEnv, type LaunchReport } from '../../src/lib/launchWorkflow'
 import { parsePluginsTxt } from '../../src/lib/compatibility'
 import { resolveActiveProfileId } from '../util/activeProfile'
+import { sanitizePathSegment } from '../util/paths'
 import { readGuardStatus, checkVersionDrift, type UpdateGuardFsOps } from '../steam/updateGuard'
 import { verifyDeployedInstance, type VerifyIo } from '../deploy/verifyDeploy'
 import { resolveDeployDataDir } from '../deploy/resolveTarget'
+import { parseDeployManifest, computeModsFingerprint, DEPLOY_MANIFEST_FILE } from '../deploy/plan'
 import { runSaveDoctor, type SaveDoctorIo } from '../saves/saveDoctor'
 import { readPluginHeader } from '../plugins/espParser'
+import { queryPagefileInfo, evaluatePagefile } from './pagefileCheck'
 
 /** Chiave setting: ultima versione del runtime vista a un lancio riuscito (drift detection). */
 export const LAST_GAME_VERSION_KEY = 'lastKnownGameVersion'
@@ -68,6 +71,25 @@ export function defaultSavesDir(): string {
   return join(documentsGameDir(), 'Saves')
 }
 
+/** Cartella save EFFETTIVA del profilo attivo: Saves/<profilo sanificato>/ se l'isolamento
+ *  per-profilo è attivo (setting `perProfileSaves`, vedi deployer.ts SLocalSavePath) e il
+ *  profilo è risolvibile — altrimenti la Saves/ condivisa (comportamento preesistente). Deve
+ *  restare in sincrono con la stringa scritta in SLocalSavePath: altrimenti Save Doctor
+ *  diagnosticherebbe la cartella SBAGLIATA per un profilo con l'isolamento attivo. */
+export function activeSavesDir(db: Database.Database, store: Store): string {
+  if (store.get('perProfileSaves') !== true) return defaultSavesDir()
+  try {
+    const profileId = resolveActiveProfileId(db, store)
+    const row = db.prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
+      | { name: string }
+      | undefined
+    if (row?.name) return join(documentsGameDir(), 'Saves', sanitizePathSegment(row.name, 'profile'))
+  } catch {
+    /* fail-soft: ricade sulla cartella condivisa */
+  }
+  return defaultSavesDir()
+}
+
 /** plugins.txt DI SISTEMA (%LOCALAPPDATA%) — quello letto dal gioco avviato via SKSE. */
 export function systemPluginsTxtPath(): string | null {
   const base = process.env.LOCALAPPDATA
@@ -98,11 +120,13 @@ export function resolveRealPlugins(mo2Plugins: { name: string; enabled: boolean 
   return { plugins: [], source: 'none' }
 }
 
-/** Save Doctor con IO reale — usato dal preflight e dall'IPC `saves:doctor`. */
-export function runSaveDoctorLive(gamePath: string | null) {
+/** Save Doctor con IO reale — usato dal preflight e dall'IPC `saves:doctor`. `savesDir` di
+ *  default alla cartella condivisa (retro-compatibile); i chiamanti profile-aware passano
+ *  `activeSavesDir(db, store)` così l'isolamento per-profilo si riflette anche qui. */
+export function runSaveDoctorLive(gamePath: string | null, savesDir: string = defaultSavesDir()) {
   return runSaveDoctor(
     {
-      savesDir: defaultSavesDir(),
+      savesDir,
       systemPluginsTxt: systemPluginsTxtPath(),
       gameDataDir: gamePath ? join(gamePath, 'Data') : null,
     },
@@ -253,10 +277,35 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     deployIntegrity = undefined
   }
 
+  // Deploy pendente: la selezione/priorità mod CORRENTE nel DB differisce dal fingerprint
+  // salvato nell'ultimo manifest? I file su disco possono essere intatti (deployIntegrity ok)
+  // ma non riflettere più cosa l'utente ha scelto ORA — un cambio di selezione/ordine senza
+  // rifare il Deploy sarebbe altrimenti invisibile finché non si nota in gioco. Sola lettura,
+  // mai un blocco: come deployIntegrity (8b), resta un avviso perché un falso positivo
+  // (fingerprint non ancora scritto da un manifest storico) non deve impedire un avvio sano.
+  let pendingDeployChanges: LaunchEnv['pendingDeployChanges']
+  try {
+    const dataDir = activeDeployDataDir(db, store, gamePath)
+    const manifestPath = dataDir ? join(dataDir, DEPLOY_MANIFEST_FILE) : null
+    if (manifestPath && existsSync(manifestPath)) {
+      const manifest = parseDeployManifest(readFileSync(manifestPath, 'utf8'), dataDir!)
+      if (manifest?.modsFingerprint) {
+        const currentRows = db
+          .prepare(
+            "SELECT name, priority FROM mods WHERE is_enabled=1 AND is_installed=1 AND install_path IS NOT NULL AND profile_id=? ORDER BY priority ASC, name ASC",
+          )
+          .all(profileId) as { name: string; priority: number }[]
+        pendingDeployChanges = computeModsFingerprint(currentRows) !== manifest.modsFingerprint
+      }
+    }
+  } catch {
+    pendingDeployChanges = undefined
+  }
+
   // Save Doctor: ultimo salvataggio vs load order attivo (fail-soft: mai warning spuri).
   let saveDoctor: LaunchEnv['saveDoctor']
   try {
-    const sd = runSaveDoctorLive(gamePath)
+    const sd = runSaveDoctorLive(gamePath, activeSavesDir(db, store))
     saveDoctor = {
       checked: sd.checked,
       saveName: sd.saveName,
@@ -265,6 +314,15 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     }
   } catch {
     saveDoctor = undefined
+  }
+
+  // Pagefile Windows (gap Nolvus): fail-soft, mai un blocco — solo un avviso se fisso e sotto
+  // 20GB. Probe fallito (PowerShell assente/timeout) → checked:false, nessun avviso spurio.
+  let pagefile: LaunchEnv['pagefile']
+  try {
+    pagefile = evaluatePagefile(queryPagefileInfo())
+  } catch {
+    pagefile = undefined
   }
 
   return {
@@ -282,7 +340,9 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     backups: { count: backupCount, lastValid: backupCount > 0 },
     updateGuard,
     deployIntegrity,
+    pendingDeployChanges,
     saveDoctor,
+    pagefile,
     // DIRETTIVA: avvio esclusivo via SKSE interno del launcher — MO2 mai target, anche se
     // configurato (i campi mo2.* restano informativi per la pipeline di verifica).
     launchTarget: skse.present ? 'skse' : null,

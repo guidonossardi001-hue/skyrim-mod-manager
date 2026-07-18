@@ -2,11 +2,12 @@ import { describe, it, expect } from 'vitest'
 import { join } from 'path'
 import { verifyDeployedInstance, hasDeployDrift, type VerifyIo } from './verifyDeploy'
 import { DEPLOY_MANIFEST_FILE } from './plan'
+import { ACCEPTED_OVERRIDES_FILE } from './driftResolve'
 
 const DATA = 'C:\\game\\Data'
 
-function manifestJson(files: string[], junctions: string[] = []): string {
-  return JSON.stringify({ version: 1, target: DATA, files, junctions })
+function manifestJson(files: string[], junctions: string[] = [], copied: string[] = []): string {
+  return JSON.stringify({ version: 1, target: DATA, files, junctions, copied })
 }
 
 interface FakeEntry {
@@ -16,12 +17,19 @@ interface FakeEntry {
   reparse?: boolean
 }
 
-function fakeIo(manifest: string | null, disk: Record<string, FakeEntry>): VerifyIo {
+function fakeIo(
+  manifest: string | null,
+  disk: Record<string, FakeEntry>,
+  acceptedRels?: string[],
+): VerifyIo {
   const manifestPath = join(DATA, DEPLOY_MANIFEST_FILE)
+  const acceptedPath = join(DATA, ACCEPTED_OVERRIDES_FILE)
   return {
-    exists: (p) => (p === manifestPath ? manifest !== null : p in disk),
+    exists: (p) =>
+      p === manifestPath ? manifest !== null : p === acceptedPath ? acceptedRels !== undefined : p in disk,
     readFile: (p) => {
       if (p === manifestPath && manifest !== null) return manifest
+      if (p === acceptedPath && acceptedRels !== undefined) return JSON.stringify(acceptedRels)
       throw new Error('ENOENT')
     },
     lstat: (p) => {
@@ -114,6 +122,26 @@ describe('verifyDeployedInstance', () => {
     expect(hasDeployDrift(r)).toBe(true)
   })
 
+  it('file deployato per copia (fallback cross-volume, nlink=1 normale) NON è drift', () => {
+    // manifest.copied marca i file EXDEV-fallback: nlink 1 è il loro stato atteso, non un
+    // segnale di sostituzione esterna (a differenza di un vero hardlink nostro).
+    const io = fakeIo(manifestJson(['a.esp', 'b.esp'], [], ['a.esp']), {
+      [join(DATA, 'a.esp')]: { nlink: 1 }, // copiato: nlink 1 atteso
+      [join(DATA, 'b.esp')]: { nlink: 2 }, // hardlink normale
+    })
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.replacedCount).toBe(0)
+    expect(r.intactFiles).toBe(2)
+    expect(hasDeployDrift(r)).toBe(false)
+  })
+
+  it('file copiato ma REALMENTE mancante resta segnalato (copied esenta solo dal check nlink)', () => {
+    const io = fakeIo(manifestJson(['a.esp'], [], ['a.esp']), {})
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.missingCount).toBe(1)
+    expect(r.missing).toEqual(['a.esp'])
+  })
+
   it('junction scollegata → junctionsMissing', () => {
     const io = fakeIo(manifestJson([], ['textures\\big']), {})
     const r = verifyDeployedInstance(DATA, io)
@@ -126,6 +154,25 @@ describe('verifyDeployedInstance', () => {
     const r = verifyDeployedInstance(DATA, fakeIo(manifestJson(files), {}))
     expect(r.missingCount).toBe(20)
     expect(r.missing).toHaveLength(8)
+  })
+
+  it('file accettato (deploy:resolve-drift accept) NON è più drift', () => {
+    const io = fakeIo(
+      manifestJson(['a.esp', 'b.esp']),
+      { [join(DATA, 'a.esp')]: { nlink: 2 } }, // b.esp mancante sul disco
+      ['b.esp'],
+    )
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.missingCount).toBe(0)
+    expect(r.intactFiles).toBe(2)
+    expect(hasDeployDrift(r)).toBe(false)
+  })
+
+  it('junction accettata NON è più drift, le altre restano segnalate', () => {
+    const io = fakeIo(manifestJson([], ['textures\\big', 'meshes\\gone']), {}, ['textures\\big'])
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.junctionsMissingCount).toBe(1)
+    expect(r.junctionsMissing).toEqual(['meshes\\gone'])
   })
 
   it('lstat che lancia su un file → contato missing, la verifica prosegue', () => {

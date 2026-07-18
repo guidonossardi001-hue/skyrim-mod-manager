@@ -9,6 +9,7 @@ import {
   BASE_MASTERS,
   type DeployMod,
   type PluginEntry,
+  type FileConflictRule,
 } from './plan'
 
 const mod = (
@@ -43,6 +44,57 @@ describe('computeDeployPlan — override', () => {
     const b = computeDeployPlan([mod('Low', 1, ['x.txt']), mod('High', 2, ['x.txt'])])
     expect(a.hardlinks).toEqual(b.hardlinks)
     expect(a.hardlinks[0].mod).toBe('High')
+  })
+})
+
+describe('computeDeployPlan — regole conflitto file utente (fileRules)', () => {
+  // File a livello ROOT (mai un'unica sottocartella a proprietario singolo che verrebbe
+  // promossa a junction — vedi describe successivo): restano sempre hardlink individuali,
+  // così il test verifica il vincitore direttamente su plan.hardlinks.
+  it('una regola pinna il vincitore per QUEL percorso, bypassando categoria/peso/priorità', () => {
+    // HDTexture vincerebbe automaticamente (peso 8000 > CompatPatch senza peso) — la regola
+    // forza comunque CompatPatch, esattamente come farebbe una scelta esplicita dell'utente.
+    const rules: FileConflictRule[] = [{ relPath: 'w.dds', winnerMod: 'CompatPatch' }]
+    const plan = computeDeployPlan(
+      [
+        mod('HDTexture', 9, ['w.dds'], { category: 'texture', resolutionWeight: 8000 }),
+        mod('CompatPatch', 1, ['w.dds'], { category: 'texture' }),
+      ],
+      rules,
+    )
+    const link = plan.hardlinks.find((h) => h.rel === 'w.dds')
+    expect(link?.mod).toBe('CompatPatch')
+  })
+
+  it('match case-insensitive sul percorso e sul nome mod', () => {
+    const rules: FileConflictRule[] = [{ relPath: 'W.DDS', winnerMod: 'compatpatch' }]
+    const plan = computeDeployPlan(
+      [mod('HDTexture', 9, ['w.dds']), mod('CompatPatch', 1, ['w.dds'])],
+      rules,
+    )
+    expect(plan.hardlinks.find((h) => h.rel === 'w.dds')?.mod).toBe('CompatPatch')
+  })
+
+  it('regola orfana (mod scelta non tra i candidati) → ricade sulla risoluzione automatica, mai un errore', () => {
+    const rules: FileConflictRule[] = [{ relPath: 'w.dds', winnerMod: 'ModRimossa' }]
+    const plan = computeDeployPlan([mod('Low', 1, ['w.dds']), mod('High', 2, ['w.dds'])], rules)
+    expect(plan.hardlinks.find((h) => h.rel === 'w.dds')?.mod).toBe('High') // automatico, priorità
+  })
+
+  it('la regola vale SOLO per il percorso indicato: altri file contesi tra le stesse mod restano automatici', () => {
+    const rules: FileConflictRule[] = [{ relPath: 'a.txt', winnerMod: 'Low' }]
+    const plan = computeDeployPlan(
+      [mod('Low', 1, ['a.txt', 'b.txt']), mod('High', 2, ['a.txt', 'b.txt'])],
+      rules,
+    )
+    expect(plan.hardlinks.find((h) => h.rel === 'a.txt')?.mod).toBe('Low') // pinnato
+    expect(plan.hardlinks.find((h) => h.rel === 'b.txt')?.mod).toBe('High') // automatico
+  })
+
+  it('senza fileRules il comportamento è identico a prima (retrocompatibile)', () => {
+    const withoutRules = computeDeployPlan([mod('Low', 1, ['x.txt']), mod('High', 2, ['x.txt'])])
+    const withEmptyRules = computeDeployPlan([mod('Low', 1, ['x.txt']), mod('High', 2, ['x.txt'])], [])
+    expect(withoutRules.hardlinks).toEqual(withEmptyRules.hardlinks)
   })
 })
 
@@ -385,12 +437,28 @@ describe('parseDeployManifest', () => {
       junctions: ['textures'],
       files: ['a.esp', 7, 'b.dds'], // il 7 spurio viene filtrato
       pluginsTxt: 'C:/inst/plugins.txt',
+      copied: ['b.dds', 3],
     })
     const m = parseDeployManifest(good)
     expect(m?.files).toEqual(['a.esp', 'b.dds'])
     expect(m?.junctions).toEqual(['textures'])
+    expect(m?.copied).toEqual(['b.dds']) // il 3 spurio viene filtrato, come per files/junctions
     expect(parseDeployManifest('{"version":2,"target":"x","junctions":[],"files":[]}')).toBeNull()
     expect(parseDeployManifest('non-json')).toBeNull()
     expect(parseDeployManifest('{"version":1}')).toBeNull()
+  })
+
+  it('ripara target/junctions/files mancanti via fallbackTarget invece di scartare tutto', () => {
+    // manifest storico/modificato a mano senza `target`: senza fallback resta irrecuperabile...
+    expect(parseDeployManifest('{"version":1,"files":["a.esp"]}')).toBeNull()
+    // ...ma con il target già noto dal chiamante (il dir appena letto) viene riparato.
+    const repaired = parseDeployManifest('{"version":1,"files":["a.esp"]}', 'C:/inst/Data')
+    expect(repaired?.target).toBe('C:/inst/Data')
+    expect(repaired?.files).toEqual(['a.esp'])
+    expect(repaired?.junctions).toEqual([])
+    // formato futuro sconosciuto (version diversa da 1): mai riparabile, anche con fallback.
+    expect(parseDeployManifest('{"version":2,"target":"x"}', 'C:/inst/Data')).toBeNull()
+    // JSON illeggibile: mai riparabile, non c'è dato da salvare.
+    expect(parseDeployManifest('not-json{{{', 'C:/inst/Data')).toBeNull()
   })
 })

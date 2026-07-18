@@ -536,6 +536,11 @@ function buildDeltaChangeset(profileId: number): DeltaRowSim[] {
   return rows
 }
 
+// Regole conflitto FILE-level (pagina Conflitti): stato in-memory così la UI è verificabile
+// in anteprima browser senza un main process reale (mirrors file_conflict_rules, migration v12).
+let mockConflictRules: { id: number; relPath: string; winnerMod: string }[] = []
+let mockConflictRuleSeq = 1
+
 // ─── API mock ────────────────────────────────────────────────────────────────
 export const mockApi = {
   window: {
@@ -787,15 +792,49 @@ export const mockApi = {
       systemPluginsRestored: true,
     }),
     onProgress: (_cb: unknown) => () => {},
-    preview: async (_profileId: number) => ({
-      ok: true as const,
-      modsScanned: state.mods.filter((m) => m.is_enabled).length,
-      conflicts: [],
-      pluginBudget: { full: 12, light: 3, maxFull: 254 },
-      loadOrderIssue: null,
-      warnings: [],
-    }),
+    preview: async (_profileId: number) => {
+      // Demo data (stesso principio del piano d'installazione sopra): con ≥2 mod abilitate si
+      // finge una collisione file reale, così la card "Sovrascritture file" — pin per-file
+      // incluso — è verificabile in anteprima browser, non solo nell'app desktop.
+      const enabledNames = state.mods.filter((m) => m.is_enabled).map((m) => m.name)
+      const conflicts =
+        enabledNames.length >= 2
+          ? [
+              { file: 'textures/armor/steel/steelarmor.dds', winner: enabledNames[1], loser: enabledNames[0] },
+              { file: 'textures/armor/steel/steelarmor_n.dds', winner: enabledNames[1], loser: enabledNames[0] },
+            ]
+          : []
+      return {
+        ok: true as const,
+        modsScanned: enabledNames.length,
+        conflicts,
+        pluginBudget: { full: 12, light: 3, maxFull: 254 },
+        loadOrderIssue: null,
+        warnings: [],
+      }
+    },
     prefer: async () => ({ ok: false as const, error: 'Risoluzione conflitti disponibile solo nell’app desktop' }),
+    resolveDrift: async () => ({
+      ok: false as const,
+      action: 'restore' as const,
+      rel: '',
+      error: 'Risoluzione drift disponibile solo nell’app desktop',
+    }),
+    // In-memory: sufficiente a verificare la UI della pagina Conflitti in anteprima browser.
+    conflictRules: {
+      list: async (_profileId: number) => mockConflictRules,
+      set: async (_profileId: number, relPath: string, winnerMod: string) => {
+        const rel = relPath.trim().replace(/\\/g, '/').replace(/^\/+/, '')
+        const existing = mockConflictRules.find((r) => r.relPath.toLowerCase() === rel.toLowerCase())
+        if (existing) existing.winnerMod = winnerMod
+        else mockConflictRules.push({ id: mockConflictRuleSeq++, relPath: rel, winnerMod })
+        return { ok: true as const }
+      },
+      remove: async (ruleId: number) => {
+        mockConflictRules = mockConflictRules.filter((r) => r.id !== ruleId)
+        return { ok: true as const }
+      },
+    },
     // Anteprima: la verifica reale confronta manifest e disco (solo app desktop).
     verify: async () => ({
       checked: true,
@@ -857,6 +896,33 @@ export const mockApi = {
     applyBethiniPreset: async () => ({ success: false, error: 'Applicazione preset INI disponibile solo nell’app desktop' }),
   },
 
+  // Demo data: sufficiente a verificare in anteprima browser l'avviso non-bloccante quando il
+  // tier scelto eccede l'hardware rilevato (electron/system/hardwareInfo.ts).
+  system: {
+    detectHardware: async () => ({
+      cpuModel: 'AMD Ryzen 7 7800X3D',
+      cpuCores: 8,
+      ramGB: 16,
+      gpuName: 'AMD Radeon RX 9070 XT',
+      gpuVramGB: 6, // sotto la soglia 'ultra' (8GB) così il demo mostra l'avviso su tier='ultra'
+      suggestedMaxTier: 'high' as const,
+    }),
+  },
+
+  diagnostics: {
+    generateReport: async () => ({
+      report: [
+        'Skyrim AE Mod Manager — Report diagnostico (anteprima browser)',
+        '',
+        `App: v1.1.0`,
+        `Profilo attivo: ${state.mods.length ? 'Anime Fantasy Default' : 'sconosciuto'}`,
+        `Mod: ${state.mods.filter((m) => m.is_enabled).length}/${state.mods.length} abilitate`,
+        '',
+        'Generato in anteprima browser: i dati hardware/deploy reali sono disponibili solo nell’app desktop.',
+      ].join('\n'),
+    }),
+  },
+
   grass: {
     status: async () => ({ ok: false as const, error: 'Grass cache disponibile solo nell’app desktop' }),
     startPrecache: async () => ({ success: false, error: 'Grass cache disponibile solo nell’app desktop' }),
@@ -893,6 +959,7 @@ export const mockApi = {
       defaultPreset: 'ErinPreset',
       prereqs: { body: true, cbpc: true, fsmp: true, skeleton: true },
       outputRegistered: false,
+      bodyVariants: { femaleNude: 3, femaleNevernude: 2, maleNude: 1, maleNevernude: 1 },
     }),
     build: async () => ({
       ok: false as const,
@@ -901,6 +968,7 @@ export const mockApi = {
       modRegistered: false,
       error: 'Batch build BodySlide disponibile solo nell’app desktop',
     }),
+    open: async () => ({ ok: false as const, error: 'BodySlide disponibile solo nell’app desktop' }),
   },
 
   downloads: {

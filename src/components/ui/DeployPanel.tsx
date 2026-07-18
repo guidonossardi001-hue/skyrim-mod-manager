@@ -43,7 +43,19 @@ interface DeployApi {
       replacedCount: number
       junctionsMissingCount: number
     }>
+    resolveDrift?(
+      profileId: number,
+      rel: string,
+      kind: 'file' | 'junction',
+      action: 'restore' | 'accept',
+    ): Promise<{ ok: boolean; action: 'restore' | 'accept'; rel: string; error?: string }>
   }
+}
+
+interface DriftItem {
+  rel: string
+  kind: 'file' | 'junction'
+  label: string
 }
 
 interface SyncRegisterApi {
@@ -77,6 +89,9 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
   const [dirtyPlugins, setDirtyPlugins] = useState<{ plugin: string; itm: number; udr: number; nav: number; util: string }[]>([])
   const [qacBusy, setQacBusy] = useState<string | null>(null)
   const [qacResults, setQacResults] = useState<Record<string, string>>({})
+  // Drift esterno segnalato dall'ultima verify(): l'utente chiude ogni voce con Ripristina/Accetta.
+  const [driftItems, setDriftItems] = useState<DriftItem[]>([])
+  const [driftBusy, setDriftBusy] = useState<string | null>(null)
   const api = (window.api as unknown as DeployApi).deploy
   const unsubRef = useRef<(() => void) | null>(null)
 
@@ -202,6 +217,7 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
   const runVerify = async () => {
     if (busy || !api.verify) return
     setBusy('verify')
+    setDriftItems([])
     try {
       const r = await api.verify()
       if (!r.checked) {
@@ -220,15 +236,43 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
         if (r.missingCount) parts.push(`${r.missingCount} mancanti (${r.missing.slice(0, 3).join(', ')}…)`)
         if (r.replacedCount) parts.push(`${r.replacedCount} sostituiti esternamente`)
         if (r.junctionsMissingCount) parts.push(`${r.junctionsMissingCount} junction scollegate`)
-        const line = `Verifica deploy: ${parts.join(' · ')} — riesegui il Deploy per ripristinare`
+        const line = `Verifica deploy: ${parts.join(' · ')} — risolvi ogni voce sotto o riesegui il Deploy`
         setSummary(null)
         onLog(line, 'warn')
         toast.error('Deploy alterato esternamente', parts.join(' · '))
+        setDriftItems([
+          ...r.missing.map((rel): DriftItem => ({ rel, kind: 'file', label: `${rel} (mancante)` })),
+          ...r.replaced.map((rel): DriftItem => ({ rel, kind: 'file', label: `${rel} (sostituito)` })),
+          ...r.junctionsMissing.map((rel): DriftItem => ({ rel, kind: 'junction', label: `${rel}/ (junction scollegata)` })),
+        ])
       }
     } catch (e) {
       toast.error('Verifica fallita', (e as Error).message)
     } finally {
       setBusy(null)
+    }
+  }
+
+  // Risoluzione mirata di UNA voce di drift: 'restore' ricollega il file gestito (vincitore
+  // ricalcolato ORA), 'accept' riconosce lo stato esterno come intenzionale e lo esclude dalle
+  // verifiche successive. Rimuove l'item dalla lista solo se il main conferma ok:true.
+  const runResolveDrift = async (item: DriftItem, action: 'restore' | 'accept') => {
+    if (profileId == null || driftBusy || !api.resolveDrift) return
+    setDriftBusy(item.rel)
+    try {
+      const r = await api.resolveDrift(profileId, item.rel, item.kind, action)
+      if (r.ok) {
+        setDriftItems((prev) => prev.filter((d) => d.rel !== item.rel))
+        onLog(`Drift risolto (${action === 'restore' ? 'ripristinato' : 'accettato'}): ${item.rel}`, 'success')
+        toast.success(action === 'restore' ? 'File ripristinato' : 'Modifica esterna accettata', item.rel)
+      } else {
+        onLog(`Risoluzione drift fallita per "${item.rel}": ${r.error}`, 'error')
+        toast.error('Risoluzione fallita', r.error ?? 'errore sconosciuto')
+      }
+    } catch (e) {
+      toast.error('Risoluzione fallita', (e as Error).message)
+    } finally {
+      setDriftBusy(null)
     }
   }
 
@@ -342,6 +386,40 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
             <p key={name} className="text-[11px] text-dark-400 pl-1">
               {name}: {msg}
             </p>
+          ))}
+        </div>
+      )}
+      {driftItems.length > 0 && (
+        <div className="mt-3 space-y-1.5">
+          {driftItems.map((item) => (
+            <div
+              key={item.rel}
+              className="flex items-center justify-between gap-2 rounded-lg bg-amber-900/15 border border-amber-900/40 px-3 py-1.5 text-xs"
+            >
+              <span className="text-amber-300 truncate" title={item.rel}>
+                {item.label}
+              </span>
+              <div className="flex items-center gap-1.5 flex-shrink-0">
+                {item.kind === 'file' && (
+                  <button
+                    onClick={() => runResolveDrift(item, 'restore')}
+                    disabled={driftBusy != null || !api.resolveDrift}
+                    className="flex items-center gap-1 px-2 py-1 rounded bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+                    title="Ricollega il nostro file gestito (vincitore ricalcolato ora)"
+                  >
+                    {driftBusy === item.rel ? <Loader size={11} className="animate-spin" /> : <Link2 size={11} />} Ripristina
+                  </button>
+                )}
+                <button
+                  onClick={() => runResolveDrift(item, 'accept')}
+                  disabled={driftBusy != null || !api.resolveDrift}
+                  className="flex items-center gap-1 px-2 py-1 rounded bg-void-900/50 text-void-200 hover:bg-void-800/70 hover:text-white transition-all disabled:opacity-50"
+                  title="Riconosci lo stato esterno come intenzionale: non verrà più segnalato"
+                >
+                  {driftBusy === item.rel ? <Loader size={11} className="animate-spin" /> : <ShieldCheck size={11} />} Accetta
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       )}

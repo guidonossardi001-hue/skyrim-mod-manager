@@ -1,11 +1,32 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, lstatSync } from 'node:fs'
+
+// Forza EXDEV su linkSync per i sorgenti il cui path contiene questa sottostringa (test EXDEV
+// fallback sotto). null = comportamento reale, invariato per tutti gli altri test del file.
+// vi.spyOn non funziona sui builtin ESM ("module namespace not configurable"): serve vi.mock,
+// che intercetta la RISOLUZIONE del modulo 'fs' — quello che deployer.ts importa davvero —
+// prima che deployInstance lo usi, invece di mutare l'oggetto export già caricato.
+let forceExdevFor: string | null = null
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>()
+  return {
+    ...actual,
+    linkSync: (src: string, dest: string) => {
+      if (forceExdevFor && String(src).includes(forceExdevFor)) {
+        const err = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+        err.code = 'EXDEV'
+        throw err
+      }
+      return actual.linkSync(src, dest)
+    },
+  }
+})
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { type SqliteDb, applyPragmas } from '../db/sqlite'
 import { openTestDb } from '../db/openTestDb'
-import { deployInstance, purgeInstance, type DeployProgress } from './deployer'
-import { DEPLOY_MANIFEST_FILE } from './plan'
+import { deployInstance, purgeInstance, resolveWinningSourceForRel, type DeployProgress } from './deployer'
+import { DEPLOY_MANIFEST_FILE, parseDeployManifest, computeModsFingerprint } from './plan'
 
 // Integration: real hardlinks + junctions on the SAME tmp volume (junctions need
 // no admin on Windows; hardlinks need same volume). Verifies the priority override,
@@ -111,6 +132,27 @@ describe('deployInstance', () => {
     expect(readFileSync(join(instanceData, 'textures', 'w.dds'), 'utf8')).toBe('PATCH')
   })
 
+  it('una regola in file_conflict_rules (DB) pinna il vincitore per un percorso, bypassando la risoluzione automatica', async () => {
+    // Senza regola HDTexture vincerebbe (peso 8000 > CompatPatch senza peso) — vedi test sopra
+    // per il caso 'patch' che vince di suo; qui invece è la regola utente a decidere.
+    db.exec(`
+      CREATE TABLE file_conflict_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, profile_id INTEGER NOT NULL,
+        rel_path TEXT NOT NULL, winner_mod TEXT NOT NULL
+      );
+    `)
+    db.prepare('INSERT INTO file_conflict_rules (profile_id, rel_path, winner_mod) VALUES (1, ?, ?)').run(
+      'root.dds',
+      'Low',
+    )
+    makeMod('Low', 1, { 'root.dds': 'DA-LOW' })
+    makeMod('High', 9, { 'root.dds': 'DA-HIGH' }, 1, { category: 'texture', weight: 8000 })
+
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    expect(readFileSync(join(instanceData, 'root.dds'), 'utf8')).toBe('DA-LOW')
+  })
+
   it('with no deploy metadata falls back to priority (backward compatible)', async () => {
     // No category/weight ⇒ NULL columns ⇒ higher priority wins, exactly as before v8.
     makeMod('Base', 1, { 'textures/x.dds': 'LOW' })
@@ -182,6 +224,33 @@ describe('deployInstance', () => {
     expect(readFileSync(join(docsDir, 'Skyrim.ini'), 'utf8')).toContain('bInvalidateOlderFiles=1')
     // Il vecchio percorso (root del "gioco" in questo test) NON riceve nulla.
     expect(existsSync(join(dirname(instanceData), 'Skyrim.ini'))).toBe(false)
+  })
+
+  it('perProfileSaves (opt-in): scrive SLocalSavePath sanificato dal nome profilo', async () => {
+    db.exec('CREATE TABLE profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL)')
+    db.prepare('INSERT INTO profiles (id, name) VALUES (1, ?)').run('Anime Fantasy / Default')
+    makeMod('A', 1, { 'a.esp': '' })
+    const r = await deployInstance(db, instanceData, { profileId: 1, perProfileSaves: true })
+    expect(r.success).toBe(true)
+    const ini = readFileSync(join(dirname(instanceData), 'Skyrim.ini'), 'utf8')
+    // sanitizePathSegment sostituisce '/' con '_' (caratteri riservati Windows)
+    expect(ini).toContain('SLocalSavePath=Saves\\Anime Fantasy _ Default\\')
+  })
+
+  it('senza perProfileSaves (default) NON scrive SLocalSavePath: cartella Saves/ condivisa', async () => {
+    db.exec('CREATE TABLE profiles (id INTEGER PRIMARY KEY, name TEXT NOT NULL)')
+    db.prepare('INSERT INTO profiles (id, name) VALUES (1, ?)').run('Default')
+    makeMod('A', 1, { 'a.esp': '' })
+    const r = await deployInstance(db, instanceData, { profileId: 1 })
+    expect(r.success).toBe(true)
+    expect(readFileSync(join(dirname(instanceData), 'Skyrim.ini'), 'utf8')).not.toContain('SLocalSavePath')
+  })
+
+  it('perProfileSaves attivo ma tabella profiles assente → fail-soft, deploy comunque riuscito senza SLocalSavePath', async () => {
+    makeMod('A', 1, { 'a.esp': '' }) // nessuna CREATE TABLE profiles in questo test
+    const r = await deployInstance(db, instanceData, { profileId: 1, perProfileSaves: true })
+    expect(r.success).toBe(true)
+    expect(readFileSync(join(dirname(instanceData), 'Skyrim.ini'), 'utf8')).not.toContain('SLocalSavePath')
   })
 
   it('respects skipIni (no INI files written)', async () => {
@@ -262,13 +331,15 @@ describe('deployInstance', () => {
     expect(existsSync(join(instanceData, 'Skyrim.esm'))).toBe(false) // vanilla base is never CC-linked
   })
 
-  it('refuses a cross-volume deploy before touching anything', async () => {
+  it('un target su un volume inesistente fallisce comunque in modo pulito (nessuna scrittura parziale)', async () => {
+    // Gap Vortex: una mod cross-volume non blocca più l'INTERO deploy (vedi test EXDEV sotto,
+    // che verifica il fallback a copia) — ma un TARGET la cui root non esiste proprio (qui:
+    // un'unità Z: assente) fallisce comunque, solo più avanti (mkdirSync/purge), non più al
+    // guard upfront rimosso.
     makeMod('X', 1, { 'a.txt': 'x' })
-    // A different drive letter than the tmp volume forces sameVolume() to fail.
     const otherVol = 'Z:\\nolvus\\Inst\\Data'
     const r = await deployInstance(db, otherVol, { profileId: 1 })
     expect(r.success).toBe(false)
-    expect(r.errorKind).toBe('cross-volume')
     expect(existsSync(otherVol)).toBe(false) // nothing created
   })
 
@@ -473,5 +544,61 @@ describe('deployInstance', () => {
     expect(existsSync(join(instanceData, 'old.esp'))).toBe(false) // rimosso via manifest
     expect(readFileSync(join(instanceData, 'new.esp'), 'utf8')).toBe('NEW')
     expect(readFileSync(join(modsRoot, 'Old', 'old.esp'), 'utf8')).toBe('OLD') // sorgente intatta
+  })
+
+  it('EXDEV su un hardlink (mod cross-volume) degrada a COPIA invece di far fallire il deploy', async () => {
+    // Simula una mod su un volume diverso dall'istanza: linkSync lancia EXDEV per il SUO file
+    // (non per gli altri), il deployer deve copiare SOLO quel file e completare con successo.
+    makeMod('Local', 1, { 'local.esp': 'LOCAL' })
+    makeMod('Remote', 2, { 'remote.esp': 'REMOTE' })
+    forceExdevFor = 'Remote'
+    try {
+      const r = await deployInstance(db, instanceData, { profileId: 1 })
+      expect(r.success).toBe(true)
+      expect(r.filesCopied).toBe(1)
+      expect(readFileSync(join(instanceData, 'remote.esp'), 'utf8')).toBe('REMOTE')
+      expect(readFileSync(join(modsRoot, 'Remote', 'remote.esp'), 'utf8')).toBe('REMOTE') // sorgente intatta
+      const manifest = parseDeployManifest(readFileSync(join(instanceData, DEPLOY_MANIFEST_FILE), 'utf8'))
+      expect(manifest?.copied).toEqual(['remote.esp'])
+      expect(readFileSync(join(instanceData, 'local.esp'), 'utf8')).toBe('LOCAL') // path non-EXDEV normale
+    } finally {
+      forceExdevFor = null
+    }
+  })
+
+  it('il manifest scritto include un modsFingerprint delle mod abilitate al momento del deploy', async () => {
+    makeMod('A', 1, { 'a.esp': 'A' })
+    makeMod('B', 2, { 'b.esp': 'B' })
+    expect((await deployInstance(db, instanceData, { profileId: 1 })).success).toBe(true)
+    const manifest = parseDeployManifest(readFileSync(join(instanceData, DEPLOY_MANIFEST_FILE), 'utf8'))
+    const expected = computeModsFingerprint([
+      { name: 'A', priority: 1 },
+      { name: 'B', priority: 2 },
+    ])
+    expect(manifest?.modsFingerprint).toBe(expected)
+  })
+})
+
+describe('resolveWinningSourceForRel', () => {
+  it('risolve il vincitore CORRENTE del conflitto per un singolo file, senza rideploy', async () => {
+    const low = makeMod('Low', 1, { 'shared.txt': 'low' })
+    const high = makeMod('High', 2, { 'shared.txt': 'high' })
+    const winner = resolveWinningSourceForRel(db, 'shared.txt', 1)
+    expect(winner?.mod).toBe('High')
+    expect(winner?.src).toBe(join(high, 'shared.txt'))
+    expect(winner?.src).not.toBe(join(low, 'shared.txt'))
+  })
+
+  it('nessuna mod abilitata fornisce più il file → null (rimossa/disabilitata dopo il deploy)', () => {
+    makeMod('Only', 1, { 'a.esp': 'A' }, 0) // disabilitata
+    expect(resolveWinningSourceForRel(db, 'a.esp', 1)).toBeNull()
+    expect(resolveWinningSourceForRel(db, 'inesistente.esp', 1)).toBeNull()
+  })
+
+  it('rispetta categoria/peso, non solo priorità (stessa logica del deploy reale)', () => {
+    makeMod('HDTexture', 9, { 'textures/w.dds': 'TEX' }, 1, { category: 'texture', weight: 8000 })
+    makeMod('CompatPatch', 1, { 'textures/w.dds': 'PATCH' }, 1, { category: 'patch' })
+    const winner = resolveWinningSourceForRel(db, 'textures/w.dds', 1)
+    expect(winner?.mod).toBe('CompatPatch')
   })
 })

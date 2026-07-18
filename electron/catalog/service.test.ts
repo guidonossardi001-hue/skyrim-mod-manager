@@ -353,3 +353,52 @@ describe('CatalogService.ingest — install recipes', () => {
     expect(recipes(db)).toEqual(before) // recipe table not clobbered by the failed ingest
   })
 })
+
+describe('CatalogService.ingest — min_app_version gate', () => {
+  let db: SqliteDb
+  let keys: ReturnType<typeof makeKeys>
+
+  beforeEach(() => {
+    db = testDb()
+    keys = makeKeys()
+  })
+
+  const withMinVersion = (v: string): ModCatalog => ({ ...baseCatalog, min_app_version: v })
+
+  it('app più vecchia della minima richiesta → rifiutato, zero righe scritte', () => {
+    const svc = new CatalogService(db, { publicKeyPem: keys.publicKeyPem, appVersion: '1.0.0' })
+    const res = svc.ingest(signCatalog(withMinVersion('1.2.0'), keys.privateKey))
+    expect(res.success).toBe(false)
+    expect(res.errorKind).toBe('incompatible')
+    expect(res.error).toMatch(/1\.2\.0/)
+    expect(catalogRows(db)).toHaveLength(0)
+  })
+
+  it('app pari o più nuova della minima richiesta → accettato', () => {
+    const svc = new CatalogService(db, { publicKeyPem: keys.publicKeyPem, appVersion: '1.2.0' })
+    expect(svc.ingest(signCatalog(withMinVersion('1.2.0'), keys.privateKey)).success).toBe(true)
+
+    const svc2 = new CatalogService(db, { publicKeyPem: keys.publicKeyPem, appVersion: '1.5.0' })
+    const res2 = svc2.ingest(signCatalog(withMinVersion('1.2.0'), keys.privateKey))
+    expect(res2.success).toBe(true)
+  })
+
+  it('catalogo senza min_app_version → nessun gate, sempre accettato', () => {
+    const svc = new CatalogService(db, { publicKeyPem: keys.publicKeyPem, appVersion: '0.0.1' })
+    expect(svc.ingest(signCatalog(baseCatalog, keys.privateKey)).success).toBe(true)
+  })
+
+  it('appVersion non iniettata (opts.appVersion assente) → gate saltato, retro-compatibile', () => {
+    const svc = new CatalogService(db, { publicKeyPem: keys.publicKeyPem }) // niente appVersion
+    const res = svc.ingest(signCatalog(withMinVersion('99.0.0'), keys.privateKey))
+    expect(res.success).toBe(true)
+  })
+
+  it('min_app_version non stringa → rifiutato in validate (schema), non un throw', () => {
+    const svc = new CatalogService(db, { publicKeyPem: keys.publicKeyPem, appVersion: '1.0.0' })
+    const bad = { ...baseCatalog, min_app_version: 123 } as unknown as ModCatalog
+    const res = svc.ingest(signCatalog(bad, keys.privateKey))
+    expect(res.success).toBe(false)
+    expect(res.errorKind).toBe('schema')
+  })
+})

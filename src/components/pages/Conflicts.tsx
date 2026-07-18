@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import { useAppStore } from '@/store/appStore'
 import {
   AlertTriangle,
@@ -11,6 +11,10 @@ import {
   PowerOff,
   Layers,
   ArrowLeftRight,
+  Pin,
+  X,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { toast } from '@/lib/toast'
@@ -25,6 +29,11 @@ export default function Conflicts() {
   const [preview, setPreview] = useState<Awaited<ReturnType<typeof window.api.deploy.preview>> | null>(null)
   const [previewBusy, setPreviewBusy] = useState(false)
   const [preferBusy, setPreferBusy] = useState<string | null>(null)
+  // Regole conflitto FILE-level (fissano il vincitore per UN percorso esatto, non l'intera mod
+  // come "Inverti precedenza" sopra) — vedi electron/deploy/plan.ts FileConflictRule.
+  const [rules, setRules] = useState<{ id: number; relPath: string; winnerMod: string }[]>([])
+  const [pinBusy, setPinBusy] = useState<string | null>(null)
+  const [expandedPair, setExpandedPair] = useState<string | null>(null)
 
   const runPreview = async () => {
     if (activeProfileId == null) return
@@ -37,6 +46,54 @@ export default function Conflicts() {
       toast.error('Analisi conflitti fallita', (e as Error).message)
     } finally {
       setPreviewBusy(false)
+    }
+  }
+
+  const loadRules = useCallback(async () => {
+    if (activeProfileId == null || !window.api.deploy.conflictRules) return
+    try {
+      const r = await window.api.deploy.conflictRules.list(activeProfileId)
+      if (Array.isArray(r)) setRules(r)
+    } catch {
+      /* la lista regole resta quella precedente: non è critico */
+    }
+  }, [activeProfileId])
+
+  useEffect(() => {
+    void loadRules()
+  }, [loadRules])
+
+  const pinFile = async (relPath: string, winnerMod: string) => {
+    if (activeProfileId == null || pinBusy || !window.api.deploy.conflictRules) return
+    setPinBusy(relPath)
+    try {
+      const r = await window.api.deploy.conflictRules.set(activeProfileId, relPath, winnerMod)
+      if (r.ok) {
+        toast.success('File fissato', `"${relPath}" verrà sempre da "${winnerMod}"`)
+        await loadRules()
+        await runPreview()
+      } else toast.error('Fissaggio fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Fissaggio fallito', (e as Error).message)
+    } finally {
+      setPinBusy(null)
+    }
+  }
+
+  const removeRule = async (rule: { id: number; relPath: string }) => {
+    if (pinBusy || !window.api.deploy.conflictRules) return
+    setPinBusy(`remove:${rule.id}`)
+    try {
+      const r = await window.api.deploy.conflictRules.remove(rule.id)
+      if (r.ok) {
+        toast.success('Regola rimossa', rule.relPath)
+        await loadRules()
+        await runPreview()
+      } else toast.error('Rimozione fallita', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Rimozione fallita', (e as Error).message)
+    } finally {
+      setPinBusy(null)
     }
   }
 
@@ -206,28 +263,81 @@ export default function Conflicts() {
           <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
             {conflictPairs.map((p) => {
               const key = `${p.winner}→${p.loser}`
+              const expanded = expandedPair === key
               return (
-                <div key={key} className="flex items-center gap-3 p-2.5 rounded-lg border border-dark-800">
-                  <div className="flex-1 min-w-0 text-xs">
-                    <p className="text-white/85 truncate">
-                      <span className="text-green-400 font-medium">{p.winner}</span>
-                      <span className="text-dark-500"> sovrascrive </span>
-                      <span className="text-dark-300">{p.loser}</span>
-                    </p>
-                    <p className="text-dark-500">{p.files.length} file contesi · es. {p.files[0]}</p>
+                <div key={key} className="rounded-lg border border-dark-800">
+                  <div className="flex items-center gap-3 p-2.5">
+                    <button
+                      onClick={() => setExpandedPair(expanded ? null : key)}
+                      className="flex-1 min-w-0 text-xs text-left"
+                      title="Mostra i singoli file contesi per fissarne uno"
+                    >
+                      <p className="text-white/85 truncate flex items-center gap-1">
+                        {expanded ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+                        <span className="text-green-400 font-medium">{p.winner}</span>
+                        <span className="text-dark-500"> sovrascrive </span>
+                        <span className="text-dark-300">{p.loser}</span>
+                      </p>
+                      <p className="text-dark-500 pl-4">{p.files.length} file contesi · es. {p.files[0]}</p>
+                    </button>
+                    <button
+                      onClick={() => preferLoser(p)}
+                      disabled={preferBusy !== null}
+                      title={`Al prossimo Deploy "${p.loser}" fornirà TUTTI i file contesi al posto di "${p.winner}"`}
+                      className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50 flex-shrink-0"
+                    >
+                      <ArrowLeftRight size={12} className={preferBusy === key ? 'animate-pulse' : ''} />
+                      Inverti precedenza
+                    </button>
                   </div>
-                  <button
-                    onClick={() => preferLoser(p)}
-                    disabled={preferBusy !== null}
-                    title={`Al prossimo Deploy "${p.loser}" fornirà i file contesi al posto di "${p.winner}"`}
-                    className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50"
-                  >
-                    <ArrowLeftRight size={12} className={preferBusy === key ? 'animate-pulse' : ''} />
-                    Inverti precedenza
-                  </button>
+                  {expanded && (
+                    <div className="border-t border-dark-800 px-2.5 py-2 space-y-1">
+                      <p className="text-[11px] text-dark-500 mb-1">
+                        Fissa un singolo file su "{p.loser}" senza toccare gli altri:
+                      </p>
+                      {p.files.map((f) => (
+                        <div key={f} className="flex items-center justify-between gap-2 text-xs">
+                          <span className="text-dark-300 truncate" title={f}>{f}</span>
+                          <button
+                            onClick={() => pinFile(f, p.loser)}
+                            disabled={pinBusy !== null}
+                            title={`Fissa "${f}" su "${p.loser}" (indipendente dagli altri file di questa coppia)`}
+                            className="flex items-center gap-1 px-2 py-0.5 rounded bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50 flex-shrink-0"
+                          >
+                            <Pin size={10} className={pinBusy === f ? 'animate-pulse' : ''} /> Fissa
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )
             })}
+          </div>
+        )}
+        {rules.length > 0 && (
+          <div className="mt-4 pt-3 border-t border-dark-800">
+            <p className="text-xs font-semibold text-white/70 mb-2 flex items-center gap-1.5">
+              <Pin size={12} className="text-void-400" /> Regole file attive ({rules.length})
+            </p>
+            <div className="space-y-1">
+              {rules.map((r) => (
+                <div key={r.id} className="flex items-center justify-between gap-2 text-xs rounded-lg bg-void-900/20 px-2.5 py-1.5">
+                  <span className="text-dark-300 truncate" title={r.relPath}>
+                    <span className="text-dark-500">{r.relPath}</span> → sempre da{' '}
+                    <span className="text-void-300 font-medium">{r.winnerMod}</span>
+                  </span>
+                  <button
+                    onClick={() => removeRule(r)}
+                    disabled={pinBusy !== null}
+                    title="Rimuovi questa regola (torna alla risoluzione automatica)"
+                    className="flex items-center p-1 rounded text-dark-400 hover:text-red-300 hover:bg-red-900/20 transition-all disabled:opacity-50 flex-shrink-0"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>

@@ -1,5 +1,6 @@
 import { join } from 'path'
 import { DEPLOY_MANIFEST_FILE, parseDeployManifest, type DeployManifest } from './plan'
+import { loadAcceptedOverrides } from './driftResolve'
 
 // Rilevamento external-changes sul deploy (PIVOT-02 / T17): col target 'game' i file
 // linkati vivono nella Data REALE del gioco, dove tool esterni (xEdit, DynDOLOD, Steam
@@ -67,11 +68,18 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
   let manifest: DeployManifest | null = null
   try {
     const p = join(instanceDataDir, DEPLOY_MANIFEST_FILE)
-    if (io.exists(p)) manifest = parseDeployManifest(io.readFile(p))
+    if (io.exists(p)) manifest = parseDeployManifest(io.readFile(p), instanceDataDir)
   } catch {
     manifest = null
   }
   if (!manifest) return EMPTY
+
+  // Drift esterno che l'utente ha già accettato esplicitamente (deploy:resolve-drift, azione
+  // 'accept'): trattato come gestito, stesso principio di TOOL_MANAGED_RELS ma per-istanza.
+  const accepted = loadAcceptedOverrides(instanceDataDir, io)
+  // File deployati per COPIA invece che hardlink (fallback cross-volume): nlink===1 è il loro
+  // stato NORMALE, non un segnale di sostituzione esterna — vedi DeployManifest.copied.
+  const copiedRels = new Set(manifest.copied ?? [])
 
   const missing: string[] = []
   const replaced: string[] = []
@@ -82,7 +90,7 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
   let intactFiles = 0
 
   for (const rel of manifest.files) {
-    if (isToolManaged(rel)) {
+    if (isToolManaged(rel) || accepted.has(rel)) {
       intactFiles++
       continue
     }
@@ -96,9 +104,10 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
     if (!st || !st.isFile) {
       missingCount++
       if (missing.length < SAMPLE_CAP) missing.push(rel)
-    } else if (st.nlink === 1) {
+    } else if (st.nlink === 1 && !copiedRels.has(rel)) {
       // Un nostro hardlink ha SEMPRE nlink ≥ 2 (l'altro nome vive sotto modsRoot):
-      // nlink 1 = il file è stato sostituito da una copia indipendente esterna.
+      // nlink 1 = il file è stato sostituito da una copia indipendente esterna. Eccezione: i
+      // file in manifest.copied SONO nostri ma nlink 1 è il loro stato normale (vedi sopra).
       replacedCount++
       if (replaced.length < SAMPLE_CAP) replaced.push(rel)
     } else {
@@ -107,6 +116,7 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
   }
 
   for (const rel of manifest.junctions) {
+    if (accepted.has(rel)) continue
     const abs = join(instanceDataDir, rel)
     let ok = false
     try {

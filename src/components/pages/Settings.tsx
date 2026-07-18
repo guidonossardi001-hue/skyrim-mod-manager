@@ -1,7 +1,20 @@
 import { useEffect, useState } from 'react'
-import { FolderOpen, Save, Key, CheckCircle, XCircle, ScrollText, Wand2, Loader2, DownloadCloud } from 'lucide-react'
+import {
+  FolderOpen,
+  Save,
+  Key,
+  CheckCircle,
+  XCircle,
+  ScrollText,
+  Wand2,
+  Loader2,
+  DownloadCloud,
+  ClipboardCopy,
+  Stethoscope,
+} from 'lucide-react'
 import { useAppStore } from '@/store/appStore'
 import { SEVENZIP_LICENSE, THIRD_PARTY_LICENSES } from '@/data/licenses'
+import { toast } from '@/lib/toast'
 
 interface SevenZipStatus {
   checking: boolean
@@ -20,6 +33,25 @@ export default function Settings() {
   const [detecting, setDetecting] = useState(false)
   const [detectMsg, setDetectMsg] = useState<{ ok: boolean; text: string } | null>(null)
   const [provisioning, setProvisioning] = useState(false)
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState(false)
+  const [diagnosticsReport, setDiagnosticsReport] = useState<string | null>(null)
+
+  // Report diagnostico esportabile (sola lettura): copia negli appunti un blob di testo pronto
+  // per un bug report/richiesta di supporto — evita di dover ricopiare hardware/stato a mano.
+  const generateDiagnosticsReport = async () => {
+    if (diagnosticsBusy) return
+    setDiagnosticsBusy(true)
+    try {
+      const { report } = await window.api.diagnostics.generateReport()
+      setDiagnosticsReport(report)
+      await navigator.clipboard.writeText(report)
+      toast.success('Report copiato', `${report.split('\n').length} righe negli appunti`)
+    } catch (e) {
+      toast.error('Generazione report fallita', (e as Error).message)
+    } finally {
+      setDiagnosticsBusy(false)
+    }
+  }
 
   // Provisioning dalle release GitHub ufficiali: scarica LOOT/SSEEdit/xLODGen mancanti
   // e cabla i percorsi (DynDOLOD escluso: non distribuito su GitHub).
@@ -352,6 +384,10 @@ export default function Settings() {
               ],
               ['checkConflicts', 'Rileva conflitti tra mod automaticamente'],
               ['autoBackup', 'Crea un punto di ripristino prima di ogni riparazione automatica'],
+              [
+                'perProfileSaves',
+                'Salvataggi separati per profilo (Saves/<profilo>/): evita di caricare per sbaglio il save di un altro profilo',
+              ],
             ] as [keyof typeof local, string][]
           ).map(([field, label]) => (
             <label key={field} className="flex items-center gap-3 cursor-pointer">
@@ -365,7 +401,7 @@ export default function Settings() {
             </label>
           ))}
 
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-4 gap-3">
             <div>
               <label className="text-xs text-dark-300 mb-1 block">Thread paralleli</label>
               <input
@@ -407,6 +443,24 @@ export default function Settings() {
                 value={local.errorThreshold ?? 50}
                 onChange={(e) => setLocal((l) => ({ ...l, errorThreshold: parseInt(e.target.value) || 1 }))}
                 className="input-field w-full"
+              />
+            </div>
+            <div>
+              <label
+                className="text-xs text-dark-300 mb-1 block"
+                title="Limite AGGREGATO su tutti i download attivi insieme, non per-singolo-download. 0 = illimitato."
+              >
+                Banda max (KB/s)
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={local.downloadBandwidthLimitKBps ?? 0}
+                onChange={(e) =>
+                  setLocal((l) => ({ ...l, downloadBandwidthLimitKBps: Math.max(0, parseInt(e.target.value) || 0) }))
+                }
+                className="input-field w-full"
+                placeholder="0 = illimitato"
               />
             </div>
           </div>
@@ -465,6 +519,38 @@ export default function Settings() {
       </Section>
 
       {/* Third-party licenses */}
+      <Section title="Diagnostica">
+        <p className="text-xs text-dark-400">
+          Genera un report testuale (hardware, versione gioco/SKSE, profilo attivo, stato deploy)
+          pronto da incollare in una richiesta di supporto — copiato automaticamente negli appunti.
+        </p>
+        <button
+          onClick={generateDiagnosticsReport}
+          disabled={diagnosticsBusy}
+          className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50 w-fit"
+        >
+          {diagnosticsBusy ? <Loader2 size={14} className="animate-spin" /> : <Stethoscope size={14} />}
+          {diagnosticsBusy ? 'Generazione…' : 'Genera e copia report'}
+        </button>
+        {diagnosticsReport && (
+          <div
+            className="rounded-lg border border-dark-700 overflow-hidden"
+            style={{ background: 'rgba(10,10,12,0.6)' }}
+          >
+            <div className="px-3 py-2 border-b border-dark-800 flex items-center gap-2 text-xs text-dark-300">
+              <ClipboardCopy size={13} className="text-soul-400" /> Ultimo report generato
+            </div>
+            <pre
+              tabIndex={0}
+              aria-label="Report diagnostico"
+              className="text-[11px] leading-relaxed text-dark-300 font-mono p-3 max-h-56 overflow-y-auto whitespace-pre-wrap"
+            >
+              {diagnosticsReport}
+            </pre>
+          </div>
+        )}
+      </Section>
+
       <Section title="Licenze di terze parti">
         <p className="text-xs text-dark-400">
           Questa applicazione include software di terze parti.{' '}

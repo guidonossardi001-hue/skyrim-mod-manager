@@ -253,6 +253,17 @@ contextBridge.exposeInMainWorld('api', {
       invoke('deploy:prefer', profileId, preferredMod, overMod),
     // Verifica external-changes: manifest del deploy vs disco (file spariti/sostituiti).
     verify: () => invoke('deploy:verify'),
+    // Risoluzione MIRATA di UNA voce di drift: 'restore' ricollega il nostro file gestito
+    // (vincitore ricalcolato ORA), 'accept' riconosce il file/dir esterno come intenzionale.
+    resolveDrift: (profileId: number, rel: string, kind: 'file' | 'junction', action: 'restore' | 'accept') =>
+      invoke('deploy:resolve-drift', profileId, rel, kind, action),
+    // Regole conflitto FILE-level (fissano il vincitore per un percorso esatto, non l'intera mod).
+    conflictRules: {
+      list: (profileId: number) => invoke('deploy:conflict-rules:list', profileId),
+      set: (profileId: number, relPath: string, winnerMod: string) =>
+        invoke('deploy:conflict-rules:set', profileId, relPath, winnerMod),
+      remove: (ruleId: number) => invoke('deploy:conflict-rules:delete', ruleId),
+    },
     // Subscribe to streamed progress. Returns an unsubscribe function so the
     // renderer can detach the listener (avoids leaks across re-renders/unmounts).
     onProgress: (callback: (p: unknown) => void) => {
@@ -288,6 +299,16 @@ contextBridge.exposeInMainWorld('api', {
     applyBethiniPreset: (tier: string, flavor: 'bethini' | 'vanilla') => invoke('ini:apply-bethini-preset', tier, flavor),
   },
 
+  // Advisory hardware (sola lettura): GPU/VRAM/RAM rilevati + tier BethINI massimo consigliato.
+  system: {
+    detectHardware: () => invoke('hardware:detect'),
+  },
+
+  // Report diagnostico esportabile (sola lettura): blob di testo pronto per un bug report.
+  diagnostics: {
+    generateReport: () => invoke('diagnostics:generate-report'),
+  },
+
   // Grass cache "autopilota": stato/prerequisiti (sola lettura) + avvio supervisionato
   // (lancia il gioco, rilancia sui crash finché NGIO non rimuove il marker). Non genera
   // mai la cache senza il gioco reale in esecuzione.
@@ -313,7 +334,11 @@ contextBridge.exposeInMainWorld('api', {
   // Il renderer passa solo profileId e NOME preset — nessun path attraversa il bridge.
   bodyslide: {
     status: () => invoke('bodyslide:status'),
-    build: (profileId: number, presetName?: string) => invoke('bodyslide:build', profileId, presetName),
+    // nudity: 'nude' (default) o 'nevernude' — decide la variante del corpo base costruito.
+    build: (profileId: number, presetName?: string, nudity?: 'nude' | 'nevernude') =>
+      invoke('bodyslide:build', profileId, presetName, nudity),
+    // Apre la GUI di BodySlide per l'uso manuale: output isolato nella mod generata (mai in Data).
+    open: (profileId: number) => invoke('bodyslide:open', profileId),
   },
 
   // Installer FOMOD headless (motore Vortex) + scelte del curatore della collection.

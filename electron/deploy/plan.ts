@@ -11,6 +11,8 @@
 //   • every other file is an individual hardlink,
 //   • root-level plugins (.esp/.esm/.esl) drive plugins.txt.
 
+import { createHash } from 'crypto'
+
 // Asset class used by the automatic conflict resolver (Nolvus-style, but the
 // system decides for the user). A 'patch' always overrides plain assets; the
 // other classes only matter for tie-breaks and debug labelling.
@@ -88,7 +90,7 @@ export function toDeployCategory(v: unknown): DeployCategory | undefined {
 //   Rule 2 (weight):   same class → higher resolutionWeight wins (4K over 2K).
 //   Rule 3 (priority): same weight → higher priority_order wins (standard MO2).
 //   Final tie-break by name so the plan is stable regardless of input order.
-function conflictWinner(a: DeployMod, b: DeployMod): DeployMod {
+export function conflictWinner(a: DeployMod, b: DeployMod): DeployMod {
   const ra = CATEGORY_RANK[a.category ?? 'misc']
   const rb = CATEGORY_RANK[b.category ?? 'misc']
   if (ra !== rb) return ra > rb ? a : b
@@ -218,7 +220,17 @@ export function stripWrapperDirs(rels: string[], maxDepth = 3): { files: string[
   return { files, segments }
 }
 
-export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
+/** Regola utente: per `relPath` (Data-relative, confronto case-insensitive), se `winnerMod`
+ *  è tra le mod che scrivono quel file, vince SEMPRE — bypassa categoria/peso/priorità solo
+ *  per QUEL percorso (le altre destinazioni contese tra le stesse mod restano automatiche). */
+export interface FileConflictRule {
+  relPath: string
+  winnerMod: string
+}
+
+export function computeDeployPlan(mods: DeployMod[], fileRules: FileConflictRule[] = []): DeployPlan {
+  const pinnedWinnerByPath = new Map<string, string>()
+  for (const r of fileRules) pinnedWinnerByPath.set(normRel(r.relPath).toLowerCase(), r.winnerMod.toLowerCase())
   // Deterministic base order (ascending priority, name tie-break) so candidate
   // lists — and therefore the resolved-conflict log — are stable across input order.
   const ordered = [...mods].sort((a, b) => a.priority - b.priority || a.name.localeCompare(b.name))
@@ -266,9 +278,16 @@ export function computeDeployPlan(mods: DeployMod[]): DeployPlan {
   const canon = new Map<string, string>()
   const resolvedConflicts: ResolvedConflict[] = []
   for (const [key, arr] of candidates) {
-    let win = arr[0]
-    for (let i = 1; i < arr.length; i++) {
-      if (conflictWinner(win.mod, arr[i].mod) !== win.mod) win = arr[i]
+    // Una regola utente PINNA il vincitore per questo esatto percorso, se la mod scelta è
+    // davvero tra i candidati (altrimenti la regola è orfana — mod rimossa/rinominata — e si
+    // ricade sulla risoluzione automatica, mai un errore silenzioso su una mod inesistente).
+    const pinnedName = pinnedWinnerByPath.get(key)
+    const pinned = pinnedName ? arr.find((c) => c.mod.name.toLowerCase() === pinnedName) : undefined
+    let win = pinned ?? arr[0]
+    if (!pinned) {
+      for (let i = 1; i < arr.length; i++) {
+        if (conflictWinner(win.mod, arr[i].mod) !== win.mod) win = arr[i]
+      }
     }
     provider.set(key, win.mod)
     srcOf.set(key, win.src)
@@ -458,27 +477,60 @@ export interface DeployManifest {
   backups?: string[]
   pluginsTxt?: string // percorso assoluto del plugins.txt d'istanza scritto
   systemPluginsTxt?: string // percorso assoluto del plugins.txt di sistema (%LOCALAPPDATA%) scritto
+  /** Fingerprint (vedi computeModsFingerprint) delle mod abilitate AL MOMENTO di questo deploy.
+   *  Confrontata al prossimo lancio con lo stato corrente del profilo: se differisce, l'utente
+   *  ha cambiato selezione/priorità mod senza rifare il deploy (gioco avviato su stato stantio). */
+  modsFingerprint?: string
+  /** File Data-relative deployati per COPIA invece che hardlink (fallback cross-volume: la mod
+   *  sorgente vive su un volume diverso dall'istanza, dove linkSync fallisce con EXDEV). nlink===1
+   *  è NORMALE per questi file — verifyDeployedInstance li esclude dal check "sostituito
+   *  esternamente" che userebbe altrimenti nlink===1 come segnale di manomissione. */
+  copied?: string[]
+}
+
+/** Fingerprint stabile e deterministico dello stato "mod abilitate" di un profilo (nome+priorità,
+ *  ordinate per nome). Usata per rilevare un deploy pendente: se il fingerprint calcolato ORA sullo
+ *  stato del DB differisce da quello salvato nel manifest all'ultimo deploy, la Data del gioco non
+ *  riflette più la selezione corrente. Import locale a 'crypto' (Node) — resta una funzione pura,
+ *  nessun I/O: stesso input → stesso output, nessun side effect.
+ */
+export function computeModsFingerprint(mods: { name: string; priority: number }[]): string {
+  const sorted = [...mods].sort((a, b) => a.name.localeCompare(b.name))
+  const raw = sorted.map((m) => `${m.name.toLowerCase()}:${m.priority}`).join('|')
+  return createHash('sha256').update(raw).digest('hex')
 }
 
 /** Suffisso dei backup degli originali sostituiti (vedi DeployManifest.backups). */
 export const VANILLA_BACKUP_SUFFIX = '.smm-vanilla.bak'
 
-/** Parse difensivo del manifest letto da disco: qualsiasi forma inattesa → null (mai throw). */
-export function parseDeployManifest(raw: string): DeployManifest | null {
+/**
+ * Parse difensivo del manifest letto da disco: qualsiasi forma inattesa → null (mai throw).
+ * JSON illeggibile (troncato/corrotto) è sempre irrecuperabile → null: non c'è dato da riparare.
+ * Se il JSON è valido ma `target` manca (es. manifest storico o modificato a mano) e il chiamante
+ * conosce già il percorso reale (`fallbackTarget`, il dir che ha appena letto il file), lo si usa
+ * per riparare invece di scartare l'intero manifest — evita che purge/verify tornino "nessun
+ * manifest" (che sul target gioco reale con allowHeuristicCleanup=false blocca il purge) per un
+ * singolo campo mancante quando junctions/files sono ancora leggibili.
+ */
+export function parseDeployManifest(raw: string, fallbackTarget?: string): DeployManifest | null {
   try {
-    const m = JSON.parse(raw) as DeployManifest
-    if (m?.version !== 1 || typeof m.target !== 'string') return null
-    if (!Array.isArray(m.junctions) || !Array.isArray(m.files)) return null
+    const m = JSON.parse(raw) as Partial<DeployManifest>
+    if (typeof m !== 'object' || m === null) return null
+    if (m.version !== undefined && m.version !== 1) return null // formato futuro sconosciuto: non riparabile
+    const target = typeof m.target === 'string' ? m.target : fallbackTarget
+    if (!target) return null
     return {
       version: 1,
-      target: m.target,
-      junctions: m.junctions.filter((x): x is string => typeof x === 'string'),
-      files: m.files.filter((x): x is string => typeof x === 'string'),
+      target,
+      junctions: Array.isArray(m.junctions) ? m.junctions.filter((x): x is string => typeof x === 'string') : [],
+      files: Array.isArray(m.files) ? m.files.filter((x): x is string => typeof x === 'string') : [],
       backups: Array.isArray(m.backups)
         ? m.backups.filter((x): x is string => typeof x === 'string')
         : undefined,
       pluginsTxt: typeof m.pluginsTxt === 'string' ? m.pluginsTxt : undefined,
       systemPluginsTxt: typeof m.systemPluginsTxt === 'string' ? m.systemPluginsTxt : undefined,
+      modsFingerprint: typeof m.modsFingerprint === 'string' ? m.modsFingerprint : undefined,
+      copied: Array.isArray(m.copied) ? m.copied.filter((x): x is string => typeof x === 'string') : undefined,
     }
   } catch {
     return null

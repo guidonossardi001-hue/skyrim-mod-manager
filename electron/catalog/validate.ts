@@ -60,6 +60,8 @@ export function validateCatalog(cat: ModCatalog): ValidateResult {
   if (!cat || typeof cat !== 'object') return { ok: false, errors: ['catalogo assente o non oggetto'] }
   if (!Array.isArray(cat.mods) || cat.mods.length === 0)
     return { ok: false, errors: ['catalogo vuoto: mods deve essere un array non vuoto'] }
+  if (cat.min_app_version != null && !isNonEmptyString(cat.min_app_version))
+    errors.push('min_app_version presente ma non è una stringa non vuota')
 
   const seen = new Set<number>()
   const dupes = new Set<number>()

@@ -1,6 +1,8 @@
 import { createWriteStream, existsSync, renameSync, statSync } from 'fs'
 import { pipeline } from 'stream/promises'
+import { Transform } from 'stream'
 import type { Readable } from 'stream'
+import type { RateLimiter } from './rateLimiter'
 
 // Resumable streaming download for heavy mod archives. The bytes are streamed to a
 // `<dest>.part` sidecar (never buffered) and the file is only promoted to its final
@@ -49,6 +51,25 @@ export interface StreamToFileOptions {
   // transfer is aborted with a retryable StallError instead of hanging forever. The
   // .part survives so the next attempt resumes via Range. Default 120 s.
   stallTimeoutMs?: number
+  /** Limita il throughput di QUESTO stream al budget condiviso (bytes/sec aggregato tra tutti
+   *  i download attivi — vedi install/rateLimiter.ts). Assente = nessun limite (comportamento
+   *  preesistente). Inserito nella pipeline come Transform: propaga backpressure fino al
+   *  socket, così i byte non arrivano più veloci di quanto il limite permetta di scriverli. */
+  rateLimiter?: RateLimiter
+}
+
+/** Transform che consuma il budget del rate limiter condiviso PRIMA di lasciar passare ogni
+ *  chunk — il ritardo qui si propaga come backpressure a monte (fino al socket TCP). */
+class ThrottleTransform extends Transform {
+  constructor(private limiter: RateLimiter) {
+    super()
+  }
+  _transform(chunk: Buffer, _enc: BufferEncoding, callback: (error?: Error | null, data?: Buffer) => void): void {
+    this.limiter
+      .take(chunk.length)
+      .then(() => callback(null, chunk))
+      .catch((e) => callback(e as Error))
+  }
 }
 
 /**
@@ -184,7 +205,13 @@ export async function streamToFile(opts: StreamToFileOptions): Promise<StreamRes
     const writer = createWriteStream(part, { flags: plan.append ? 'a' : 'w' })
     armIdle()
     try {
-      await pipeline(res.data, writer, { signal: ac.signal })
+      // Il limiter (se presente) è un Transform IN PIPELINE, non un side-channel: il ritardo
+      // che introduce backpressura naturalmente lo stream sorgente (pause/resume sono a
+      // livello di stream, non per-listener — l'ascoltatore 'data' sopra per il progress non
+      // interferisce), quindi il throttling rallenta davvero il consumo dalla rete, non solo
+      // la scrittura su disco.
+      if (opts.rateLimiter) await pipeline(res.data, new ThrottleTransform(opts.rateLimiter), writer, { signal: ac.signal })
+      else await pipeline(res.data, writer, { signal: ac.signal })
     } catch (e) {
       if (stalled !== null) throw new StallError(`Download stallato: ${stalled}`)
       throw e // user cancel (AbortError) or a genuine stream error — bubble unchanged

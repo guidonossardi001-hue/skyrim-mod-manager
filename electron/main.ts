@@ -32,6 +32,7 @@ import {
   runSaveDoctorLive,
   verifyDeployLive,
   activeDeployDataDir,
+  activeSavesDir,
   documentsGameDir,
 } from './launch/preflight'
 import { readGuardStatus, setGuardProtection, findAppManifest } from './steam/updateGuard'
@@ -118,6 +119,7 @@ import { bundled7zaPath, resolveRar7z } from './install/sevenZip'
 import { createHash, randomUUID } from 'crypto'
 import { createReadStream } from 'fs'
 import { logger } from './logger'
+import { notifyWindowIfUnfocused } from './notify'
 import { readAndClassifySkseDll } from './launch/skseDllPreflight'
 import { readAndValidateEsp } from './plugins/espValidate'
 import {
@@ -127,6 +129,9 @@ import {
   type BethiniFlavor,
   type BethiniTier,
 } from './ini/bethiniPresets'
+import { detectHardwareInfo, suggestedMaxTier } from './system/hardwareInfo'
+import { formatDiagnosticsReport, type DiagnosticsData } from './diagnostics/report'
+import { release as osRelease } from 'os'
 import { applyIniSettings } from './ini/iniService'
 import { checkGrassPrereqs, summarizeGrassCache } from './launch/grassCache'
 import {
@@ -657,7 +662,7 @@ app.whenReady().then(() => {
   // Delta/incremental-update engine (signed-manifest ingest, diff, gated apply).
   initDeltaEngine(requireDb(), { enqueueDownload: (id) => downloadQueue?.enqueue(id) })
   // Reference mod catalog engine (signed catalog fetch + verify + atomic replace).
-  initCatalogEngine(requireDb())
+  initCatalogEngine(requireDb(), app.getVersion())
   // Boot auto-refresh: pull the signed 4000+ catalog in the background so the DB
   // is not stuck on the bundled seed. Fire-and-forget, never blocks boot — a
   // missing NOLVUS_MOD_CATALOG_URL or network failure is a logged no-op.
@@ -720,6 +725,7 @@ app.whenReady().then(() => {
     // Cache del masterlist LOOT reale (masterlist:refresh la scrive; qui la si legge soltanto).
     resolveLootMasterlistCachePath: () => join(app.getPath('userData'), MASTERLIST_CACHE_FILE),
     resolveDocumentsIniDir: () => documentsGameDir(),
+    resolvePerProfileSaves: () => store.get('perProfileSaves') === true,
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
 
@@ -832,6 +838,16 @@ app.whenReady().then(() => {
           finish({ code: null, error: (e as Error).message })
         }
       }),
+    // Avvio GUI staccato per l'uso manuale: non attende l'uscita, sopravvive al processo padre.
+    launchExe: (exe, cwd) => {
+      try {
+        const proc = spawn(exe, [], { cwd, detached: true, stdio: 'ignore', windowsHide: false })
+        proc.unref()
+        return { ok: true }
+      } catch (e) {
+        return { ok: false, error: (e as Error).message }
+      }
+    },
     onProgress: (p) => {
       try {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('bodyslide:progress', p)
@@ -858,6 +874,14 @@ app.whenReady().then(() => {
         } catch {
           /* best-effort */
         }
+        // Notifica OS nativa se la finestra non è a fuoco: il crash-watch sorveglia fino a 3h
+        // dopo il lancio, l'utente potrebbe aver minimizzato l'app o essere passato al gioco.
+        notifyWindowIfUnfocused(mainWindow, {
+          title: 'Skyrim: crash rilevato',
+          body: analysis.culprit?.module
+            ? `Modulo probabile: ${analysis.culprit.module}`
+            : 'Controlla i dettagli nell’app',
+        })
         try {
           if (mainWindow && !mainWindow.isDestroyed())
             mainWindow.webContents.send('crash:detected', {
@@ -904,7 +928,7 @@ app.whenReady().then(() => {
   // Save Doctor: diagnosi read-only dell'ultimo salvataggio vs load order attivo.
   ipcMain.handle('saves:doctor', () => {
     const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
-    return runSaveDoctorLive(gamePath)
+    return runSaveDoctorLive(gamePath, activeSavesDir(getRawDb(), store))
   })
 
   // Verifica external-changes del deploy attivo (manifest vs disco, sola lettura).
@@ -3087,6 +3111,92 @@ ipcMain.handle('plugins:validate-esp', () => {
   return { ok: true as const, reports }
 })
 
+// Advisory hardware (gap Nolvus): GPU/VRAM/RAM rilevati + tier BethINI massimo consigliato.
+// Sola lettura, mai un blocco — il renderer lo usa solo per un avviso non-bloccante prima di
+// applicare un preset sopra le capacità rilevate (l'utente può comunque procedere).
+ipcMain.handle('hardware:detect', () => {
+  const hw = detectHardwareInfo()
+  return { ...hw, suggestedMaxTier: suggestedMaxTier(hw) }
+})
+
+// Report diagnostico esportabile (gap Nolvus): aggrega dati GIÀ raccolti da altre sonde
+// (nessuna nuova sonda qui) in un blob di testo copiabile — pronto per un bug report/richiesta
+// di supporto. Sola lettura, fail-soft: un campo non risolvibile diventa un placeholder nel
+// report (mai un errore che impedisce di generarlo).
+ipcMain.handle('diagnostics:generate-report', (): { report: string } => {
+  const db = getRawDb()
+  const { steam, skyrim } = detectSteamEnv()
+  const gamePath = skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+  const skse = detectSkse(gamePath)
+  const hw = detectHardwareInfo()
+
+  let activeProfileName: string | null = null
+  let modsTotal = 0
+  let modsEnabled = 0
+  let modsInstalled = 0
+  try {
+    const profileId = resolveActiveProfileId(db, store)
+    const row = db.prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
+      | { name: string }
+      | undefined
+    activeProfileName = row?.name ?? null
+    const counts = db
+      .prepare(
+        'SELECT COUNT(*) total, SUM(is_enabled) enabled, SUM(is_installed) installed FROM mods WHERE profile_id=?',
+      )
+      .get(profileId) as { total: number; enabled: number | null; installed: number | null }
+    modsTotal = counts.total ?? 0
+    modsEnabled = counts.enabled ?? 0
+    modsInstalled = counts.installed ?? 0
+  } catch {
+    /* profilo/mod non risolvibili: il report resta comunque generabile */
+  }
+
+  let deployChecked = false
+  let deployMissing = 0
+  let deployReplaced = 0
+  let deployJunctionsMissing = 0
+  try {
+    const dataDir = activeDeployDataDir(db, store, gamePath)
+    if (dataDir) {
+      const v = verifyDeployLive(dataDir)
+      deployChecked = v.checked
+      deployMissing = v.missingCount
+      deployReplaced = v.replacedCount
+      deployJunctionsMissing = v.junctionsMissingCount
+    }
+  } catch {
+    /* deploy non verificabile: il report lo riflette come "mai deployato" */
+  }
+
+  const data: DiagnosticsData = {
+    generatedAt: new Date().toISOString(),
+    appVersion: app.getVersion(),
+    platform: process.platform,
+    osRelease: osRelease(),
+    cpuModel: hw.cpuModel,
+    cpuCores: hw.cpuCores,
+    ramGB: hw.ramGB,
+    gpuName: hw.gpuName,
+    gpuVramGB: hw.gpuVramGB,
+    steamInstalled: steam.installed,
+    gamePath,
+    gameVersion: skyrim.version ?? null,
+    sksePresent: skse.present,
+    skseVersion: skse.version ?? null,
+    activeProfileName,
+    modsTotal,
+    modsEnabled,
+    modsInstalled,
+    deployChecked,
+    deployMissing,
+    deployReplaced,
+    deployJunctionsMissing,
+    lastCrashLog: (store.get('lastNotifiedCrashLog') as string | undefined) ?? null,
+  }
+  return { report: formatDiagnosticsReport(data) }
+})
+
 // ── T18 — Preset INI derivati da BethINI Pie: applica a Documents/My Games/... (la
 // stessa cartella che il runtime legge davvero, non la root del gioco).
 ipcMain.handle('ini:apply-bethini-preset', async (_e, tier: string, flavor: string) => {
@@ -3143,6 +3253,12 @@ ipcMain.handle('grass:start-precache', async () => {
       markerExists: () => markerFileExists(gamePath),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       onProgress: (ev) => mainWindow?.webContents.send('grass:progress', ev),
+    })
+    // Notifica OS nativa se la finestra non è a fuoco: la supervisione può durare fino a 3h
+    // (rilanci del gioco inclusi) — senza questo un esito silenzioso passerebbe inosservato.
+    notifyWindowIfUnfocused(mainWindow, {
+      title: result.completed ? 'Grass cache completato' : 'Grass cache interrotto',
+      body: result.reason ?? (result.completed ? 'Precache terminato con successo' : 'Controlla i dettagli nell’app'),
     })
     return { success: true, result }
   } finally {

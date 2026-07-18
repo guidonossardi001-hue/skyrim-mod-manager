@@ -194,6 +194,46 @@ describe('runLaunchWorkflow', () => {
     expect(r.checks.find((x) => x.label === 'Deploy integro')?.detail).toContain('100 file')
   })
 
+  it('deploy pendente (fingerprint mod diverso dal manifest) → warning, non blocca', () => {
+    const r = runLaunchWorkflow(goodEnv({ pendingDeployChanges: true }))
+    const c = r.checks.find((x) => x.label === 'Deploy pendente')!
+    expect(c.status).toBe('warning')
+    expect(c.fix).toMatch(/Deploy/i)
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('nessun deploy pendente → nessun warning "Deploy pendente"', () => {
+    const r = runLaunchWorkflow(goodEnv({ pendingDeployChanges: false }))
+    expect(r.checks.find((x) => x.label === 'Deploy pendente')).toBeUndefined()
+  })
+
+  it('pagefile fisso piccolo (concerning) → warning, non blocca', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ pagefile: { checked: true, concerning: true, detail: 'Pagefile fisso di soli 4.0 GB' } }),
+    )
+    const c = r.checks.find((x) => x.label === 'Pagefile Windows piccolo')!
+    expect(c.status).toBe('warning')
+    expect(c.detail).toContain('4.0 GB')
+    expect(r.canLaunch).toBe(true)
+  })
+
+  it('pagefile ok (gestito da Windows o fisso capiente) → nessun warning', () => {
+    const r = runLaunchWorkflow(
+      goodEnv({ pagefile: { checked: true, concerning: false, detail: 'Gestito automaticamente da Windows' } }),
+    )
+    expect(r.checks.find((x) => x.label === 'Pagefile Windows piccolo')).toBeUndefined()
+  })
+
+  it('pagefile non verificabile (probe fallito) → nessun warning spurio', () => {
+    const r = runLaunchWorkflow(goodEnv({ pagefile: { checked: false, concerning: false, detail: '' } }))
+    expect(r.checks.find((x) => x.label === 'Pagefile Windows piccolo')).toBeUndefined()
+  })
+
+  it('pagefile assente dall’env (probe mai eseguita) → nessun warning', () => {
+    const r = runLaunchWorkflow(goodEnv({ pagefile: undefined }))
+    expect(r.checks.find((x) => x.label === 'Pagefile Windows piccolo')).toBeUndefined()
+  })
+
   // ── Regressione REALE (2026-07-17): il gioco è stato avviato VANILLA ──────────
   // Il deploy era fallito, plugins.txt di sistema conteneva 1 sola riga, ma la checklist
   // segnava "0/254 slot [ok]" e il lancio è proseguito: il check aveva solo il tetto.

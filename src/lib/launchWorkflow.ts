@@ -62,12 +62,22 @@ export interface LaunchEnv {
     replacedCount: number
     junctionsMissingCount: number
   }
+  /** true = la selezione/priorità mod corrente del profilo differisce dal fingerprint salvato
+   *  nell'ultimo manifest di deploy (deploy pendente); undefined = non verificabile (nessun
+   *  manifest con fingerprint, mai deployato con questa build). */
+  pendingDeployChanges?: boolean
   /** Diagnosi ultimo salvataggio vs load order attivo; assente = non eseguita. */
   saveDoctor?: {
     checked: boolean
     saveName: string | null
     missingCount: number
     missingPlugins: string[]
+  }
+  /** Preflight pagefile Windows (gap Nolvus); assente = probe non eseguita/fallita. */
+  pagefile?: {
+    checked: boolean
+    concerning: boolean
+    detail: string
   }
 }
 
@@ -337,6 +347,20 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
       c.push(ok('VerifyManifest', 'Deploy integro', `${di.totalFiles} file del manifest verificati sul disco`))
   }
 
+  // 8b-bis. Deploy pendente: mod abilitate/priorità cambiate nel DB dopo l'ultimo deploy. I file
+  // su disco possono essere intatti (8b sopra "ok"), ma non riflettono più la selezione attuale —
+  // senza questo controllo il gioco parte silenziosamente sullo stato VECCHIO. Solo avviso (come
+  // 8b): un falso positivo non deve bloccare un avvio altrimenti sano.
+  if (env.pendingDeployChanges === true)
+    c.push(
+      warn(
+        'VerifyManifest',
+        'Deploy pendente',
+        'La selezione o l’ordine delle mod è cambiato dall’ultimo Deploy: il gioco partirebbe ancora sullo stato precedente',
+        'Esegui il Deploy dalla Dashboard per applicare le modifiche prima di avviare',
+      ),
+    )
+
   // 8c. Save Doctor + GATE ANTI-CORRUZIONE.
   // Il verdetto guarda lo STATO OSSERVATO, mai l'esito dell'azione di riparazione: un
   // deploy fallito ma con un deploy precedente ancora integro è un avvio sicuro, mentre
@@ -378,6 +402,18 @@ export function runLaunchWorkflow(env: LaunchEnv): LaunchReport {
   } else if (sd?.checked) {
     c.push(ok('VerifyLoadOrder', 'Salvataggio coerente', 'Tutti i plugin dell’ultimo save sono presenti'))
   }
+
+  // 8d. Pagefile Windows (gap Nolvus): un pagefile fisso troppo piccolo è una causa nota di
+  // crash sotto modding pesante — puramente informativo, mai un blocco.
+  if (env.pagefile?.checked && env.pagefile.concerning)
+    c.push(
+      warn(
+        'VerifyBackups',
+        'Pagefile Windows piccolo',
+        env.pagefile.detail,
+        'Aumenta la dimensione del pagefile (Pannello di controllo → Sistema → Impostazioni avanzate) o lascialo gestito automaticamente da Windows',
+      ),
+    )
 
   // 9. VerifyBackups (recommended)
   if (env.backups.count === 0)

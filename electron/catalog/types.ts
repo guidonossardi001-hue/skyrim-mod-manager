@@ -38,6 +38,13 @@ export interface ModCatalog {
   generated_at: string
   source: string
   mods: CatalogModEntry[]
+  /** Gap Vortex/Nolvus: versione MINIMA dell'app richiesta per ingerire questo catalogo.
+   *  Assente = nessun requisito (retro-compatibile con catalog storici mai firmati con questo
+   *  campo). Un'app più vecchia di questa versione RIFIUTA l'ingest invece di applicare
+   *  silenziosamente uno schema che potrebbe non capire del tutto — fail-closed, come firma e
+   *  freshness. Confrontata con compareVersions (electron/delta/version.ts), tollerante su
+   *  formati "1.2.0"/"v1.2.0"/ecc.  */
+  min_app_version?: string
 }
 
 export interface SignedCatalog {
@@ -54,6 +61,7 @@ export type CatalogErrorKind =
   | 'downgrade'
   | 'db'
   | 'network' // fetch layer: no connectivity, DNS, timeout, non-2xx, disallowed host/protocol
+  | 'incompatible' // min_app_version del catalogo > versione app corrente
 
 export interface CatalogIngestResult {
   success: boolean
