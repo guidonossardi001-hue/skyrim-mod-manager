@@ -282,7 +282,7 @@ export function DeployPanel({ profileId, onLog }: { profileId: number | null; on
     if (qacBusy) return
     if (
       !window.confirm(
-        `Pulire "${pluginName}" con SSEEdit (Quick Auto Clean)?\n\nApre xEdit in background e rimuove ITM/UDR automaticamente. Il gioco deve essere chiuso.`,
+        `Pulire "${pluginName}" con SSEEdit (Quick Auto Clean)?\n\nApre xEdit in background e rimuove ITM/UDR automaticamente. Il gioco deve essere chiuso.\n\n⚠ xEdit può mostrare un suo dialog (avviso versione 64bit o promemoria donazioni) al primo avvio — non è di questa app: se la pulizia sembra bloccata, controlla se una finestra xEdit aspetta un click e chiudila.`,
       )
     )
       return

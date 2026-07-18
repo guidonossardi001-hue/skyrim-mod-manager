@@ -47,6 +47,12 @@ describe('classifyQacRun', () => {
     expect(classifyQacRun({ logText: 'Removing: x', exceptionLogExists: false, timedOut: true }).verdict).toBe('timeout')
   })
 
+  it('timeout: messaggio indica il dialog bloccante xEdit (causa reale verificata dal vivo), non un timeout generico', () => {
+    const r = classifyQacRun({ logText: null, exceptionLogExists: false, timedOut: true })
+    expect(r.summary).toMatch(/dialog bloccante/i)
+    expect(r.summary).toMatch(/64bit/i)
+  })
+
   it('exception log presente → crashed', () => {
     expect(classifyQacRun({ logText: null, exceptionLogExists: true, timedOut: false }).verdict).toBe('crashed')
   })

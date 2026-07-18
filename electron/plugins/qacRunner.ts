@@ -76,7 +76,19 @@ export interface QacResult {
 /** Combina i segnali osservati (log, exception log, timeout/kill) in un verdetto onesto. */
 export function classifyQacRun(opts: { logText: string | null; exceptionLogExists: boolean; timedOut: boolean }): QacResult {
   if (opts.timedOut) {
-    return { verdict: 'timeout', summary: 'Processo terminato per timeout (nessun segnale di completamento nel tempo massimo)', log: null }
+    // Causa più comune verificata dal vivo (2026-07-18): xEdit NON è realmente headless — al
+    // primo avvio di sessione mostra dialog modali bloccanti (avviso versione 64bit, promemoria
+    // donazioni ElminsterAU) che windowsHide non sopprime (sono finestre GUI create dall'app
+    // stessa, non la finestra principale del processo). Nessun flag CLI/ini/registro noto li
+    // sopprime in modo permanente (ricerca dedicata su source xEdit + tool community PACT,
+    // github.com/GuidanceOfGrace/XEdit-PACT — nessuno dei due li gestisce). Il messaggio guida
+    // l'utente all'unica soluzione nota oggi: chiudere il dialog a mano una volta.
+    return {
+      verdict: 'timeout',
+      summary:
+        'xEdit non ha risposto entro il tempo massimo — probabile dialog bloccante (avviso versione 64bit o promemoria donazioni di xEdit, non di questa app): controlla se una finestra xEdit è in attesa di un click, chiudila, poi riprova',
+      log: null,
+    }
   }
   if (opts.exceptionLogExists) {
     return { verdict: 'crashed', summary: 'xEdit ha scritto un file di eccezione: il run è terminato con un errore', log: null }

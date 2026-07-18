@@ -40,3 +40,4 @@
 - 98529bd 2026-07-18 fix(lint): globals Node mancanti su .claude/hooks/*.mjs -- 1 file changed, 1 insertion(+), 1 deletion(-)
 - 34ef086 2026-07-18 feat(backlog): PIVOT-14 chiuso — preflight SKSE, validazione ESP, preset BethINI, grass cache autopilota, QAC headless -- 23 files changed, 2284 insertions(+), 15 deletions(-)
 - 7f0c64d 2026-07-18 feat(gaps): colma 12 gap architetturali vs Vortex/Nolvus + BodySlide nude/nevernude -- 43 files changed, 2948 insertions(+), 128 deletions(-)
+- 73ae564 2026-07-18 chore(log): traccia commit 7f0c64d in AUTO_LOG.md -- 1 file changed, 1 insertion(+)
