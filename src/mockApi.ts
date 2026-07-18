@@ -1093,6 +1093,7 @@ export const mockApi = {
     launchLOOT: ok,
     launchSSEEdit: ok,
     launchDynDOLOD: ok,
+    launchXLODGen: ok,
     launchPandora: async () => ({ success: true, code: 0 }),
     // Simulated 7-Zip validation: a path that names 7z/7za is "valid"; otherwise
     // pretend a standard install exists so the UX can be exercised in the browser.

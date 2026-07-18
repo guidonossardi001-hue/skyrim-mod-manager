@@ -148,6 +148,7 @@ contextBridge.exposeInMainWorld('api', {
     launchLOOT: () => invoke('tools:launch-loot'),
     launchSSEEdit: () => invoke('tools:launch-sseedit'),
     launchDynDOLOD: () => invoke('tools:launch-dyndolod'),
+    launchXLODGen: () => invoke('tools:launch-xlodgen'),
     launchPandora: () => invoke('tools:launch-pandora'),
     validate7z: (path?: string) => invoke('tools:validate-7z', path),
     pandoraPath: () => invoke('tools:pandora:path'),

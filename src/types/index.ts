@@ -391,6 +391,7 @@ declare global {
         launchLOOT(): Promise<{ success: boolean; error?: string }>
         launchSSEEdit(): Promise<{ success: boolean; error?: string }>
         launchDynDOLOD(): Promise<{ success: boolean; error?: string }>
+        launchXLODGen(): Promise<{ success: boolean; error?: string }>
         launchPandora(): Promise<{ success: boolean; code?: number; error?: string }>
         validate7z(
           path?: string,

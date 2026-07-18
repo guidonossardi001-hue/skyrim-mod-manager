@@ -3051,6 +3051,7 @@ const TOOL_BINARIES: Record<string, RegExp> = {
   sseeditPath: /^(sseedit|sseedit64|xedit|xedit64)\.exe$/i,
   dyndolodPath: /^dyndolod(x?64)?\.exe$/i,
   pandoraPath: /^pandora.*\.exe$/i,
+  xlodgenPath: /^xlodgen(x?64)?\.exe$/i,
 }
 const toolPath = (key: string): string | null => {
   const p = store.get(key)
@@ -3084,6 +3085,7 @@ ipcMain.handle('tools:launch-loot', () => {
 })
 ipcMain.handle('tools:launch-sseedit', () => launchTool(toolPath('sseeditPath')))
 ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath')))
+ipcMain.handle('tools:launch-xlodgen', () => launchTool(toolPath('xlodgenPath')))
 
 // ── T14 — Preflight DLL SKSE: legge l'export SKSEPlugin_Version di ogni plugin in
 // Data/SKSE/Plugins e lo confronta con la versione runtime dell'exe. Sola lettura.

@@ -626,6 +626,10 @@ export default function Tools() {
             ? window.api.tools.launchDynDOLOD()
             : Promise.resolve({ success: false, error: 'Percorso DynDOLOD non configurato' }),
         ),
+      // Gratis ma SOLO su Nexus (nessuna release GitHub/link diretto esiste per DynDOLOD
+      // — verificato su dyndolod.info/Downloads): "Scarica strumenti mancanti" in Impostazioni
+      // non può includerlo, quindi qui c'è il link diretto alla pagina ufficiale gratuita.
+      url: 'https://www.nexusmods.com/skyrimspecialedition/mods/DynDOLOD-3/68518',
     },
     {
       id: 'pandora',
@@ -646,7 +650,15 @@ export default function Tools() {
       desc: 'LOD per terreni e oggetti statici',
       color: '#4dffaa',
       icon: Globe,
-      url: 'https://stepmodifications.org/forum/topic/13451-xlodgen-terrain-lod-beta/',
+      launch: () =>
+        runTool('xlodgen', () =>
+          settings.xlodgenPath
+            ? window.api.tools.launchXLODGen()
+            : Promise.resolve({ success: false, error: 'Percorso xLODGen non configurato' }),
+        ),
+      // Gratis, release ufficiali su GitHub (sheson/xLODGen) — "Scarica strumenti mancanti"
+      // in Impostazioni lo scarica ed configura in automatico; questo resta il link diretto.
+      url: 'https://github.com/sheson/xLODGen/releases/latest',
     },
   ]
 
