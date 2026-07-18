@@ -22,6 +22,20 @@ import { queryPagefileInfo, evaluatePagefile } from './pagefileCheck'
 /** Chiave setting: ultima versione del runtime vista a un lancio riuscito (drift detection). */
 export const LAST_GAME_VERSION_KEY = 'lastKnownGameVersion'
 
+/** Chiave setting: cache del probe pagefile (PowerShell/CIM). Lo spawn di powershell.exe
+ *  costa ~1-2s ad ogni chiamata (avvio CLR + provider CIM) — il dato che verifica (dimensione
+ *  pagefile) cambia solo se l'utente tocca le impostazioni di sistema, mai da un lancio
+ *  all'altro. Rieseguire il probe ad OGNI avvio (come faceva prima) è il gap di latenza più
+ *  grosso di buildLaunchEnv rispetto a Nolvus, che non fa alcun preflight. TTL 24h: abbastanza
+ *  corto da non nascondere un cambio reale, abbastanza lungo da renderlo gratis su ogni lancio. */
+export const PAGEFILE_CACHE_KEY = 'pagefileProbeCache'
+const PAGEFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000
+
+interface PagefileCacheEntry {
+  checkedAt: number
+  info: import('./pagefileCheck').PagefileInfo
+}
+
 /** FsOps reali dell'update guard (Windows: bit di scrittura ↔ attributo read-only). */
 export const realGuardFs: UpdateGuardFsOps = {
   exists: existsSync,
@@ -165,7 +179,13 @@ export function activeDeployDataDir(db: Database.Database, store: Store, gamePat
 // the gate decision is enforced HERE in main before any process is spawned.
 
 export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
+  const __t: Record<string, number> = {}
+  const __mark = (label: string) => {
+    __t[label] = Date.now()
+  }
+  __mark('start')
   const { steam, skyrim } = detectSteamEnv()
+  __mark('steam')
 
   // SKSE presence + real game-version compatibility (T5).
   const gamePath = skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
@@ -209,6 +229,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
       return p
     }
   })
+  __mark('plugins+headers')
 
   // Mods / modlist completeness from the DB (active profile).
   const profileId = resolveActiveProfileId(db, store)
@@ -217,6 +238,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
     .all(profileId) as { name: string; is_enabled: number; is_installed: number }[]
   const installed = mods.filter((m) => m.is_installed).length
   const enabled = mods.filter((m) => m.is_enabled).length
+  __mark('mods-query')
 
   let missing: string[] = []
   try {
@@ -245,6 +267,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   } catch {
     /* */
   }
+  __mark('missing+manifest+backups')
 
   // Update guard: stato protezione acf + drift della versione runtime dall'ultimo lancio.
   let updateGuard: LaunchEnv['updateGuard']
@@ -258,6 +281,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   } catch {
     updateGuard = undefined
   }
+  __mark('updateGuard')
 
   // Integrità del deploy (external changes): manifest vs disco, sola lettura.
   let deployIntegrity: LaunchEnv['deployIntegrity']
@@ -276,6 +300,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   } catch {
     deployIntegrity = undefined
   }
+  __mark('deployIntegrity')
 
   // Deploy pendente: la selezione/priorità mod CORRENTE nel DB differisce dal fingerprint
   // salvato nell'ultimo manifest? I file su disco possono essere intatti (deployIntegrity ok)
@@ -301,6 +326,7 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   } catch {
     pendingDeployChanges = undefined
   }
+  __mark('pendingDeployChanges')
 
   // Save Doctor: ultimo salvataggio vs load order attivo (fail-soft: mai warning spuri).
   let saveDoctor: LaunchEnv['saveDoctor']
@@ -315,15 +341,32 @@ export function buildLaunchEnv(db: Database.Database, store: Store): LaunchEnv {
   } catch {
     saveDoctor = undefined
   }
+  __mark('saveDoctor')
 
   // Pagefile Windows (gap Nolvus): fail-soft, mai un blocco — solo un avviso se fisso e sotto
   // 20GB. Probe fallito (PowerShell assente/timeout) → checked:false, nessun avviso spurio.
+  // Cache TTL 24h (vedi PAGEFILE_CACHE_KEY): risparmia lo spawn di powershell.exe su ogni
+  // lancio, il costo fisso più alto di questa funzione.
   let pagefile: LaunchEnv['pagefile']
   try {
-    pagefile = evaluatePagefile(queryPagefileInfo())
+    const cached = store.get(PAGEFILE_CACHE_KEY) as PagefileCacheEntry | undefined
+    const fresh = cached && Date.now() - cached.checkedAt < PAGEFILE_CACHE_TTL_MS
+    const info = fresh ? cached!.info : queryPagefileInfo()
+    if (!fresh) store.set(PAGEFILE_CACHE_KEY, { checkedAt: Date.now(), info } as PagefileCacheEntry)
+    pagefile = evaluatePagefile(info)
   } catch {
     pagefile = undefined
   }
+  __mark('pagefile')
+
+  const __order = ['start', 'steam', 'plugins+headers', 'mods-query', 'missing+manifest+backups', 'updateGuard', 'deployIntegrity', 'pendingDeployChanges', 'saveDoctor', 'pagefile']
+  const __parts: string[] = []
+  for (let i = 1; i < __order.length; i++) {
+    if (__t[__order[i]] != null && __t[__order[i - 1]] != null)
+      __parts.push(`${__order[i]}=${__t[__order[i]] - __t[__order[i - 1]]}ms`)
+  }
+  // eslint-disable-next-line no-console
+  console.log(`[PERF buildLaunchEnv] total=${Date.now() - __t.start}ms | ${__parts.join(' ')}`)
 
   return {
     steam,
