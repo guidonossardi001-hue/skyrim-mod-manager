@@ -41,7 +41,7 @@ import { getLoadOrder, saveLoadOrder } from './pluginManager'
 import type { LoadOrderEntry } from '../src/types'
 import { ensureSteamReady, liveSteamProbe, startSteam } from './steam/steamControl'
 import { resolveBootstrapper } from './launch/bootstrapper'
-import { initCrashEngine, armCrashWatch } from './launch/crashEngine'
+import { initCrashEngine, armCrashWatch, findMissedCrash, isGameRunning } from './launch/crashEngine'
 import { initEnbEngine } from './enb/engine'
 import { runActiveLaunch, type ActiveLaunchDeps } from './launch/activeLaunch'
 import { checkForLauncherUpdate } from './launch/launcherUpdate'
@@ -682,6 +682,9 @@ app.whenReady().then(() => {
       deployTargetIsGame() ? resolveGameDataDir() : join(resolveStockTarget(), 'Data'),
     // Sulla Data del gioco reale l'euristica nlink è VIETATA: solo purge da manifest.
     allowHeuristics: () => !deployTargetIsGame(),
+    // Gate anti-corruzione: mai deploy/purge/eslify con SkyrimSE in esecuzione. Vale
+    // anche per la riparazione automatica (usa lo stesso runDeploy). Solo target game.
+    isGameBusy: () => deployTargetIsGame() && isGameRunning(),
     // plugins.txt DI SISTEMA: %LOCALAPPDATA%/Skyrim Special Edition — è quello che il gioco legge
     // quando parte via SKSE diretto (senza MO2). Scritto solo se la cartella esiste già (gioco
     // installato/avviato almeno una volta): non creiamo alberi in LOCALAPPDATA al buio.
@@ -797,21 +800,32 @@ app.whenReady().then(() => {
   const armPostLaunchCrashWatch = () => {
     armCrashWatch({
       sinceMs: Date.now(),
-      onFound: ({ file, report, analysis }) => {
+      onFound: ({ file, report, analysis, gameStillRunning }) => {
         logger.warn(
           'crash',
-          `crash rilevato dopo il lancio: ${file}${analysis.culprit ? ` — modulo probabile: ${analysis.culprit.module}` : ''}`,
+          `crash rilevato dopo il lancio: ${file}${analysis.culprit ? ` — modulo probabile: ${analysis.culprit.module}` : ''}${gameStillRunning ? ' — PROCESSO ANCORA VIVO (crash continuable, zombie)' : ''}`,
         )
+        // Path persistito: la scansione di recupero al prossimo avvio non ri-notifica.
+        try {
+          store.set('lastNotifiedCrashLog', file)
+        } catch {
+          /* best-effort */
+        }
         try {
           if (mainWindow && !mainWindow.isDestroyed())
             mainWindow.webContents.send('crash:detected', {
               file,
               exceptionType: report.exceptionType,
               culpritModule: analysis.culprit?.module ?? null,
-              suggestions: analysis.suggestions,
+              suggestions: gameStillRunning
+                ? [
+                    'Il processo di gioco risulta ANCORA in esecuzione: è un crash "continuable" (zombie) — lo schermo può sembrare solo bloccato. Chiudi SkyrimSE dal Task Manager e rilancia.',
+                    ...analysis.suggestions,
+                  ]
+                : analysis.suggestions,
             })
         } catch {
-          /* finestra chiusa: resta il log */
+          /* finestra chiusa: resta il log; la scansione di recupero al prossimo avvio copre */
         }
       },
     })
@@ -915,6 +929,41 @@ app.whenReady().then(() => {
   // Compone l'IO reale per runAutoRepair: registra le estrazioni, verifica il deploy e,
   // se serve, ridistribuisce — ed è il deploy a ordinare i plugin e scrivere plugins.txt.
   // Usa lo STESSO runDeploy del bottone Deploy (nessuna logica duplicata).
+  // Scansione di RECUPERO crash all'avvio: il watch post-lancio muore col launcher mentre
+  // il gioco è detached — un crash avvenuto a launcher chiuso non veniva MAI segnalato.
+  // Qui: log più recente dell'ultimo lancio riuscito e non già notificato → stesso toast.
+  try {
+    const lastLaunchAt = readSmartStartup(store as unknown as KeyValueStore).lastLaunchAt
+    if (lastLaunchAt) {
+      const missed = findMissedCrash(Date.parse(lastLaunchAt), store.get('lastNotifiedCrashLog') as string | undefined)
+      if (missed) {
+        logger.warn('crash', `crash NON notificato trovato al riavvio: ${missed.file}`)
+        store.set('lastNotifiedCrashLog', missed.file)
+        const payload = {
+          file: missed.file,
+          exceptionType: missed.report.exceptionType,
+          culpritModule: missed.analysis.culprit?.module ?? null,
+          suggestions: [
+            'Crash rilevato da una sessione precedente (il launcher era chiuso quando è avvenuto).',
+            ...missed.analysis.suggestions,
+          ],
+        }
+        // La finestra potrebbe non essere ancora pronta: consegna al primo paint utile.
+        const deliver = () => {
+          try {
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('crash:detected', payload)
+          } catch {
+            /* resta il log */
+          }
+        }
+        if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isLoading()) deliver()
+        else setTimeout(deliver, 6000)
+      }
+    }
+  } catch (e) {
+    logger.warn('crash', `scansione di recupero crash fallita: ${(e as Error).message}`)
+  }
+
   const performAutoRepair = (): Promise<AutoRepairResult> =>
     runAutoRepair({
       enabled: () => store.get('autoRepair') !== false, // default ON: l'utente può spegnerla

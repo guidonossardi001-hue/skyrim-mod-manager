@@ -467,6 +467,7 @@ declare global {
             | 'source-missing'
             | 'dependency-cycle'
             | 'missing-master'
+            | 'game-running'
             | 'cleanup'
             | 'link'
             | 'db'
@@ -667,6 +668,8 @@ declare global {
           analysis?: {
             culprit: { index: number; address: string; module: string; offset: string; instruction: string | null } | null
             suggestions: string[]
+            // Firme note (DB derivato da Phostwood's Crash Log Analyzer, GPL-3.0).
+            knownPatterns?: { id: string; label: string; matched: string[]; advice: string; priority: number }[]
           }
           rawExcerpt?: string
           error?: string

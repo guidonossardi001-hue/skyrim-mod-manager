@@ -38,6 +38,14 @@ export interface DeployVerifyResult {
 
 const SAMPLE_CAP = 8
 
+// File del manifest che i TOOL DEL LAUNCHER sostituiscono legittimamente con copie reali
+// (nlink 1): contarli come "sostituiti esternamente" innescava il rideploy della riparazione
+// automatica A OGNI avvio (caso reale: la card BodySlide riscrive Config.xml prima di ogni
+// build → drift perenne da 1 file). Qui vengono ignorati sia per missing che per replaced.
+export const TOOL_MANAGED_RELS = new Set(['calientetools/bodyslide/config.xml'])
+
+const isToolManaged = (rel: string): boolean => TOOL_MANAGED_RELS.has(rel.replace(/\\/g, '/').toLowerCase())
+
 const EMPTY: DeployVerifyResult = {
   checked: false,
   totalFiles: 0,
@@ -74,6 +82,10 @@ export function verifyDeployedInstance(instanceDataDir: string, io: VerifyIo): D
   let intactFiles = 0
 
   for (const rel of manifest.files) {
+    if (isToolManaged(rel)) {
+      intactFiles++
+      continue
+    }
     const abs = join(instanceDataDir, rel)
     let st: ReturnType<VerifyIo['lstat']> = null
     try {

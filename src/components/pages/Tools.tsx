@@ -1095,6 +1095,23 @@ export default function Tools() {
                 <span className="text-dark-200">{s}</span>
               </div>
             ))}
+            {(crashResult.analysis?.knownPatterns?.length ?? 0) > 0 && (
+              <div className="space-y-1.5">
+                <p className="text-dark-400 font-semibold">
+                  Firme note riconosciute{' '}
+                  <span className="font-normal">(database derivato da Phostwood's Crash Log Analyzer)</span>:
+                </p>
+                {crashResult.analysis!.knownPatterns!.map((p) => (
+                  <div key={p.id} className="rounded-lg bg-red-900/15 border border-red-900/40 px-3 py-2">
+                    <p className="text-white/85 font-medium">
+                      {p.label}{' '}
+                      <span className="font-mono text-[10px] text-dark-400">[{p.matched.join(', ')}]</span>
+                    </p>
+                    <p className="text-dark-300 mt-0.5">{p.advice}</p>
+                  </div>
+                ))}
+              </div>
+            )}
             {crashResult.rawExcerpt && (
               <details className="mt-2">
                 <summary className="cursor-pointer text-dark-400 hover:text-white/80">Estratto grezzo (prime righe)</summary>

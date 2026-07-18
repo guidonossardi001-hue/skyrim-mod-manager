@@ -101,7 +101,42 @@ export async function createProfileBackup(
     dbSnapshotPath = join(backupDir, `${name}.db`)
     snapshotDatabase(db, dbSnapshotPath) // whole-DB rollback point (incl. versioning tables)
   }
+  // Rotazione dei backup AUTOMATICI: la riparazione pre-avvio ne crea uno a ogni GIOCA
+  // e senza pruning la cartella cresce per sempre (2 file a lancio, all'infinito). Solo
+  // gli automatici con la STESSA label vengono potati; i backup manuali non si toccano.
+  if (label) pruneLabelledBackups(backupDir, label, AUTO_BACKUP_KEEP)
   return { success: true, name, path: destPath, size: compressed.length, sha256, dbSnapshotPath }
+}
+
+/** Quanti backup tenere per ciascuna label automatica (i più recenti). */
+export const AUTO_BACKUP_KEEP = 10
+
+/** Pota i backup di una label oltre `keep` (più vecchi prima), inclusi sidecar .sha256 e .db. */
+export function pruneLabelledBackups(backupDir: string, label: string, keep: number): number {
+  try {
+    const prefix = sanitize(label) + '_'
+    const entries = readdirSync(backupDir)
+      .filter((f) => f.startsWith(prefix) && /\.json(\.gz)?$/.test(f))
+      .map((f) => ({ f, mtimeMs: statSync(join(backupDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+    let removed = 0
+    for (const e of entries.slice(Math.max(0, keep))) {
+      for (const victim of [e.f, `${e.f}.sha256`, e.f.replace(/\.json(\.gz)?$/, '.db')]) {
+        try {
+          const p = join(backupDir, victim)
+          if (existsSync(p)) {
+            rmSync(p, { force: true })
+            removed++
+          }
+        } catch {
+          /* singolo file bloccato: si riprova alla prossima rotazione */
+        }
+      }
+    }
+    return removed
+  } catch {
+    return 0 // il pruning non deve MAI far fallire la creazione del backup
+  }
 }
 
 export async function listBackups(backupDir: string): Promise<BackupEntry[]> {

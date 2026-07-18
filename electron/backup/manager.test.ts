@@ -1,11 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync } from 'fs'
+import { mkdtempSync, rmSync, writeFileSync, existsSync, statSync, utimesSync, readdirSync } from 'fs'
 import { gzipSync } from 'zlib'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { type SqliteDb, applyPragmas, integrityCheck } from '../db/sqlite'
 import { openTestDb } from '../db/openTestDb'
-import { createProfileBackup, listBackups, restoreProfileBackup, deleteBackup } from './manager'
+import { createProfileBackup, listBackups, restoreProfileBackup, deleteBackup, pruneLabelledBackups } from './manager'
 import { writeChecksumSidecar } from './snapshot'
 
 const dirs: string[] = []
@@ -197,5 +197,29 @@ describe('backup manager core', () => {
     expect(existsSync(join(dir, 'x.json'))).toBe(false)
     expect(existsSync(join(dir, 'x.json.gz'))).toBe(false)
     expect(existsSync(join(dir, 'x.json.sha256'))).toBe(false)
+  })
+
+  it('ROTAZIONE: i backup auto oltre il limite vengono potati (piu vecchi prima), i manuali restano', async () => {
+    const dir = tmp()
+    // 4 auto con mtime crescenti + 1 manuale che NON va toccato.
+    for (let i = 0; i < 4; i++) {
+      const f = join(dir, `auto-pre-repair_2026-07-1${i}T00-00-00-000Z.json.gz`)
+      writeFileSync(f, gzipSync('{}'))
+      writeFileSync(f + '.sha256', 'x')
+      const t = new Date(2026, 6, 10 + i)
+      utimesSync(f, t, t)
+    }
+    writeFileSync(join(dir, 'manuale.json.gz'), gzipSync('{}'))
+    const removed = pruneLabelledBackups(dir, 'auto-pre-repair', 2)
+    expect(removed).toBeGreaterThanOrEqual(2)
+    const left = readdirSync(dir).filter((f: string) => f.endsWith('.json.gz'))
+    expect(left).toHaveLength(3) // 2 auto recenti + 1 manuale
+    expect(left).toContain('manuale.json.gz')
+    expect(left).not.toContain('auto-pre-repair_2026-07-10T00-00-00-000Z.json.gz')
+  })
+
+  it('ROTAZIONE: cartella inesistente o label senza file → 0, mai throw', () => {
+    expect(pruneLabelledBackups('Z:/non/esiste', 'auto-pre-repair', 5)).toBe(0)
+    expect(pruneLabelledBackups(tmp(), 'mai-vista', 5)).toBe(0)
   })
 })

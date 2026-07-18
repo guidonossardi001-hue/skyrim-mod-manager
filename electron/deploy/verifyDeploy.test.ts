@@ -80,6 +80,20 @@ describe('verifyDeployedInstance', () => {
     expect(hasDeployDrift(r)).toBe(false)
   })
 
+  it('TOOL-MANAGED: Config.xml di BodySlide riscritto (nlink 1) NON è drift', () => {
+    // Caso reale: la card BodySlide riscrive Config.xml come file reale prima di ogni
+    // build → senza whitelist il verify segnava 1 "replaced" per sempre e la riparazione
+    // automatica rideployava a OGNI avvio.
+    const io = fakeIo(manifestJson(['a.esp', 'CalienteTools\\BodySlide\\Config.xml']), {
+      [join(DATA, 'a.esp')]: { nlink: 2 },
+      [join(DATA, 'CalienteTools\\BodySlide\\Config.xml')]: { nlink: 1 },
+    })
+    const r = verifyDeployedInstance(DATA, io)
+    expect(r.replacedCount).toBe(0)
+    expect(r.intactFiles).toBe(2)
+    expect(hasDeployDrift(r)).toBe(false)
+  })
+
   it('file cancellato esternamente → missing', () => {
     const io = fakeIo(manifestJson(['a.esp', 'b.esp']), {
       [join(DATA, 'a.esp')]: { nlink: 2 },

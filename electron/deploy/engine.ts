@@ -33,6 +33,9 @@ export interface DeployEngineOptions {
   // false quando il target di deploy è una directory CONDIVISA (Data del gioco reale): vieta
   // ogni pulizia/purge euristica nlink — solo manifest esatto. Default true (istanza dedicata).
   allowHeuristics?: () => boolean
+  /** true = il GIOCO è in esecuzione: deploy/purge/eslify vietati (Data incoerente sotto un
+   *  processo vivo). Iniettata dal main (tasklist); assente = nessun gate (test/istanza). */
+  isGameBusy?: () => boolean
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -46,6 +49,14 @@ export function initDeployEngine(opts: DeployEngineOptions) {
     onProgress?: (p: unknown) => void,
   ): Promise<DeployResult> => {
     try {
+      if (opts.isGameBusy?.()) {
+        opts.log?.('warn', 'deploy rifiutato: SkyrimSE è in esecuzione')
+        return {
+          success: false,
+          errorKind: 'game-running',
+          error: 'Skyrim è in esecuzione: chiudi il gioco prima di eseguire il Deploy (sostituire i file sotto un processo vivo lascerebbe la Data incoerente).',
+        }
+      }
       const dir = opts.resolveInstanceDataDir(profileId)
       if (!dir) {
         opts.log?.('warn', `deploy: percorso istanza non risolvibile per profilo ${profileId}`)
@@ -88,6 +99,18 @@ export function initDeployEngine(opts: DeployEngineOptions) {
   // abilitata SOLO qui come fallback legacy: il target istanza è dedicato (mai vanilla dentro).
   ipcMain.handle('deploy:purge', (_e, profileId: number): PurgeResult & { error?: string } => {
     try {
+      if (opts.isGameBusy?.()) {
+        return {
+          success: false,
+          manifestFound: false,
+          filesRemoved: 0,
+          junctionsRemoved: 0,
+          dirsPruned: 0,
+          skipped: 0,
+          systemPluginsRestored: false,
+          error: 'Skyrim è in esecuzione: chiudi il gioco prima del purge.',
+        }
+      }
       const dir = opts.resolveInstanceDataDir(profileId)
       if (!dir)
         return {
@@ -182,6 +205,9 @@ export function initDeployEngine(opts: DeployEngineOptions) {
       error?: string
     } => {
       try {
+        // Il flag light cambia l'header di plugin che il gioco ha caricato: mai a gioco vivo.
+        if (apply && opts.isGameBusy?.())
+          return { ok: false, error: 'Skyrim è in esecuzione: chiudi il gioco prima di flaggare i plugin.' }
         const preview = previewDeploy(opts.db, {
           profileId,
           stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,

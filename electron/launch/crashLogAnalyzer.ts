@@ -5,6 +5,8 @@
 // e onesta — identifica il modulo probabile colpevole dalla call stack e mostra sempre le
 // sezioni strutturate, mai solo un dump grezzo.
 
+import { matchCrashPatterns, type CrashPatternMatch } from './crashPatterns'
+
 export interface CallStackFrame {
   index: number
   address: string
@@ -143,16 +145,18 @@ export function parseCrashLog(text: string): CrashLogReport {
 export interface CrashAnalysis {
   culprit: CallStackFrame | null
   suggestions: string[]
+  /** Firme note riconosciute nel log (DB derivato da Phostwood, vedi crashPatterns.ts). */
+  knownPatterns?: CrashPatternMatch[]
 }
 
 /**
- * Euristica strutturale, piccola e onesta: NON è un database di pattern noti (a differenza di
- * Phostwood's Crash Log Analyzer, che è un servizio web con regole aggiornate costantemente).
- * Identifica il modulo probabile colpevole + una manciata di suggerimenti strutturali quando
- * applicabili (stack overflow, nessun SKSE plugin caricato). Il report strutturato completo va
- * sempre mostrato accanto: qui non c'è alcuna pretesa di coprire tutti i casi.
+ * Euristica strutturale (modulo colpevole + suggerimenti strutturali) POTENZIATA dal
+ * database di firme note derivato da Phostwood's Crash Log Analyzer (crashPatterns.ts):
+ * passando il testo grezzo, le categorie riconosciute (driver GPU, behaviour, fisiche,
+ * memoria, …) arrivano con consigli ricollegati alle azioni del launcher. Il report
+ * strutturato completo va sempre mostrato accanto: nessuna pretesa di coprire ogni caso.
  */
-export function analyzeCrashLog(report: CrashLogReport): CrashAnalysis {
+export function analyzeCrashLog(report: CrashLogReport, rawText?: string): CrashAnalysis {
   const suggestions: string[] = []
   const culprit = findProbableCulprit(report.callStack)
 
@@ -178,5 +182,6 @@ export function analyzeCrashLog(report: CrashLogReport): CrashAnalysis {
     )
   }
 
-  return { culprit, suggestions }
+  const knownPatterns = rawText ? matchCrashPatterns(rawText) : undefined
+  return { culprit, suggestions, knownPatterns: knownPatterns?.length ? knownPatterns : undefined }
 }

@@ -275,21 +275,28 @@ export function initDownloadManager(
 
     // Cache hit → skip the network, but STILL gate: a cached archive on disk is untrusted
     // (a prior poisoned download, or a planted file) and must pass integrity before install.
+    // Il ramo è DENTRO un try: un errore IO durante il gate (antivirus che tiene l'handle,
+    // file svanito tra find e read) era un unhandled rejection e la riga restava 'pending'
+    // per sempre — senza evento al renderer né retry. Ora fallisce come integrità.
     const cached = findCachedArchive(row)
     if (cached) {
-      const gate = await integrityGate(row, cached)
-      if (!gate.ok) {
-        failIntegrity(downloadId, row, gate.reason ?? 'cache non verificata')
-        return
+      try {
+        const gate = await integrityGate(row, cached)
+        if (!gate.ok) {
+          failIntegrity(downloadId, row, gate.reason ?? 'cache non verificata')
+          return
+        }
+        logger.info('download', `Cache hit per "${row.name}" → ${cached}`)
+        db.prepare(
+          "UPDATE downloads SET status='completed', file_path=?, downloaded_size=total_size WHERE id=?",
+        ).run(cached, downloadId)
+        attempts.delete(downloadId)
+        breaker.recordSuccess()
+        win()?.webContents.send('download:complete', { id: downloadId, cached: true })
+        onInstall?.(downloadId)
+      } catch (e) {
+        failIntegrity(downloadId, row, `cache illeggibile: ${(e as Error).message}`)
       }
-      logger.info('download', `Cache hit per "${row.name}" → ${cached}`)
-      db.prepare(
-        "UPDATE downloads SET status='completed', file_path=?, downloaded_size=total_size WHERE id=?",
-      ).run(cached, downloadId)
-      attempts.delete(downloadId)
-      breaker.recordSuccess()
-      win()?.webContents.send('download:complete', { id: downloadId, cached: true })
-      onInstall?.(downloadId)
       return
     }
 
