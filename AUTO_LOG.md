@@ -42,3 +42,8 @@
 - 7f0c64d 2026-07-18 feat(gaps): colma 12 gap architetturali vs Vortex/Nolvus + BodySlide nude/nevernude -- 43 files changed, 2948 insertions(+), 128 deletions(-)
 - 73ae564 2026-07-18 chore(log): traccia commit 7f0c64d in AUTO_LOG.md -- 1 file changed, 1 insertion(+)
 - fd891f9 2026-07-18 fix(qac): timeout onesto + avviso preventivo per dialog xEdit bloccanti -- 4 files changed, 21 insertions(+), 2 deletions(-)
+- ed3d629 2026-07-18 feat(qac): auto-dismiss dei dialog bloccanti xEdit (fix strutturale) -- 8 files changed, 488 insertions(+), 9 deletions(-)
+- adfaf4b 2026-07-18 perf(launch): cache pagefile PowerShell probe (24h TTL) -- 1 file changed, 44 insertions(+), 1 deletion(-)
+- 4e50b01 2026-07-18 feat(tools): pulsante Avvia per xLODGen + link download aggiornato -- 5 files changed, 18 insertions(+), 1 deletion(-)
+- f088dbf 2026-07-18 fix(security): patch adm-zip, confine backup restore/delete paths, harden CSP -- 4 files changed, 34 insertions(+), 16 deletions(-)
+- 551d19d 2026-07-18 feat(dashboard): badge DynDOLOD/percorso cliccabili verso Nexus (gratis, manuale) -- 2 files changed, 43 insertions(+), 6 deletions(-)
