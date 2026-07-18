@@ -128,6 +128,51 @@ describe('computeDeployPlan — junction vs hardlink', () => {
   })
 })
 
+describe('computeDeployPlan — alberi forzati a hardlink (scanner ciechi ai reparse point)', () => {
+  it('NON junctiona le sottocartelle scena OStim single-provider: restano hardlink reali', () => {
+    // Caso reale: OStim scandisce SKSE/Plugins/OStim/scenes senza seguire i reparse point.
+    // Con la sottocartella junctionata leggeva 0 scene ("scene integrity could not be verified").
+    const plan = computeDeployPlan([
+      mod('OStimBase', 1, ['SKSE/Plugins/OStim/scenes/OStim1P/OStim1P.json', 'root.esp']),
+    ])
+    expect(junctionDirs(plan)).toEqual([]) // niente junction sotto l'albero scene
+    expect(hardlinkRels(plan)).toEqual(['SKSE/Plugins/OStim/scenes/OStim1P/OStim1P.json', 'root.esp'])
+  })
+
+  it('NON junctiona le sottocartelle script Lexicon: LEX/AVG devono leggere i .lsi', () => {
+    // SKSE/Lexicon/scripts/<mod>/*.lsi con provider unici per sottocartella verrebbero junctionati;
+    // il runtime Lexicon scandisce ricorsivamente e non seguirebbe i reparse point.
+    const plan = computeDeployPlan([
+      mod('LEX', 1, ['SKSE/Lexicon/scripts/Shared/Commons.lsi']),
+      mod('AVG', 2, ['SKSE/Lexicon/scripts/ActorValueGenerator/Commons.lsi']),
+    ])
+    expect(plan.junctions).toHaveLength(0)
+    expect(hardlinkRels(plan)).toEqual([
+      'SKSE/Lexicon/scripts/ActorValueGenerator/Commons.lsi',
+      'SKSE/Lexicon/scripts/Shared/Commons.lsi',
+    ])
+  })
+
+  it('fix mirato: un albero fuori dalla lista forzata resta ottimizzato a junction', () => {
+    // La stessa mod fornisce una scena OStim (forzata a hardlink) e un albero textures normale.
+    const plan = computeDeployPlan([
+      mod('M', 1, ['SKSE/Plugins/OStim/scenes/X/y.json', 'textures/foo/bar.dds']),
+    ])
+    expect(junctionDirs(plan)).toEqual(['textures']) // textures single-provider → junction come prima
+    expect(hardlinkRels(plan)).toEqual(['SKSE/Plugins/OStim/scenes/X/y.json']) // la scena resta reale
+  })
+
+  it('la lista dei prefissi forzati è iniettabile (parametro)', () => {
+    const files = ['custom/tree/sub/a.json']
+    const withForce = computeDeployPlan([mod('M', 1, files)], [], ['custom/tree'])
+    expect(withForce.junctions).toHaveLength(0)
+    expect(hardlinkRels(withForce)).toEqual(files)
+    // senza il prefisso, la cartella single-provider più alta torna una junction
+    const withoutForce = computeDeployPlan([mod('M', 1, files)], [], [])
+    expect(junctionDirs(withoutForce)).toEqual(['custom'])
+  })
+})
+
 describe('computeDeployPlan — automatic conflict resolution', () => {
   it('two textures on the same file: higher resolutionWeight (4K) wins over 2K, no throw', () => {
     // Note: the 4K mod has the LOWER priority (2 < 5) yet still wins — Rule 2

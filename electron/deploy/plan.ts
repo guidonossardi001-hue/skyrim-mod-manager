@@ -228,7 +228,31 @@ export interface FileConflictRule {
   winnerMod: string
 }
 
-export function computeDeployPlan(mods: DeployMod[], fileRules: FileConflictRule[] = []): DeployPlan {
+// Directory (Data-relative, minuscole) che DEVONO restare cartelle REALI con file hardlinkati,
+// MAI promosse a junction — nemmeno quando sono a proprietario unico. Alcuni plugin SKSE
+// enumerano da soli questi alberi con una ricorsione che NON attraversa i reparse point
+// (junction/symlink): trovano ciò che sta nella cartella scandita ma NON discendono nelle
+// sottocartelle junctionate. Un hardlink è una normale voce di directory, trasparente a
+// QUALSIASI scanner. Aggiungere qui un albero solo con prova che un plugin lo scandisce da sé
+// e ha sottocartelle che il deploy junctiona (provider unico per sottocartella).
+//   • skse/plugins/ostim/scenes — OStim (recursive_directory_iterator senza follow_directory_symlink):
+//     con le sottocartelle scena junctionate legge 0 scene → in gioco "scene integrity could not be
+//     verified" (log: "scene count mismatch: expected N, encountered 0").
+//   • skse/lexicon — runtime di scripting Lexicon (LEX) e i suoi client (es. ActorValueGenerator):
+//     scandisce SKSE/Lexicon/scripts per i .lsi; le sottocartelle per-mod (Shared, ActorValueGenerator)
+//     vengono junctionate e gli script dentro non verrebbero caricati.
+export const FORCE_HARDLINK_DIR_PREFIXES: readonly string[] = ['skse/plugins/ostim/scenes', 'skse/lexicon']
+
+export function computeDeployPlan(
+  mods: DeployMod[],
+  fileRules: FileConflictRule[] = [],
+  forceHardlinkPrefixes: readonly string[] = FORCE_HARDLINK_DIR_PREFIXES,
+): DeployPlan {
+  // Prefissi normalizzati: una directory che è (o sta sotto, o è antenata di) un prefisso forzato
+  // non diventa junction — i suoi file ricadono sugli hardlink individuali del loop finale.
+  const forced = forceHardlinkPrefixes.map((p) => normRel(p).toLowerCase()).filter(Boolean)
+  const touchesForced = (dirLc: string) =>
+    forced.some((p) => dirLc === p || dirLc.startsWith(`${p}/`) || p.startsWith(`${dirLc}/`))
   const pinnedWinnerByPath = new Map<string, string>()
   for (const r of fileRules) pinnedWinnerByPath.set(normRel(r.relPath).toLowerCase(), r.winnerMod.toLowerCase())
   // Deterministic base order (ascending priority, name tie-break) so candidate
@@ -334,6 +358,9 @@ export function computeDeployPlan(mods: DeployMod[], fileRules: FileConflictRule
     .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b))
   for (const dirLc of dirsByDepth) {
     if (underJunction(dirLc)) continue
+    // Albero che un plugin SKSE scandisce da solo senza seguire i reparse point: resta cartella
+    // reale, i suoi file diventano hardlink nel loop finale (vedi FORCE_HARDLINK_DIR_PREFIXES).
+    if (touchesForced(dirLc)) continue
     const set = dirProviders.get(dirLc)!
     if (set.size !== 1) continue
     const parent = parentDir(dirLc)
