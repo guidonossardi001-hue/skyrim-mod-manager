@@ -1436,6 +1436,58 @@ export const mockApi = {
       }
     },
     setIgnored: async () => ({ ok: true }),
+    // Diff subrecord demo: DATA diverge, FULL uguale, DNAM presente solo nel vincitore.
+    recordDetail: async (formKey: string) => {
+      const cell = (type: string, crc: number, size = 8, occurrence = 1) => ({
+        type,
+        occurrence,
+        size,
+        crc,
+        previewHex: crc.toString(16).padStart(8, '0').repeat(2),
+      })
+      const snapshots = [
+        {
+          plugin: 'skyrim.esm',
+          displayName: 'Skyrim.esm',
+          found: true,
+          compressedBad: false,
+          signature: 'WEAP',
+          edid: 'IronSword',
+          subrecords: [cell('EDID', 11), cell('FULL', 22), cell('DATA', 33)],
+        },
+        {
+          plugin: 'weapons overhaul.esp',
+          displayName: 'Weapons Overhaul.esp',
+          found: true,
+          compressedBad: false,
+          signature: 'WEAP',
+          edid: 'IronSword',
+          subrecords: [cell('EDID', 11), cell('FULL', 22), cell('DATA', 44)],
+        },
+        {
+          plugin: 'combat rebalance.esp',
+          displayName: 'Combat Rebalance.esp',
+          found: true,
+          compressedBad: false,
+          signature: 'WEAP',
+          edid: 'IronSword',
+          subrecords: [cell('EDID', 11), cell('FULL', 22), cell('DATA', 55), cell('DNAM', 66)],
+        },
+      ]
+      const rows = [
+        { key: 'EDID', differs: false, cells: [cell('EDID', 11), cell('EDID', 11), cell('EDID', 11)] },
+        { key: 'FULL', differs: false, cells: [cell('FULL', 22), cell('FULL', 22), cell('FULL', 22)] },
+        { key: 'DATA', differs: true, cells: [cell('DATA', 33), cell('DATA', 44), cell('DATA', 55)] },
+        { key: 'DNAM', differs: true, cells: [null, null, cell('DNAM', 66)] },
+      ]
+      return { ok: true, formKey, snapshots, rows }
+    },
+    openInXedit: async () => ({
+      ok: false,
+      error: 'SSEEdit disponibile solo nell’app desktop',
+      plugins: 0,
+      clipboardHint: null,
+    }),
     onProgress: () => () => {},
   },
 

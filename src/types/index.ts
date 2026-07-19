@@ -201,6 +201,28 @@ export interface RecordConflictScanProgress {
   plugin: string
   cached: boolean
 }
+// Diff subrecord del singolo record (specchio di electron/conflicts/recordDiff).
+export interface RecordSubrecordCell {
+  type: string
+  occurrence: number
+  size: number
+  crc: number
+  previewHex: string
+}
+export interface RecordDiffSnapshot {
+  plugin: string
+  displayName: string
+  found: boolean
+  compressedBad: boolean
+  signature: string | null
+  edid: string | null
+  subrecords: RecordSubrecordCell[]
+}
+export interface RecordDiffRowUi {
+  key: string
+  differs: boolean
+  cells: (RecordSubrecordCell | null)[]
+}
 
 // Window API type (injected by preload)
 declare global {
@@ -920,6 +942,19 @@ declare global {
           ignored: boolean,
           reason?: string,
         ): Promise<{ ok: boolean; error?: string }>
+        recordDetail(formKey: string): Promise<{
+          ok: boolean
+          error?: string
+          formKey?: string
+          snapshots?: RecordDiffSnapshot[]
+          rows?: RecordDiffRowUi[]
+        }>
+        openInXedit(formKey: string): Promise<{
+          ok: boolean
+          error?: string
+          plugins?: number
+          clipboardHint?: string | null
+        }>
         onProgress(callback: (p: RecordConflictScanProgress) => void): () => void
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).

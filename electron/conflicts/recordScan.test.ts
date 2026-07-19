@@ -9,7 +9,9 @@ const M = { masters: ['Skyrim.esm'] }
 
 function collect(buf: Buffer) {
   const records: ScannedRecord[] = []
-  const result = scanRecordsForConflicts(buf, (r) => records.push(r))
+  const result = scanRecordsForConflicts(buf, (r) => {
+    records.push(r)
+  })
   return { records, result }
 }
 

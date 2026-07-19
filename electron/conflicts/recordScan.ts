@@ -42,6 +42,10 @@ export interface ScannedRecord {
   edid: string | null
   /** true = flag compresso presente ma inflate fallito/incoerente: dataCrc è sul payload RAW. */
   compressedBad: boolean
+  /** Offset del payload RAW nel file (dopo l'header record) — per riletture mirate (recordDiff). */
+  dataOffset: number
+  /** Dimensione del payload RAW nel file (compresso se il record è compresso). */
+  dataSize: number
 }
 
 export interface RecordScanResult {
@@ -85,7 +89,7 @@ export function extractEdid(data: Buffer): string | null {
 }
 
 /** Payload effettivo di un record (decompresso se serve) + esito della decompressione. */
-function recordPayload(raw: Buffer, flags: number): { payload: Buffer; compressedBad: boolean } {
+export function recordPayload(raw: Buffer, flags: number): { payload: Buffer; compressedBad: boolean } {
   if ((flags & FLAG_COMPRESSED) === 0) return { payload: raw, compressedBad: false }
   if (raw.length < 4) return { payload: raw, compressedBad: true }
   const declared = raw.readUInt32LE(0)
@@ -104,8 +108,15 @@ function recordPayload(raw: Buffer, flags: number): { payload: Buffer; compresse
  * dell'intero Skyrim.esm in memoria qui — l'accumulo è del chiamante). Qualsiasi
  * disallineamento → parsed:false; il chiamante DEVE scartare i record emessi fino a lì
  * (un indice parziale produrrebbe falsi "nessun conflitto").
+ *
+ * Il callback può ritornare `true` per FERMARE il walk (lookup mirato di un singolo
+ * record, vedi recordDiff): in quel caso parsed=true — lo stop è intenzionale, non
+ * un'anomalia del file.
  */
-export function scanRecordsForConflicts(buf: Buffer, onRecord: (r: ScannedRecord) => void): RecordScanResult {
+export function scanRecordsForConflicts(
+  buf: Buffer,
+  onRecord: (r: ScannedRecord) => void | boolean,
+): RecordScanResult {
   const header = parsePluginHeader(buf)
   let records = 0
   let compressedBadCount = 0
@@ -133,14 +144,17 @@ export function scanRecordsForConflicts(buf: Buffer, onRecord: (r: ScannedRecord
     const { payload, compressedBad } = recordPayload(raw, flags)
     if (compressedBad) compressedBadCount++
     records++
-    onRecord({
+    const stop = onRecord({
       signature: type,
       formId,
       flags,
       dataCrc: crc32(payload),
       edid: extractEdid(payload),
       compressedBad,
+      dataOffset: dataStart,
+      dataSize,
     })
+    if (stop === true) return { parsed: true, header, records, compressedBadCount }
     pos = dataStart + dataSize
   }
   return { parsed: pos === buf.length, header, records, compressedBadCount }

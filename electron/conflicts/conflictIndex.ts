@@ -168,7 +168,9 @@ function prepareIndexRun(
     let masters: string[] = []
     try {
       const buf = readFileSync(p.path)
-      const result = scanRecordsForConflicts(buf, (r) => rows.push(r))
+      const result = scanRecordsForConflicts(buf, (r) => {
+        rows.push(r)
+      })
       parsedOk = result.parsed
       compressedBad = result.compressedBadCount
       masters = result.header?.masters ?? []

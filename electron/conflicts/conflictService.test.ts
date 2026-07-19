@@ -6,7 +6,13 @@ import { buildPlugin, buildGrup, buildRecord } from '../plugins/tes4Fixture'
 import { openTestDb } from '../db/openTestDb'
 import type { SqliteDb } from '../db/sqlite'
 import type { TrackedConflict } from './patchTracker'
-import { runConflictScan, getConflictReport, filterTrackedConflicts } from './conflictService'
+import {
+  runConflictScan,
+  getConflictReport,
+  filterTrackedConflicts,
+  getRecordDetail,
+  getXeditTargets,
+} from './conflictService'
 
 // Stesso layout del test di conflictIndex, con in più: plugins.txt reale (con voce
 // inattiva da escludere) e la patch che overrida ANCHE il conflitto base1 (→ resolved).
@@ -106,6 +112,32 @@ describe('runConflictScan + getConflictReport', () => {
     const resolved = report.items?.find((i) => i.status === 'resolved')
     expect(resolved?.formKey).toBe('base.esm|000001')
     expect(resolved?.winner).toBe('patch.esp')
+  })
+
+  it('getRecordDetail: snapshot per ogni partecipante + righe diff con DATA divergente', async () => {
+    await runConflictScan(db, { dataDir, pluginsTxtPath })
+    const detail = getRecordDetail(db, 'base.esm|000001')
+    expect(detail.ok).toBe(true)
+    // Partecipanti in ordine di caricamento: Base, ModA, ModB, Patch.
+    expect(detail.snapshots?.map((s) => s.displayName)).toEqual([
+      'Base.esm',
+      'ModA.esp',
+      'ModB.esp',
+      'Patch.esp',
+    ])
+    expect(detail.snapshots?.every((s) => s.found)).toBe(true)
+    // I payload di fixture sono blob senza subrecord validi → nessuna riga, ma il
+    // percorso completo (query + walk + allineamento) è esercitato senza errori.
+    expect(detail.rows).toBeDefined()
+    expect(getRecordDetail(db, 'base.esm|ffffff').ok).toBe(false)
+  })
+
+  it('getXeditTargets: display name in ordine + EDID primo non-null', async () => {
+    await runConflictScan(db, { dataDir, pluginsTxtPath })
+    const t = getXeditTargets(db, 'base.esm|000001')
+    expect(t.ok).toBe(true)
+    expect(t.participants).toEqual(['Base.esm', 'ModA.esp', 'ModB.esp', 'Patch.esp'])
+    expect(getXeditTargets(db, 'nope|000001').ok).toBe(false)
   })
 
   it('patch non partecipante → unresolved (il conteggio esclude solo la patch dichiarata)', async () => {

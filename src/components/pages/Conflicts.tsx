@@ -30,6 +30,8 @@ import type {
   RecordConflictScanProgress,
   RecordConflictStatus,
   RecordConflictSummary,
+  RecordDiffRowUi,
+  RecordDiffSnapshot,
 } from '@/types'
 
 export default function Conflicts() {
@@ -581,6 +583,15 @@ function RecordConflictsCard() {
   const [statusFilter, setStatusFilter] = useState<Set<RecordConflictStatus>>(new Set())
   const [search, setSearch] = useState('')
   const [ignoreBusy, setIgnoreBusy] = useState<string | null>(null)
+  // Dettaglio espanso (diff subrecord on-demand) — una sola riga espansa alla volta.
+  const [expandedKey, setExpandedKey] = useState<string | null>(null)
+  const [detail, setDetail] = useState<{
+    formKey: string
+    snapshots: RecordDiffSnapshot[]
+    rows: RecordDiffRowUi[]
+  } | null>(null)
+  const [detailBusy, setDetailBusy] = useState(false)
+  const [xeditBusy, setXeditBusy] = useState(false)
 
   useEffect(() => {
     if (!window.api.conflicts) return
@@ -665,6 +676,52 @@ function RecordConflictsCard() {
       toast.error('Aggiornamento fallito', (e as Error).message)
     } finally {
       setIgnoreBusy(null)
+    }
+  }
+
+  const toggleExpand = async (item: RecordConflictItem) => {
+    if (!window.api.conflicts?.recordDetail) return
+    if (expandedKey === item.formKey) {
+      setExpandedKey(null)
+      setDetail(null)
+      return
+    }
+    setExpandedKey(item.formKey)
+    setDetail(null)
+    setDetailBusy(true)
+    try {
+      const r = await window.api.conflicts.recordDetail(item.formKey)
+      if (r.ok && r.snapshots && r.rows) {
+        setDetail({ formKey: item.formKey, snapshots: r.snapshots, rows: r.rows })
+      } else {
+        toast.error('Dettaglio record fallito', r.error ?? 'errore sconosciuto')
+        setExpandedKey(null)
+      }
+    } catch (e) {
+      toast.error('Dettaglio record fallito', (e as Error).message)
+      setExpandedKey(null)
+    } finally {
+      setDetailBusy(false)
+    }
+  }
+
+  const openInXedit = async (formKey: string) => {
+    if (!window.api.conflicts?.openInXedit || xeditBusy) return
+    setXeditBusy(true)
+    try {
+      const r = await window.api.conflicts.openInXedit(formKey)
+      if (r.ok) {
+        toast.success(
+          `SSEEdit avviato con ${r.plugins} plugin`,
+          r.clipboardHint
+            ? `"${r.clipboardHint}" copiato: incollalo nella ricerca di xEdit`
+            : 'Cerca il record per FormID',
+        )
+      } else toast.error('Avvio SSEEdit fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Avvio SSEEdit fallito', (e as Error).message)
+    } finally {
+      setXeditBusy(false)
     }
   }
 
@@ -776,11 +833,28 @@ function RecordConflictsCard() {
               // Durante lo swap di `data` verso un array più corto (cambio filtro) Virtuoso
               // può chiedere transitoriamente un indice oltre la nuova lunghezza.
               item ? (
-                <RecordConflictRow
-                  item={item}
-                  busy={ignoreBusy === item.formKey}
-                  onToggleIgnore={() => toggleIgnore(item)}
-                />
+                <div>
+                  <RecordConflictRow
+                    item={item}
+                    busy={ignoreBusy === item.formKey}
+                    expanded={expandedKey === item.formKey}
+                    onToggleIgnore={() => toggleIgnore(item)}
+                    onToggleExpand={() => void toggleExpand(item)}
+                  />
+                  {expandedKey === item.formKey && (
+                    <div className="border-b border-dark-800/60 bg-dark-900/40 px-2 py-2">
+                      {detailBusy && <p className="text-[11px] text-dark-400">Lettura record dai plugin…</p>}
+                      {!detailBusy && detail?.formKey === item.formKey && (
+                        <RecordDiffTable
+                          detail={detail}
+                          winner={item.winner}
+                          xeditBusy={xeditBusy}
+                          onOpenXedit={() => void openInXedit(item.formKey)}
+                        />
+                      )}
+                    </div>
+                  )}
+                </div>
               ) : null
             }
           />
@@ -799,11 +873,15 @@ function RecordConflictsCard() {
 function RecordConflictRow({
   item,
   busy,
+  expanded,
   onToggleIgnore,
+  onToggleExpand,
 }: {
   item: RecordConflictItem
   busy: boolean
+  expanded: boolean
   onToggleIgnore: () => void
+  onToggleExpand: () => void
 }) {
   const meta = STATUS_META[item.status]
   const sigLabel = SIG_LABELS[item.signature]
@@ -825,11 +903,23 @@ function RecordConflictRow({
         {item.signature}
         {sigLabel ? ` · ${sigLabel}` : ''}
       </span>
-      <div className="flex-1 min-w-0">
-        <p className="text-white/85 truncate" title={item.formKey}>
+      <button
+        onClick={onToggleExpand}
+        className="flex-1 min-w-0 text-left"
+        title="Mostra il diff dei subrecord tra i partecipanti"
+      >
+        <p className="text-white/85 truncate flex items-center gap-1" title={item.formKey}>
+          {expanded ? (
+            <ChevronDown size={11} className="flex-shrink-0 text-dark-500" />
+          ) : (
+            <ChevronRight size={11} className="flex-shrink-0 text-dark-500" />
+          )}
           {item.edid ?? item.formKey}
         </p>
-        <p className="text-dark-500 truncate" title={item.participants.map((p) => p.displayName).join(' → ')}>
+        <p
+          className="text-dark-500 truncate pl-4"
+          title={item.participants.map((p) => p.displayName).join(' → ')}
+        >
           {item.participants.map((p, idx) => (
             <span key={p.plugin + idx}>
               {idx > 0 && <span className="text-dark-600"> → </span>}
@@ -843,7 +933,7 @@ function RecordConflictRow({
             </span>
           ))}
         </p>
-      </div>
+      </button>
       <button
         onClick={onToggleIgnore}
         disabled={busy}
@@ -853,6 +943,92 @@ function RecordConflictRow({
         {isIgnored ? <Eye size={11} /> : <EyeOff size={11} />}
         {isIgnored ? 'Riattiva' : 'Ignora'}
       </button>
+    </div>
+  )
+}
+
+// Tabella diff subrecord: righe = subrecord, colonne = partecipanti in ordine di
+// caricamento. Cella colorata rispetto al VINCITORE: uguale = verde, diversa = rossa,
+// assente = tratteggio. Diff strutturale (byte), non semantico: la decodifica dei
+// campi resta a xEdit, qui si vede DOVE i plugin divergono.
+function RecordDiffTable({
+  detail,
+  winner,
+  xeditBusy,
+  onOpenXedit,
+}: {
+  detail: { snapshots: RecordDiffSnapshot[]; rows: RecordDiffRowUi[] }
+  winner: string
+  xeditBusy: boolean
+  onOpenXedit: () => void
+}) {
+  const { snapshots, rows } = detail
+  const winnerIdx = snapshots.findIndex((s) => s.plugin === winner)
+  return (
+    <div className="text-[11px]">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-dark-400">
+          {rows.filter((r) => r.differs).length} subrecord su {rows.length} differiscono tra i partecipanti
+          {snapshots.some((s) => s.compressedBad) && ' · alcuni record compressi non decodificabili'}
+          {snapshots.some((s) => !s.found) && ' · record non ritrovato in alcuni plugin (indice datato?)'}
+        </p>
+        <button
+          onClick={onOpenXedit}
+          disabled={xeditBusy}
+          title="Lancia SSEEdit caricando SOLO questi plugin; l'hint di ricerca finisce in clipboard"
+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-void-900/40 text-void-300 hover:bg-void-800/60 transition-all disabled:opacity-50 flex-shrink-0"
+        >
+          <ExternalLink size={11} className={xeditBusy ? 'animate-pulse' : ''} /> Risolvi in SSEEdit
+        </button>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full border-collapse">
+          <thead>
+            <tr>
+              <th className="text-left text-dark-500 font-normal pr-3 pb-1">Subrecord</th>
+              {snapshots.map((s) => (
+                <th
+                  key={s.plugin}
+                  className={clsx(
+                    'text-left font-medium pr-3 pb-1 max-w-40 truncate',
+                    s.plugin === winner ? 'text-green-400' : 'text-dark-300',
+                  )}
+                  title={s.displayName + (s.plugin === winner ? ' (vince a runtime)' : '')}
+                >
+                  {s.displayName}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.key} className="border-t border-dark-800/40">
+                <td className="font-mono text-dark-300 pr-3 py-0.5">{row.key}</td>
+                {row.cells.map((cell, i) => {
+                  const winnerCell = winnerIdx >= 0 ? row.cells[winnerIdx] : null
+                  const same = cell !== null && winnerCell !== null && cell.crc === winnerCell.crc
+                  return (
+                    <td
+                      key={i}
+                      className={clsx(
+                        'font-mono pr-3 py-0.5',
+                        cell === null
+                          ? 'text-dark-600'
+                          : !row.differs || same
+                            ? 'text-green-400/80'
+                            : 'text-red-300',
+                      )}
+                      title={cell ? `${cell.size} byte · ${cell.previewHex}` : 'subrecord assente'}
+                    >
+                      {cell ? `${cell.size}B ${cell.previewHex.slice(0, 8)}` : '—'}
+                    </td>
+                  )
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }

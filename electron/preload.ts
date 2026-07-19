@@ -233,6 +233,10 @@ contextBridge.exposeInMainWorld('api', {
       invoke('conflicts:report', filter),
     setIgnored: (formKey: string, ignored: boolean, reason?: string) =>
       invoke('conflicts:set-ignored', formKey, ignored, reason),
+    // Diff subrecord on-demand del record selezionato (nativo, nessun tool esterno).
+    recordDetail: (formKey: string) => invoke('conflicts:record-detail', formKey),
+    // SSEEdit mirato: carica SOLO i plugin partecipanti; hint di ricerca in clipboard.
+    openInXedit: (formKey: string) => invoke('conflicts:open-in-xedit', formKey),
     onProgress: (callback: (p: unknown) => void) => {
       const listener = (_e: IpcRendererEvent, p: unknown) => callback(p)
       ipcRenderer.on('conflicts:progress', listener)

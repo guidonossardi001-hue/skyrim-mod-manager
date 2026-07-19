@@ -1,4 +1,15 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage, Menu } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  dialog,
+  shell,
+  nativeTheme,
+  session,
+  safeStorage,
+  Menu,
+  clipboard,
+} from 'electron'
 import { join, resolve, dirname, basename } from 'path'
 import {
   existsSync,
@@ -114,10 +125,13 @@ import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
 import {
   runConflictScan,
   getConflictReport,
+  getRecordDetail,
+  getXeditTargets,
   DEFAULT_PATCH_NAME,
   DEFAULT_REPORT_LIMIT,
 } from './conflicts/conflictService'
 import { setIgnored as setConflictIgnored, type ConflictStatus } from './conflicts/patchTracker'
+import { buildXeditConflictPlan } from './conflicts/xeditLaunch'
 import { initBodySlideEngine } from './tools/bodyslideEngine'
 import {
   buildXLODGenArgs,
@@ -1332,6 +1346,66 @@ app.whenReady().then(() => {
           ? Math.min(Math.max(1, Math.trunc(f.limit)), 10000)
           : DEFAULT_REPORT_LIMIT
       return getConflictReport(requireDb(), conflictPatchName(), { statuses, search, limit })
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message }
+    }
+  })
+
+  // formKey = `<nome file lowercase>|<object index esadecimale>` — mai un path.
+  const isValidFormKey = (v: unknown): v is string =>
+    typeof v === 'string' && /^[^|\\/]{1,255}\|[0-9a-f]{1,6}$/.test(v)
+
+  // Diff subrecord on-demand del record selezionato (walk con early-stop per partecipante).
+  ipcMain.handle('conflicts:record-detail', (_e, formKey: unknown) => {
+    if (!isValidFormKey(formKey)) return { ok: false as const, error: 'formKey non valida' }
+    try {
+      return getRecordDetail(requireDb(), formKey)
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message }
+    }
+  })
+
+  // Lancio MIRATO di SSEEdit sul conflitto: plugins.txt temporaneo coi soli partecipanti
+  // (-P + -autoload, pattern QAC) + hint di ricerca (EDID/object index) in clipboard.
+  // L'exe lo risolve toolPath dal settings store — nessun path dal renderer.
+  ipcMain.handle('conflicts:open-in-xedit', (_e, formKey: unknown) => {
+    if (!isValidFormKey(formKey)) return { ok: false as const, error: 'formKey non valida' }
+    try {
+      const exe = toolPath('sseeditPath')
+      if (!exe) {
+        return {
+          ok: false as const,
+          error: 'SSEEdit non configurato: imposta il percorso nelle Impostazioni',
+        }
+      }
+      const targets = getXeditTargets(requireDb(), formKey)
+      if (!targets.ok || !targets.participants) {
+        return { ok: false as const, error: targets.error ?? 'partecipanti non trovati' }
+      }
+      const dataDir = resolveLoadOrderDataDir()
+      if (!dataDir || !existsSync(dataDir)) {
+        return { ok: false as const, error: 'Nessuna Data deployata trovata' }
+      }
+      const tempPluginsTxt = join(app.getPath('temp'), 'smm-xedit-conflict-plugins.txt')
+      const plan = buildXeditConflictPlan({
+        gameFlag: 'SSE',
+        dataPath: dataDir,
+        pluginsTxtPath: tempPluginsTxt,
+        participants: targets.participants,
+        edid: targets.edid ?? null,
+        formKey,
+      })
+      writeFileSync(tempPluginsTxt, plan.pluginsTxtContent, 'utf8')
+      if (plan.clipboardHint) clipboard.writeText(plan.clipboardHint)
+      // Fire-and-forget: xEdit è interattivo, la promise di launchTool risolve alla
+      // CHIUSURA del processo — non va attesa qui.
+      void launchTool(exe, plan.args)
+      logger.info('conflicts', `SSEEdit lanciato su ${formKey} (${targets.participants.length} plugin)`)
+      return {
+        ok: true as const,
+        plugins: targets.participants.length,
+        clipboardHint: plan.clipboardHint || null,
+      }
     } catch (e) {
       return { ok: false as const, error: (e as Error).message }
     }
