@@ -733,6 +733,12 @@ app.whenReady().then(() => {
     resolveLootMasterlistCachePath: () => join(app.getPath('userData'), MASTERLIST_CACHE_FILE),
     resolveDocumentsIniDir: () => documentsGameDir(),
     resolvePerProfileSaves: () => store.get('perProfileSaves') === true,
+    // ROOT del gioco (SkyrimSE.exe + Part 2 di Engine Fixes) — SOLO col target 'game': col
+    // target istanza non c'è un exe reale da validare né una root da proteggere.
+    resolveGameExeDir: () =>
+      deployTargetIsGame()
+        ? detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+        : null,
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
 

@@ -54,6 +54,7 @@ export type DeployErrorKind =
   | 'no-mods'
   | 'cross-volume' // hardlinks can't span volumes → refuse before touching anything
   | 'source-missing'
+  | 'enginefixes-incompatible' // EngineFixes.dll dichiarata incompatibile col runtime del gioco (blocco pre-deploy)
   | 'dependency-cycle' // ciclo nel grafo requires dei plugin → deploy BLOCCATO prima di toccare file
   | 'missing-master' // un plugin richiede un master (header TES4) né deployato né vanilla/CC → crash al load
   | 'plugin-limit' // slot FULL (ESM/ESP non-light) oltre il limite motore 254 → crash garantito al load

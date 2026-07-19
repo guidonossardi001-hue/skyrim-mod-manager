@@ -28,6 +28,18 @@ import { atomicWriteFile } from '../backup/snapshot'
 import { toLongPath } from '../install/extract'
 import { classifyForEsl, pickToFlag, lightFlagBytes, TES4_FLAGS_OFFSET, type EslCandidate } from '../plugins/eslify'
 import { tryAcquireBusyGate, releaseBusyGate, currentBusyLabel } from '../util/busyGate'
+import { readPeFileVersion } from '../steam/peVersion'
+import {
+  checkEngineFixesCompatFile,
+  injectEngineFixesConfigFile,
+  engineFixesProtectedFiles,
+  engineFixesVersionChangeWarning,
+  setEngineFixesLock,
+  ENGINE_FIXES_DLL,
+  ENGINE_FIXES_DLL_REL,
+  ENGINE_FIXES_TOML,
+} from '../ini/engineFixesConfig'
+import { join } from 'path'
 
 const BUSY_ERROR = (): string =>
   `Un'altra operazione pesante (${currentBusyLabel()}) è già in corso: attendi che finisca prima di riprovare.`
@@ -62,6 +74,10 @@ export interface DeployEngineOptions {
   /** Setting `perProfileSaves` (opt-in, default OFF): isolamento save per-profilo via
    *  SLocalSavePath. Assente/false = comportamento preesistente (cartella Saves/ condivisa). */
   resolvePerProfileSaves?: () => boolean
+  /** ROOT del gioco (dove sta SkyrimSE.exe + la Part 2 di Engine Fixes), risolta SOLO col
+   *  target 'game'. null col target istanza dedicata → i passi Engine Fixes (validazione
+   *  versione, config, lockdown Part 2) si saltano. Iniettata dal main. */
+  resolveGameExeDir?: () => string | null | undefined
   log?: (level: 'info' | 'warn', msg: string) => void
 }
 
@@ -100,7 +116,50 @@ export function initDeployEngine(opts: DeployEngineOptions) {
           error: `profilo ${profileId} non trovato o percorso istanza non configurato`,
         }
       }
-      return await deployInstance(opts.db, dir, {
+
+      // ── SSE Engine Fixes: PRE-DEPLOY ────────────────────────────────────────────────
+      // ROOT del gioco (exe + Part 2), risolta solo col target 'game'. null → istanza
+      // dedicata: nessun exe da validare, si saltano i passi Engine Fixes.
+      const gameDir = opts.resolveGameExeDir?.() ?? null
+      const efFiles = engineFixesProtectedFiles(dir, gameDir)
+      // Sblocca gli Engine Fixes prima del deploy: un lockdown precedente li ha resi read-only,
+      // ma il purge/relink deve poterli sostituire (unlink di un read-only fallirebbe su Windows).
+      setEngineFixesLock(efFiles, false)
+      // Validazione versione: la EngineFixes.dll che VINCEREBBE il deploy è compatibile con
+      // l'exe? Incompatibile → BLOCCO, prima di toccare qualsiasi file (segnalato in diagnostica).
+      if (gameDir) {
+        const efSource = resolveWinningSourceForRel(opts.db, ENGINE_FIXES_DLL_REL, profileId)
+        if (efSource) {
+          const runtime = readPeFileVersion(join(gameDir, 'SkyrimSE.exe'))
+          const compat = checkEngineFixesCompatFile(efSource.src, runtime)
+          if (compat.verdict === 'incompatible') {
+            opts.log?.(
+              'warn',
+              `[diagnostica] Deploy BLOCCATO — SSE Engine Fixes incompatibile: DLL v${compat.pluginVersion ?? '?'} (mod "${efSource.mod}") su gioco ${runtime ?? '?'} — ${compat.reason}`,
+            )
+            return {
+              success: false,
+              errorKind: 'enginefixes-incompatible',
+              error: `SSE Engine Fixes incompatibile con la versione del gioco (${runtime ?? 'sconosciuta'}): ${compat.reason}. Installa la Part 1 di Engine Fixes per la tua edizione (AE/SE) prima di rideployare.`,
+            }
+          }
+          if (compat.verdict === 'warning')
+            opts.log?.('warn', `[diagnostica] SSE Engine Fixes: ${compat.reason}`)
+          // Guard cambio versione Part 1: il deploy gestisce SOLO la Part 1 (Data/SKSE/Plugins);
+          // la Part 2 (preloader nella root) resta quella che c'è. Se la Part 1 vincente ha una
+          // FileVersion diversa da quella attualmente deployata, il mismatch Part1↔Part2 fa
+          // fallire il load a cascata (caso reale: swap 6.1.1 → 7.0.20, preloader rimasto 6.1.1
+          // → po3_Tweaks "couldn't load plugin"). compatibleVersions non lo becca: entrambe le
+          // build dichiarano compat col gioco — serve il confronto FileVersion↔FileVersion.
+          const changeWarn = engineFixesVersionChangeWarning(
+            readPeFileVersion(join(dir, 'SKSE', 'Plugins', ENGINE_FIXES_DLL)),
+            readPeFileVersion(efSource.src),
+          )
+          if (changeWarn) opts.log?.('warn', `[diagnostica] ${changeWarn}`)
+        }
+      }
+
+      const result = await deployInstance(opts.db, dir, {
         profileId,
         stockGameDataDir: opts.resolveStockGameDataDir?.(profileId) ?? undefined,
         systemPluginsDir: opts.resolveSystemPluginsDir?.() ?? undefined,
@@ -112,6 +171,22 @@ export function initDeployEngine(opts: DeployEngineOptions) {
         log: opts.log,
         onProgress,
       })
+
+      // ── SSE Engine Fixes: POST-DEPLOY (solo su successo) ────────────────────────────
+      // Fail-soft: un problema di config/lockdown non invalida un deploy per il resto riuscito.
+      if (result.success) {
+        const cfg = injectEngineFixesConfigFile(join(dir, 'SKSE', 'Plugins', ENGINE_FIXES_TOML))
+        if (cfg.error) opts.log?.('warn', `EngineFixes.toml non scritto (fail-soft): ${cfg.error}`)
+        else if (cfg.written) opts.log?.('info', 'EngineFixes.toml: MaxStdio=8192 e MemoryManager=true forzati')
+        // Lockdown: read-only sui file Engine Fixes (Part 1 + Part 2) → nessun processo li
+        // sovrascrive durante il runtime del launcher. Il prossimo deploy li sblocca (sopra).
+        const lock = setEngineFixesLock(efFiles, true)
+        opts.log?.(
+          'info',
+          `lockdown Engine Fixes: ${lock.locked} file protetti read-only${lock.errors.length ? ` (${lock.errors.length} saltati)` : ''}`,
+        )
+      }
+      return result
     } catch (e) {
       opts.log?.('warn', `deploy errore inatteso: ${(e as Error).message}`)
       return { success: false, errorKind: 'db', error: (e as Error).message }

@@ -155,6 +155,10 @@ export interface CrashAnalysis {
   suggestions: string[]
   /** Firme note riconosciute nel log (DB derivato da Phostwood, vedi crashPatterns.ts). */
   knownPatterns?: CrashPatternMatch[]
+  /** Stato di SSE Engine Fixes dalla sezione SKSE PLUGINS del crash (priorità assoluta:
+   *  è l'allocatore/preloader del motore). loaded=false quando la sezione elenca plugin ma
+   *  EngineFixes.dll non c'è; null quando non verificabile (nessun plugin SKSE nel log). */
+  engineFixes?: { loaded: boolean; version: string | null }
 }
 
 /**
@@ -167,6 +171,19 @@ export interface CrashAnalysis {
 export function analyzeCrashLog(report: CrashLogReport, rawText?: string): CrashAnalysis {
   const suggestions: string[] = []
   const culprit = findProbableCulprit(report.callStack)
+
+  // PRIORITÀ ASSOLUTA — SSE Engine Fixes dalla sezione SKSE PLUGINS: è l'allocatore memoria +
+  // preloader del motore, da cui dipende la stabilità di TUTTO il resto. Se la sezione elenca
+  // plugin ma EngineFixes.dll NON c'è, ha probabilmente fallito il load ("couldn't load plugin",
+  // tipico dopo un update del gioco che rende la DLL incompatibile): la sua assenza destabilizza
+  // l'ambiente SKSE e provoca crash a cascata. Si segnala PRIMA di ogni altra euristica.
+  const efEntry = report.ssePlugins.find((p) => /^EngineFixes\.dll$/i.test(p.name))
+  const engineFixes = report.ssePlugins.length ? { loaded: !!efEntry, version: efEntry?.version ?? null } : undefined
+  if (engineFixes && !engineFixes.loaded) {
+    suggestions.push(
+      'PRIORITÀ: SSE Engine Fixes (EngineFixes.dll) NON risulta tra i plugin SKSE caricati. Se ha fallito il load — spesso "couldn\'t load plugin" per incompatibilità di versione dopo un update del gioco — l\'allocatore/preloader del motore è assente e può causare instabilità e crash a cascata di altri plugin. Verifica la Part 1 di Engine Fixes per la tua versione di gioco e che la Part 2 nella root combaci.',
+    )
+  }
 
   if (culprit) {
     suggestions.push(
@@ -191,5 +208,5 @@ export function analyzeCrashLog(report: CrashLogReport, rawText?: string): Crash
   }
 
   const knownPatterns = rawText ? matchCrashPatterns(rawText) : undefined
-  return { culprit, suggestions, knownPatterns: knownPatterns?.length ? knownPatterns : undefined }
+  return { culprit, suggestions, knownPatterns: knownPatterns?.length ? knownPatterns : undefined, engineFixes }
 }

@@ -32,9 +32,35 @@ export interface IniTemplate {
 
 const SECTION_RE = /^\s*\[([^\]]+)\]\s*$/
 
-function serializeValue(v: IniValue): string {
-  if (typeof v === 'boolean') return v ? '1' : '0'
-  return String(v)
+/**
+ * Dialetto di serializzazione: lo stesso editor struttura-preservante serve sia gli INI di
+ * Skyrim (booleano → 1/0, assegnazione `key=value`) sia il TOML di SSE Engine Fixes (booleano →
+ * true/false, numeri nudi, stringhe quotate, assegnazione `key = value`). Iniettabile così
+ * engineFixesConfig.ts riusa IniDocument senza duplicare la logica di preservazione.
+ */
+export interface IniDialect {
+  serialize(v: IniValue): string
+  /** Separatore scritto tra chiave e valore per le righe NUOVE/riscritte. */
+  assign: string
+}
+
+/** Dialetto INI di Skyrim (comportamento storico, default di IniDocument). */
+export const INI_DIALECT: IniDialect = {
+  serialize: (v) => (typeof v === 'boolean' ? (v ? '1' : '0') : String(v)),
+  assign: '=',
+}
+
+/** Dialetto TOML (EngineFixes.toml): booleani letterali, numeri nudi, stringhe quotate. */
+export const TOML_DIALECT: IniDialect = {
+  serialize: (v) =>
+    typeof v === 'boolean'
+      ? v
+        ? 'true'
+        : 'false'
+      : typeof v === 'number'
+        ? String(v)
+        : `"${String(v).replace(/([\\"])/g, '\\$1')}"`,
+  assign: ' = ',
 }
 
 interface ParsedKv {
@@ -82,11 +108,13 @@ function sectionSpans(lines: string[]): SectionSpan[] {
  * In-memory model of an INI file as its raw lines. All mutations happen in place on
  * the line array, so anything not explicitly set is preserved exactly.
  */
-class IniDocument {
+export class IniDocument {
   private lines: string[]
   private readonly eol: string
+  private readonly dialect: IniDialect
 
-  constructor(text: string) {
+  constructor(text: string, dialect: IniDialect = INI_DIALECT) {
+    this.dialect = dialect
     this.eol = text.includes('\r\n') ? '\r\n' : '\n'
     // Normalize to \n for splitting; a trailing newline yields a trailing '' element
     // which we keep so the re-joined output preserves the original final newline.
@@ -95,13 +123,14 @@ class IniDocument {
 
   /** Set section.key=value: replace in place, else insert into the section, else append the section. */
   setValue(section: string, key: string, value: IniValue): void {
-    const val = serializeValue(value)
+    const val = this.dialect.serialize(value)
+    const eq = this.dialect.assign
     const span = sectionSpans(this.lines).find((s) => s.name.toLowerCase() === section.toLowerCase())
 
     if (!span) {
       // Section absent → append a fresh block (blank separator if the file has content).
       if (this.lines.length && this.lines[this.lines.length - 1].trim() !== '') this.lines.push('')
-      this.lines.push(`[${section}]`, `${key}=${val}`)
+      this.lines.push(`[${section}]`, `${key}${eq}${val}`)
       return
     }
 
@@ -110,7 +139,7 @@ class IniDocument {
       if (kv && kv.key.toLowerCase() === key.toLowerCase()) {
         // Preserve the original key casing/indent and any inline comment after the value.
         const inline = kv.rest.match(/\s+[;#].*$/)
-        this.lines[i] = `${kv.indent}${kv.key}=${val}${inline ? inline[0] : ''}`
+        this.lines[i] = `${kv.indent}${kv.key}${eq}${val}${inline ? inline[0] : ''}`
         return
       }
     }
@@ -118,7 +147,7 @@ class IniDocument {
     // Key absent in the section → insert after its last content line (before trailing blanks).
     let at = span.end
     while (at > span.start && this.lines[at - 1].trim() === '') at--
-    this.lines.splice(at, 0, `${key}=${val}`)
+    this.lines.splice(at, 0, `${key}${eq}${val}`)
   }
 
   toString(): string {

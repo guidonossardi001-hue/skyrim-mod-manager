@@ -165,3 +165,24 @@ describe('analyzeCrashLog', () => {
     expect(a.suggestions.some((s) => s.includes('Address Library'))).toBe(true)
   })
 })
+
+describe('analyzeCrashLog — SSE Engine Fixes (priorità sezione plugin)', () => {
+  it('EngineFixes presente tra i plugin SKSE -> loaded con versione, nessun allarme', () => {
+    const a = analyzeCrashLog(parseCrashLog(SAMPLE_LOG))
+    expect(a.engineFixes).toEqual({ loaded: true, version: '6.1.1' })
+    expect(a.suggestions.some((s) => s.startsWith('PRIORITÀ: SSE Engine Fixes'))).toBe(false)
+  })
+
+  it('EngineFixes ASSENTE mentre altri plugin SKSE caricano -> loaded:false + suggerimento PRIORITÀ', () => {
+    const noEf = SAMPLE_LOG.replace(/\tEngineFixes\.dll v6\.1\.1\n/, '')
+    const a = analyzeCrashLog(parseCrashLog(noEf))
+    expect(a.engineFixes).toEqual({ loaded: false, version: null })
+    expect(a.suggestions[0]).toMatch(/^PRIORITÀ: SSE Engine Fixes/)
+  })
+
+  it('nessuna sezione SKSE PLUGINS -> engineFixes non verificabile (undefined)', () => {
+    const noSse = SAMPLE_LOG.replace(/SKSE PLUGINS:[\s\S]*?PLUGINS:/, 'PLUGINS:')
+    const a = analyzeCrashLog(parseCrashLog(noSse))
+    expect(a.engineFixes).toBeUndefined()
+  })
+})
