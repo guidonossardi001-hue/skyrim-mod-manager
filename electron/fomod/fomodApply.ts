@@ -11,6 +11,7 @@
 import { readdirSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync, readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { createRequire } from 'module'
+import { isPathInside } from '../install/extract'
 
 export const FOMOD_MARKER = '.smm-fomod-applied.json'
 
@@ -265,6 +266,11 @@ export function applyFomodInstructions(
     for (const c of copies) {
       const src = join(modDir, c.source)
       const dest = join(mapped, c.destination)
+      // ModuleConfig.xml è contenuto non fidato (autore della mod): source/destination
+      // possono contenere '..' e uscire da modDir/mapped (path traversal, CWE-22). Le
+      // altre pipeline derivate da archivio (extract.ts) hanno lo stesso guard: qui
+      // l'instruction viene scartata invece di eseguire un renameSync fuori sandbox.
+      if (!isPathInside(modDir, src) || !isPathInside(mapped, dest)) continue
       if (!existsSync(src)) continue // instruction su file assente (config malformato): skip
       mkdirSync(dirname(dest), { recursive: true })
       if (existsSync(dest)) continue // duplicato (priority): il primo vince, come Vortex ordina

@@ -1,8 +1,17 @@
 import { ipcMain } from 'electron'
 import { existsSync } from 'fs'
 import { writeFile } from 'fs/promises'
+import { extname } from 'path'
 import axios from 'axios'
 import Database from 'better-sqlite3'
+
+// wabbajackPath/outputPath arrivano grezzi dal renderer (nessun kind whitelisted come in
+// util/openTargets.ts): un renderer compromesso potrebbe passare un path UNC (pull di un
+// payload remoto) o un'estensione eseguibile/di avvio come destinazione di scrittura. Qui
+// si limita il danno all'estensione attesa, coerente col resto della app (isExecutablePath).
+function isUncPath(p: string): boolean {
+  return /^\\\\/.test(p) || /^\/\//.test(p)
+}
 
 // Wabbajack modlist format (.wabbajack is a renamed zip containing modlist.json)
 interface WabbajackManifest {
@@ -30,6 +39,9 @@ interface WabbajackDirective {
 export function initWabbajack(db: Database.Database) {
   // Parse a .wabbajack file and import its modlist
   ipcMain.handle('wabbajack:parse', async (_e, wabbajackPath: string, profileId: number) => {
+    if (isUncPath(wabbajackPath) || extname(wabbajackPath).toLowerCase() !== '.wabbajack') {
+      return { success: false, error: 'Percorso non valido: atteso un file .wabbajack locale' }
+    }
     if (!existsSync(wabbajackPath)) return { success: false, error: 'File non trovato' }
 
     try {
@@ -95,6 +107,9 @@ export function initWabbajack(db: Database.Database) {
 
   // Export current profile as a Wabbajack-compatible manifest stub
   ipcMain.handle('wabbajack:export', async (_e, profileId: number, outputPath: string) => {
+    if (isUncPath(outputPath) || extname(outputPath).toLowerCase() !== '.json') {
+      return { success: false, error: 'Percorso non valido: atteso un file .json locale' }
+    }
     const profile = db.prepare('SELECT * FROM profiles WHERE id=?').get(profileId) as Record<string, unknown>
     const mods = db.prepare('SELECT * FROM mods WHERE profile_id=?').all(profileId) as Record<
       string,
