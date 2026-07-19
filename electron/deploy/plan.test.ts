@@ -171,6 +171,42 @@ describe('computeDeployPlan — alberi forzati a hardlink (scanner ciechi ai rep
     const withoutForce = computeDeployPlan([mod('M', 1, files)], [], [])
     expect(junctionDirs(withoutForce)).toEqual(['custom'])
   })
+
+  it('NOME forzato a profondità variabile (OAR): niente junction sulla dir, sotto di essa, né sugli ANTENATI', () => {
+    // Caso reale: OAR scandisce meshes/actors/<razza>/animations/OpenAnimationReplacer — una
+    // junction a QUALSIASI livello del percorso la nasconde (34 config visibili su 2281).
+    const oar = 'meshes/actors/character/animations/OpenAnimationReplacer/ModX/config.json'
+    const plan = computeDeployPlan([mod('A', 1, [oar, 'textures/foo/bar.dds'])])
+    expect(junctionDirs(plan)).toEqual(['textures']) // il fratello fuori dall'albero OAR resta ottimizzato
+    expect(hardlinkRels(plan)).toContain(oar) // tutto il ramo OAR è cartelle reali + hardlink
+  })
+
+  it('match del nome case-insensitive (nel dato reale esiste "openAnimationReplacer")', () => {
+    const plan = computeDeployPlan([
+      mod('A', 1, ['meshes/actors/dlc01/vampirebrute/animations/openAnimationReplacer/X/config.json']),
+    ])
+    expect(plan.junctions).toHaveLength(0)
+  })
+
+  it('copre anche DAR (DynamicAnimationReplacer) di default', () => {
+    const dar = 'meshes/actors/character/animations/DynamicAnimationReplacer/_CustomConditions/10001/x.hkx'
+    const plan = computeDeployPlan([mod('A', 1, [dar])])
+    expect(plan.junctions).toHaveLength(0)
+    expect(hardlinkRels(plan)).toEqual([dar])
+  })
+
+  it('prefisso mcm/config di default: le sottocartelle per-mod dei config MCM Helper restano reali', () => {
+    const plan = computeDeployPlan([mod('A', 1, ['MCM/Config/ModX/config.json', 'MCM/Config/ModX/settings.ini'])])
+    expect(plan.junctions).toHaveLength(0)
+  })
+
+  it('la lista dei NOMI forzati è iniettabile: vuota → comportamento precedente (junction)', () => {
+    const files = ['meshes/actors/character/animations/OpenAnimationReplacer/ModX/config.json']
+    const withoutNames = computeDeployPlan([mod('M', 1, files)], [], [], [])
+    expect(junctionDirs(withoutNames)).toEqual(['meshes']) // single-provider → junction come prima
+    const withNames = computeDeployPlan([mod('M', 1, files)], [], [], ['openanimationreplacer'])
+    expect(withNames.junctions).toHaveLength(0)
+  })
 })
 
 describe('computeDeployPlan — automatic conflict resolution', () => {

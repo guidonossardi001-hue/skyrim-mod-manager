@@ -241,18 +241,46 @@ export interface FileConflictRule {
 //   • skse/lexicon — runtime di scripting Lexicon (LEX) e i suoi client (es. ActorValueGenerator):
 //     scandisce SKSE/Lexicon/scripts per i .lsi; le sottocartelle per-mod (Shared, ActorValueGenerator)
 //     vengono junctionate e gli script dentro non verrebbero caricati.
-export const FORCE_HARDLINK_DIR_PREFIXES: readonly string[] = ['skse/plugins/ostim/scenes', 'skse/lexicon']
+//   • mcm/config — MCM Helper scandisce Data/MCM/Config/<mod>/config.json: con le sottocartelle
+//     per-mod junctionate risultavano visibili 3 config su 37 (menu MCM assenti/vuoti).
+export const FORCE_HARDLINK_DIR_PREFIXES: readonly string[] = [
+  'skse/plugins/ostim/scenes',
+  'skse/lexicon',
+  'mcm/config',
+]
+
+// Come sopra, ma per NOME di directory (segmento di path, case-insensitive) a profondità
+// VARIABILE — un prefisso fisso non può esprimerli. L'intero sottoalbero alla dir col nome
+// forzato resta reale, e NESSUN antenato viene junctionato (una junction a qualsiasi livello
+// sopra nasconderebbe comunque l'albero a uno scanner cieco ai reparse point).
+//   • openanimationreplacer — OAR scandisce meshes/actors/<razza>/animations/OpenAnimationReplacer:
+//     su questa collection risultavano raggiungibili 34 config.json su 2281 (le animazioni
+//     condizionali ricadevano in silenzio sulle vanilla).
+//   • dynamicanimationreplacer — DAR (predecessore di OAR), stesso schema di scansione
+//     (_CustomConditions): 2 dir su 4 erano junctionate.
+export const FORCE_HARDLINK_DIR_NAMES: readonly string[] = [
+  'openanimationreplacer',
+  'dynamicanimationreplacer',
+]
 
 export function computeDeployPlan(
   mods: DeployMod[],
   fileRules: FileConflictRule[] = [],
   forceHardlinkPrefixes: readonly string[] = FORCE_HARDLINK_DIR_PREFIXES,
+  forceHardlinkDirNames: readonly string[] = FORCE_HARDLINK_DIR_NAMES,
 ): DeployPlan {
   // Prefissi normalizzati: una directory che è (o sta sotto, o è antenata di) un prefisso forzato
   // non diventa junction — i suoi file ricadono sugli hardlink individuali del loop finale.
   const forced = forceHardlinkPrefixes.map((p) => normRel(p).toLowerCase()).filter(Boolean)
   const touchesForced = (dirLc: string) =>
     forced.some((p) => dirLc === p || dirLc.startsWith(`${p}/`) || p.startsWith(`${dirLc}/`))
+  // Nomi forzati (segmento di path, minuscolo): il matching per antenati non è esprimibile come
+  // predicato sul solo path della candidata (un antenato non CONTIENE il segmento) — si
+  // precalcola quindi, dai path REALI del piano, l'insieme delle dir bloccate: ogni dir il cui
+  // path contiene un segmento forzato (la dir stessa e tutto il suo sottoalbero) più tutti i
+  // suoi antenati. Popolato in seguito, quando dirProviders enumera le directory del piano.
+  const forcedNames = new Set(forceHardlinkDirNames.map((n) => n.toLowerCase()).filter(Boolean))
+  const nameBlocked = new Set<string>()
   const pinnedWinnerByPath = new Map<string, string>()
   for (const r of fileRules) pinnedWinnerByPath.set(normRel(r.relPath).toLowerCase(), r.winnerMod.toLowerCase())
   // Deterministic base order (ascending priority, name tie-break) so candidate
@@ -345,6 +373,17 @@ export function computeDeployPlan(
     }
   }
 
+  // Dir bloccate per NOME: path con un segmento forzato (dir e sottoalbero) + tutti gli
+  // antenati risalendo fino alla radice. Calcolato sulle directory REALI del piano.
+  if (forcedNames.size) {
+    for (const dirLc of dirProviders.keys()) {
+      if (!dirLc || nameBlocked.has(dirLc)) continue
+      if (dirLc.split('/').some((seg) => forcedNames.has(seg))) {
+        for (let d = dirLc; d; d = parentDir(d)) nameBlocked.add(d)
+      }
+    }
+  }
+
   // Pick MAXIMAL single-provider directories: providers(D)==1 and either D is a
   // top-level dir (parent is root) or the parent is mixed (so D is the largest
   // conflict-free subtree). Shallowest-first so nested dirs are skipped once an
@@ -359,8 +398,9 @@ export function computeDeployPlan(
   for (const dirLc of dirsByDepth) {
     if (underJunction(dirLc)) continue
     // Albero che un plugin SKSE scandisce da solo senza seguire i reparse point: resta cartella
-    // reale, i suoi file diventano hardlink nel loop finale (vedi FORCE_HARDLINK_DIR_PREFIXES).
-    if (touchesForced(dirLc)) continue
+    // reale, i suoi file diventano hardlink nel loop finale (vedi FORCE_HARDLINK_DIR_PREFIXES
+    // per i percorsi fissi, FORCE_HARDLINK_DIR_NAMES per i nomi a profondità variabile).
+    if (touchesForced(dirLc) || nameBlocked.has(dirLc)) continue
     const set = dirProviders.get(dirLc)!
     if (set.size !== 1) continue
     const parent = parentDir(dirLc)
