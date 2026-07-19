@@ -686,14 +686,20 @@ export const mockApi = {
     },
     seed: async () => ({ inserted: catalog.length }),
     // Preview stub: no Vortex backup on disk in the browser mock.
-    importVortex: async () => ({ success: false as const, error: 'Backup Vortex non disponibile in anteprima' }),
+    importVortex: async () => ({
+      success: false as const,
+      error: 'Backup Vortex non disponibile in anteprima',
+    }),
     importNexusCollection: async () => ({
       success: false as const,
       error: 'Import Collection Nexus disponibile solo nell’app desktop',
     }),
     dedupe: async () => ({ success: true as const, removed: 0, total: catalog.length }),
     // Preview stub: il wipe agisce sul DB reale (solo app desktop).
-    wipe: async () => ({ ok: false as const, error: 'Svuotamento catalogo disponibile solo nell’app desktop' }),
+    wipe: async () => ({
+      ok: false as const,
+      error: 'Svuotamento catalogo disponibile solo nell’app desktop',
+    }),
     // Preview stub: il pruning richiede il backup raw su disco (solo app desktop).
     pruneCollection: async () => ({
       ok: false as const,
@@ -711,7 +717,13 @@ export const mockApi = {
         invalid: [],
         warnings: [],
       },
-      catalog: { checked: catalog.length, ok: catalog.length, missingUrlCount: 0, badModIdCount: 0, missingUrl: [] },
+      catalog: {
+        checked: catalog.length,
+        ok: catalog.length,
+        missingUrlCount: 0,
+        badModIdCount: 0,
+        missingUrl: [],
+      },
     }),
     // Preview stub: the real backend fetches a signed remote catalog and replaces
     // modlist_catalog wholesale. Here there is no signed endpoint, so mirror the
@@ -757,7 +769,11 @@ export const mockApi = {
         plan.length >= 2
           ? [
               { file: 'textures/armor/steel/steelarmor.dds', winner: plan[1].name, loser: plan[0].name },
-              { file: 'meshes/actors/character/character assets/skeleton.nif', winner: plan[0].name, loser: plan[1].name },
+              {
+                file: 'meshes/actors/character/character assets/skeleton.nif',
+                winner: plan[0].name,
+                loser: plan[1].name,
+              },
             ]
           : []
       return { success: true as const, plan, resolvedConflicts }
@@ -769,7 +785,12 @@ export const mockApi = {
   deploy: {
     run: async (_profileId: number) => {
       const enabled = state.mods.filter((m) => m.is_enabled && m.is_installed).length
-      if (!enabled) return { success: false as const, errorKind: 'no-mods' as const, error: 'nessuna mod abilitata da distribuire' }
+      if (!enabled)
+        return {
+          success: false as const,
+          errorKind: 'no-mods' as const,
+          error: 'nessuna mod abilitata da distribuire',
+        }
       return {
         success: true as const,
         instanceDataDir: 'C:/preview/instances/Default/Data',
@@ -800,8 +821,16 @@ export const mockApi = {
       const conflicts =
         enabledNames.length >= 2
           ? [
-              { file: 'textures/armor/steel/steelarmor.dds', winner: enabledNames[1], loser: enabledNames[0] },
-              { file: 'textures/armor/steel/steelarmor_n.dds', winner: enabledNames[1], loser: enabledNames[0] },
+              {
+                file: 'textures/armor/steel/steelarmor.dds',
+                winner: enabledNames[1],
+                loser: enabledNames[0],
+              },
+              {
+                file: 'textures/armor/steel/steelarmor_n.dds',
+                winner: enabledNames[1],
+                loser: enabledNames[0],
+              },
             ]
           : []
       return {
@@ -813,7 +842,10 @@ export const mockApi = {
         warnings: [],
       }
     },
-    prefer: async () => ({ ok: false as const, error: 'Risoluzione conflitti disponibile solo nell’app desktop' }),
+    prefer: async () => ({
+      ok: false as const,
+      error: 'Risoluzione conflitti disponibile solo nell’app desktop',
+    }),
     resolveDrift: async () => ({
       ok: false as const,
       action: 'restore' as const,
@@ -884,16 +916,28 @@ export const mockApi = {
   },
 
   crash: {
-    listRecent: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
-    analyze: async () => ({ ok: false as const, error: 'Analisi crash log disponibile solo nell’app desktop' }),
+    listRecent: async () => ({
+      ok: false as const,
+      error: 'Analisi crash log disponibile solo nell’app desktop',
+    }),
+    analyze: async () => ({
+      ok: false as const,
+      error: 'Analisi crash log disponibile solo nell’app desktop',
+    }),
   },
 
   skse: {
-    preflightDlls: async () => ({ ok: false as const, error: 'Preflight DLL SKSE disponibile solo nell’app desktop' }),
+    preflightDlls: async () => ({
+      ok: false as const,
+      error: 'Preflight DLL SKSE disponibile solo nell’app desktop',
+    }),
   },
 
   ini: {
-    applyBethiniPreset: async () => ({ success: false, error: 'Applicazione preset INI disponibile solo nell’app desktop' }),
+    applyBethiniPreset: async () => ({
+      success: false,
+      error: 'Applicazione preset INI disponibile solo nell’app desktop',
+    }),
   },
 
   // Demo data: sufficiente a verificare in anteprima browser l'avviso non-bloccante quando il
@@ -1105,9 +1149,27 @@ export const mockApi = {
     // Anteprima: il provisioning reale scarica dalle release GitHub (solo app desktop).
     provisionMissing: async () => ({
       results: [
-        { ok: true, key: 'loot' as const, label: 'LOOT', version: '0.29.1', exePath: 'C:\\preview\\tools\\loot\\LOOT.exe' },
-        { ok: true, key: 'sseedit' as const, label: 'SSEEdit (xEdit)', version: '4.1.5f', exePath: 'C:\\preview\\tools\\sseedit\\SSEEdit64.exe' },
-        { ok: true, key: 'xlodgen' as const, label: 'xLODGen', version: 'v132', exePath: 'C:\\preview\\tools\\xlodgen\\xLODGenx64.exe' },
+        {
+          ok: true,
+          key: 'loot' as const,
+          label: 'LOOT',
+          version: '0.29.1',
+          exePath: 'C:\\preview\\tools\\loot\\LOOT.exe',
+        },
+        {
+          ok: true,
+          key: 'sseedit' as const,
+          label: 'SSEEdit (xEdit)',
+          version: '4.1.5f',
+          exePath: 'C:\\preview\\tools\\sseedit\\SSEEdit64.exe',
+        },
+        {
+          ok: true,
+          key: 'xlodgen' as const,
+          label: 'xLODGen',
+          version: 'v132',
+          exePath: 'C:\\preview\\tools\\xlodgen\\xLODGenx64.exe',
+        },
       ],
     }),
   },
@@ -1139,7 +1201,13 @@ export const mockApi = {
         ensureSteam: async (env) => {
           await sleep(800) // visible "starting Steam / waiting for login" pause
           if (!env.steam.installed)
-            return { ok: false, loggedIn: false, started: false, timedOut: false, message: 'Steam non installato (simulazione)' }
+            return {
+              ok: false,
+              loggedIn: false,
+              started: false,
+              timedOut: false,
+              message: 'Steam non installato (simulazione)',
+            }
           return {
             ok: true,
             loggedIn: true,
@@ -1150,7 +1218,13 @@ export const mockApi = {
         },
         checkUpdate: async () => {
           await sleep(350)
-          return { available: false, currentVersion: '1.0.0', latestVersion: null, error: null, checked: false }
+          return {
+            available: false,
+            currentVersion: '1.0.0',
+            latestVersion: null,
+            error: null,
+            checked: false,
+          }
         },
         // Riparazione automatica: nell'app reale registra le estratte e rideploya (ordinando
         // i plugin). Qui simula un sistema già a posto — l'anteprima mostra lo stadio vero.
@@ -1190,10 +1264,25 @@ export const mockApi = {
     },
   },
   launcher: {
-    playGame: async () => ({ success: true, via: mockResolveTarget(buildMockLaunchEnv())?.bootstrapperId ?? null }),
-    createShortcut: async () => ({ success: true, shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Mod Manager.lnk' }),
-    createAppShortcut: async () => ({ success: true, shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Fantasy Launcher.lnk' }),
-    checkUpdate: async () => ({ available: false, currentVersion: '1.0.0', latestVersion: null, error: null, checked: false }),
+    playGame: async () => ({
+      success: true,
+      via: mockResolveTarget(buildMockLaunchEnv())?.bootstrapperId ?? null,
+    }),
+    createShortcut: async () => ({
+      success: true,
+      shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Mod Manager.lnk',
+    }),
+    createAppShortcut: async () => ({
+      success: true,
+      shortcutPath: 'C:/Users/User/Desktop/Skyrim AE Fantasy Launcher.lnk',
+    }),
+    checkUpdate: async () => ({
+      available: false,
+      currentVersion: '1.0.0',
+      latestVersion: null,
+      error: null,
+      checked: false,
+    }),
     smartConfig: async () => ({ ...mockSmart }),
     setSmartConfig: async (patch: Record<string, unknown>) => {
       mockSmart = { ...mockSmart, ...patch }
@@ -1232,8 +1321,122 @@ export const mockApi = {
       ],
       flagged: apply ? [{ name: 'CompatPatch A.esp', size: 4096 }] : [],
     }),
-    validateEsp: async () => ({ ok: false as const, error: 'Validazione ESP disponibile solo nell’app desktop' }),
-    qacClean: async () => ({ verdict: 'launch-failed' as const, summary: 'Quick Auto Clean disponibile solo nell’app desktop', log: null }),
+    validateEsp: async () => ({
+      ok: false as const,
+      error: 'Validazione ESP disponibile solo nell’app desktop',
+    }),
+    qacClean: async () => ({
+      verdict: 'launch-failed' as const,
+      summary: 'Quick Auto Clean disponibile solo nell’app desktop',
+      log: null,
+    }),
+  },
+
+  // Conflitti record-level: dataset demo per il preview browser (scan binario reale
+  // solo nell'app desktop). Copre tutti gli stati per vedere filtri e badge.
+  conflicts: {
+    scan: async () => ({
+      ok: true,
+      pluginsActive: 4,
+      summary: { indexed: 4, cached: 0, failed: [], totalRecords: 1234 },
+    }),
+    report: async (filter?: { statuses?: string[]; search?: string; limit?: number }) => {
+      const all = [
+        {
+          formKey: 'skyrim.esm|012eb7',
+          signature: 'WEAP',
+          edid: 'IronSword',
+          participants: [
+            { plugin: 'skyrim.esm', displayName: 'Skyrim.esm', orderIdx: 0, dataCrc: 1, isOwn: true },
+            {
+              plugin: 'weapons overhaul.esp',
+              displayName: 'Weapons Overhaul.esp',
+              orderIdx: 12,
+              dataCrc: 2,
+              isOwn: false,
+            },
+            {
+              plugin: 'combat rebalance.esp',
+              displayName: 'Combat Rebalance.esp',
+              orderIdx: 44,
+              dataCrc: 3,
+              isOwn: false,
+            },
+          ],
+          identicalOverrides: false,
+          status: 'unresolved' as const,
+          winner: 'combat rebalance.esp',
+        },
+        {
+          formKey: 'skyrim.esm|0a3b1c',
+          signature: 'NPC_',
+          edid: 'Lydia',
+          participants: [
+            { plugin: 'skyrim.esm', displayName: 'Skyrim.esm', orderIdx: 0, dataCrc: 1, isOwn: true },
+            {
+              plugin: 'npc visuals.esp',
+              displayName: 'NPC Visuals.esp',
+              orderIdx: 20,
+              dataCrc: 5,
+              isOwn: false,
+            },
+            {
+              plugin: 'ai overhaul.esp',
+              displayName: 'AI Overhaul.esp',
+              orderIdx: 31,
+              dataCrc: 6,
+              isOwn: false,
+            },
+            {
+              plugin: 'fantasylauncher_output.esp',
+              displayName: 'FantasyLauncher_Output.esp',
+              orderIdx: 99,
+              dataCrc: 7,
+              isOwn: false,
+            },
+          ],
+          identicalOverrides: false,
+          status: 'resolved' as const,
+          winner: 'fantasylauncher_output.esp',
+        },
+        {
+          formKey: 'update.esm|000d63',
+          signature: 'WTHR',
+          edid: 'SkyrimClear',
+          participants: [
+            { plugin: 'update.esm', displayName: 'Update.esm', orderIdx: 1, dataCrc: 1, isOwn: true },
+            { plugin: 'weather a.esp', displayName: 'Weather A.esp', orderIdx: 15, dataCrc: 9, isOwn: false },
+            { plugin: 'weather b.esp', displayName: 'Weather B.esp', orderIdx: 16, dataCrc: 9, isOwn: false },
+          ],
+          identicalOverrides: true,
+          status: 'identical' as const,
+          winner: 'weather b.esp',
+        },
+      ]
+      const wanted = filter?.statuses?.length ? new Set(filter.statuses) : null
+      const q = filter?.search?.trim().toLowerCase()
+      const items = all.filter(
+        (c) =>
+          (!wanted || wanted.has(c.status)) &&
+          (!q ||
+            c.formKey.includes(q) ||
+            (c.edid ?? '').toLowerCase().includes(q) ||
+            c.signature.toLowerCase().includes(q) ||
+            c.participants.some((p) => p.plugin.includes(q))),
+      )
+      return {
+        ok: true,
+        patchName: 'FantasyLauncher_Output.esp',
+        summary: {
+          total: all.length,
+          byStatus: { ignored: 0, resolved: 1, shadowed: 0, identical: 1, unresolved: 1 },
+        },
+        items,
+        truncated: false,
+      }
+    },
+    setIgnored: async () => ({ ok: true }),
+    onProgress: () => () => {},
   },
 
   // Vortex importer — simulated scan of two collections for the browser preview.

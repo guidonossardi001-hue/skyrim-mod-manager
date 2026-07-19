@@ -81,14 +81,14 @@ interface ScanRow {
 }
 
 /**
- * (Ri)costruisce l'indice per il load order dato (ordinato: indice = priorità di caricamento).
- * I plugin spariti dal load order vengono potati; quelli invariati non vengono riletti.
+ * Fase di preparazione condivisa dai due driver (sync/async): schema, mappa light,
+ * potatura dei plugin spariti, statement preparati. Ritorna la step-function per-plugin
+ * e il summary che i driver accumulano.
  */
-export function indexLoadOrder(
+function prepareIndexRun(
   db: SqliteDb,
   pluginsInOrder: ConflictPluginInput[],
-  onProgress?: (p: IndexProgress) => void,
-): IndexSummary {
+): { step: (p: ConflictPluginInput, orderIdx: number) => boolean; summary: IndexSummary } {
   ensureConflictSchema(db)
 
   // Mappa light di TUTTO il load order prima di scansionare: il mask delle chiavi di un
@@ -134,7 +134,8 @@ export function indexLoadOrder(
 
   const summary: IndexSummary = { indexed: 0, cached: 0, failed: [], totalRecords: 0 }
 
-  pluginsInOrder.forEach((p, orderIdx) => {
+  // Ritorna true se il plugin era in cache (nessuna rilettura binaria).
+  const step = (p: ConflictPluginInput, orderIdx: number): boolean => {
     const key = p.name.toLowerCase()
     let size: number
     let mtimeMs: number
@@ -149,16 +150,14 @@ export function indexLoadOrder(
         db.prepare('DELETE FROM conflict_plugin_scan WHERE plugin = ?').run(key)
       })
       summary.failed.push(p.name)
-      onProgress?.({ done: orderIdx + 1, total: pluginsInOrder.length, plugin: p.name, cached: false })
-      return
+      return false
     }
 
     const prev = selScan.get(key) as ScanRow | undefined
     if (prev && prev.parsed === 1 && prev.size === size && prev.mtime_ms === mtimeMs) {
       updOrder.run(orderIdx, p.path, p.name, key)
       summary.cached++
-      onProgress?.({ done: orderIdx + 1, total: pluginsInOrder.length, plugin: p.name, cached: true })
-      return
+      return true
     }
 
     // Rescan binario. I record vengono bufferizzati e scritti SOLO se il parse arriva
@@ -204,9 +203,48 @@ export function indexLoadOrder(
     } else {
       summary.failed.push(p.name)
     }
-    onProgress?.({ done: orderIdx + 1, total: pluginsInOrder.length, plugin: p.name, cached: false })
-  })
+    return false
+  }
 
+  return { step, summary }
+}
+
+/**
+ * (Ri)costruisce l'indice per il load order dato (ordinato: indice = priorità di caricamento).
+ * I plugin spariti dal load order vengono potati; quelli invariati non vengono riletti.
+ * Driver SINCRONO: usato dai test e da contesti già fuori dal main thread.
+ */
+export function indexLoadOrder(
+  db: SqliteDb,
+  pluginsInOrder: ConflictPluginInput[],
+  onProgress?: (p: IndexProgress) => void,
+): IndexSummary {
+  const { step, summary } = prepareIndexRun(db, pluginsInOrder)
+  pluginsInOrder.forEach((p, orderIdx) => {
+    const cached = step(p, orderIdx)
+    onProgress?.({ done: orderIdx + 1, total: pluginsInOrder.length, plugin: p.name, cached })
+  })
+  return summary
+}
+
+/**
+ * Driver ASINCRONO per il main process di Electron: identica semantica del sincrono ma
+ * cede l'event loop tra un plugin e l'altro (setImmediate), così IPC/finestra restano
+ * reattivi anche durante un cold scan da ~GB. La scansione del SINGOLO plugin resta
+ * sincrona (il file più grosso, Skyrim.esm, costa poche centinaia di ms).
+ */
+export async function indexLoadOrderAsync(
+  db: SqliteDb,
+  pluginsInOrder: ConflictPluginInput[],
+  onProgress?: (p: IndexProgress) => void,
+): Promise<IndexSummary> {
+  const { step, summary } = prepareIndexRun(db, pluginsInOrder)
+  for (let orderIdx = 0; orderIdx < pluginsInOrder.length; orderIdx++) {
+    const p = pluginsInOrder[orderIdx]
+    const cached = step(p, orderIdx)
+    onProgress?.({ done: orderIdx + 1, total: pluginsInOrder.length, plugin: p.name, cached })
+    await new Promise<void>((resolve) => setImmediate(resolve))
+  }
   return summary
 }
 

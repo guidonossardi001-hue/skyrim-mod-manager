@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useCallback } from 'react'
+import { Virtuoso } from 'react-virtuoso'
 import { useAppStore } from '@/store/appStore'
 import {
   AlertTriangle,
@@ -15,10 +16,21 @@ import {
   X,
   ChevronDown,
   ChevronRight,
+  Swords,
+  Search,
+  EyeOff,
+  Eye,
+  ExternalLink,
 } from 'lucide-react'
 import { clsx } from 'clsx'
 import { toast } from '@/lib/toast'
-import type { ConflictInfo } from '@/types'
+import type {
+  ConflictInfo,
+  RecordConflictItem,
+  RecordConflictScanProgress,
+  RecordConflictStatus,
+  RecordConflictSummary,
+} from '@/types'
 
 export default function Conflicts() {
   const { conflicts, mods, detectConflicts, resolveConflict, setActivePage, activeProfileId } = useAppStore()
@@ -225,14 +237,16 @@ export default function Conflicts() {
           </button>
         </div>
         <p className="text-xs text-dark-400 mb-3">
-          Dry-run del piano: per ogni coppia in conflitto vedi chi vince oggi (regole
-          categoria/peso/priorità) e puoi <b>invertire la precedenza</b> senza disattivare nulla.
+          Dry-run del piano: per ogni coppia in conflitto vedi chi vince oggi (regole categoria/peso/priorità)
+          e puoi <b>invertire la precedenza</b> senza disattivare nulla.
         </p>
         {preview?.ok && (
           <div className="flex flex-wrap items-center gap-3 text-xs text-dark-300 mb-3">
             <span>{preview.modsScanned} mod analizzate</span>
             <span>·</span>
-            <span>{preview.conflicts?.length ?? 0} file in conflitto ({conflictPairs.length} coppie)</span>
+            <span>
+              {preview.conflicts?.length ?? 0} file in conflitto ({conflictPairs.length} coppie)
+            </span>
             {preview.pluginBudget && (
               <>
                 <span>·</span>
@@ -257,7 +271,9 @@ export default function Conflicts() {
           </div>
         )}
         {preview?.ok && conflictPairs.length === 0 && (
-          <p className="text-xs text-green-400">Nessuna sovrascrittura contesa: ogni file ha un solo fornitore.</p>
+          <p className="text-xs text-green-400">
+            Nessuna sovrascrittura contesa: ogni file ha un solo fornitore.
+          </p>
         )}
         {conflictPairs.length > 0 && (
           <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
@@ -273,12 +289,18 @@ export default function Conflicts() {
                       title="Mostra i singoli file contesi per fissarne uno"
                     >
                       <p className="text-white/85 truncate flex items-center gap-1">
-                        {expanded ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
+                        {expanded ? (
+                          <ChevronDown size={12} className="flex-shrink-0" />
+                        ) : (
+                          <ChevronRight size={12} className="flex-shrink-0" />
+                        )}
                         <span className="text-green-400 font-medium">{p.winner}</span>
                         <span className="text-dark-500"> sovrascrive </span>
                         <span className="text-dark-300">{p.loser}</span>
                       </p>
-                      <p className="text-dark-500 pl-4">{p.files.length} file contesi · es. {p.files[0]}</p>
+                      <p className="text-dark-500 pl-4">
+                        {p.files.length} file contesi · es. {p.files[0]}
+                      </p>
                     </button>
                     <button
                       onClick={() => preferLoser(p)}
@@ -297,7 +319,9 @@ export default function Conflicts() {
                       </p>
                       {p.files.map((f) => (
                         <div key={f} className="flex items-center justify-between gap-2 text-xs">
-                          <span className="text-dark-300 truncate" title={f}>{f}</span>
+                          <span className="text-dark-300 truncate" title={f}>
+                            {f}
+                          </span>
                           <button
                             onClick={() => pinFile(f, p.loser)}
                             disabled={pinBusy !== null}
@@ -322,7 +346,10 @@ export default function Conflicts() {
             </p>
             <div className="space-y-1">
               {rules.map((r) => (
-                <div key={r.id} className="flex items-center justify-between gap-2 text-xs rounded-lg bg-void-900/20 px-2.5 py-1.5">
+                <div
+                  key={r.id}
+                  className="flex items-center justify-between gap-2 text-xs rounded-lg bg-void-900/20 px-2.5 py-1.5"
+                >
                   <span className="text-dark-300 truncate" title={r.relPath}>
                     <span className="text-dark-500">{r.relPath}</span> → sempre da{' '}
                     <span className="text-void-300 font-medium">{r.winnerMod}</span>
@@ -341,6 +368,11 @@ export default function Conflicts() {
           </div>
         )}
       </div>
+
+      {/* Conflitti record-level DENTRO gli ESP (stile xEdit): stesso FormID toccato da più
+          plugin. Rilevazione nativa (indice SQLite incrementale) + tracking della patch di
+          risoluzione personale; la risoluzione vera resta in xEdit. */}
+      <RecordConflictsCard />
 
       {conflicts.length === 0 ? (
         <div className="card p-10 flex flex-col items-center text-center">
@@ -476,6 +508,351 @@ function ConflictCard({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── Conflitti record-level (dentro gli ESP) ─────────────────────────────────
+
+const STATUS_META: Record<RecordConflictStatus, { label: string; chip: string; badge: string }> = {
+  unresolved: {
+    label: 'Da risolvere',
+    chip: 'bg-red-900/30 text-red-300 hover:bg-red-900/50',
+    badge: 'bg-red-900/40 text-red-300',
+  },
+  shadowed: {
+    label: 'Patch scavalcata',
+    chip: 'bg-orange-900/30 text-orange-300 hover:bg-orange-900/50',
+    badge: 'bg-orange-900/40 text-orange-300',
+  },
+  identical: {
+    label: 'Identici',
+    chip: 'bg-dark-800 text-dark-300 hover:bg-dark-700',
+    badge: 'bg-dark-800 text-dark-300',
+  },
+  resolved: {
+    label: 'Risolti',
+    chip: 'bg-green-900/30 text-green-300 hover:bg-green-900/50',
+    badge: 'bg-green-900/40 text-green-300',
+  },
+  ignored: {
+    label: 'Ignorati',
+    chip: 'bg-dark-800 text-dark-400 hover:bg-dark-700',
+    badge: 'bg-dark-800 text-dark-400',
+  },
+}
+const STATUS_ORDER: RecordConflictStatus[] = ['unresolved', 'shadowed', 'identical', 'resolved', 'ignored']
+
+// Etichette leggibili per le signature più comuni (le altre mostrano il 4cc nudo).
+const SIG_LABELS: Record<string, string> = {
+  WEAP: 'Arma',
+  ARMO: 'Armatura',
+  NPC_: 'NPC',
+  WTHR: 'Meteo',
+  CELL: 'Cella',
+  REFR: 'Reference',
+  LVLI: 'Lista livellata',
+  LVLN: 'NPC livellato',
+  PERK: 'Perk',
+  SPEL: 'Incantesimo',
+  MGEF: 'Effetto magico',
+  RACE: 'Razza',
+  QUST: 'Quest',
+  GMST: 'Game setting',
+  INGR: 'Ingrediente',
+  ALCH: 'Pozione',
+  BOOK: 'Libro',
+  STAT: 'Statico',
+  TREE: 'Albero',
+  FLOR: 'Flora',
+  LIGH: 'Luce',
+  IMGS: 'Imagespace',
+}
+
+function RecordConflictsCard() {
+  const [scanBusy, setScanBusy] = useState(false)
+  const [progress, setProgress] = useState<RecordConflictScanProgress | null>(null)
+  const [report, setReport] = useState<{
+    patchName?: string
+    summary?: RecordConflictSummary
+    items?: RecordConflictItem[]
+    truncated?: boolean
+  } | null>(null)
+  const [statusFilter, setStatusFilter] = useState<Set<RecordConflictStatus>>(new Set())
+  const [search, setSearch] = useState('')
+  const [ignoreBusy, setIgnoreBusy] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!window.api.conflicts) return
+    const unsub = window.api.conflicts.onProgress((p) => setProgress(p))
+    return unsub
+  }, [])
+
+  const loadReport = useCallback(async (filters?: { statuses?: RecordConflictStatus[]; search?: string }) => {
+    if (!window.api.conflicts) return
+    try {
+      const r = await window.api.conflicts.report({
+        statuses: filters?.statuses,
+        search: filters?.search,
+      })
+      if (r.ok) setReport(r)
+      else toast.error('Report conflitti fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Report conflitti fallito', (e as Error).message)
+    }
+  }, [])
+
+  const currentFilters = useCallback(
+    () => ({
+      statuses: statusFilter.size > 0 ? [...statusFilter] : undefined,
+      search: search.trim() || undefined,
+    }),
+    [statusFilter, search],
+  )
+
+  // Il refetch parte quando cambiano i filtri, ma solo dopo il primo report (il primo
+  // load è esplicito: bottone Scansiona o Aggiorna).
+  useEffect(() => {
+    if (report === null) return
+    void loadReport(currentFilters())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilter, search])
+
+  const runScan = async () => {
+    if (!window.api.conflicts || scanBusy) return
+    setScanBusy(true)
+    setProgress(null)
+    try {
+      const r = await window.api.conflicts.scan()
+      if (!r.ok) {
+        toast.error('Scansione conflitti fallita', r.error ?? 'errore sconosciuto')
+        return
+      }
+      const s = r.summary
+      toast.success(
+        'Scansione completata',
+        s
+          ? `${r.pluginsActive} plugin (${s.indexed} riletti, ${s.cached} in cache${s.failed.length ? `, ${s.failed.length} falliti` : ''})`
+          : `${r.pluginsActive} plugin`,
+      )
+      await loadReport(currentFilters())
+    } catch (e) {
+      toast.error('Scansione conflitti fallita', (e as Error).message)
+    } finally {
+      setScanBusy(false)
+      setProgress(null)
+    }
+  }
+
+  const toggleStatus = (s: RecordConflictStatus) => {
+    setStatusFilter((prev) => {
+      const next = new Set(prev)
+      if (next.has(s)) next.delete(s)
+      else next.add(s)
+      return next
+    })
+  }
+
+  const toggleIgnore = async (item: RecordConflictItem) => {
+    if (!window.api.conflicts || ignoreBusy) return
+    setIgnoreBusy(item.formKey)
+    try {
+      const makeIgnored = item.status !== 'ignored'
+      const r = await window.api.conflicts.setIgnored(item.formKey, makeIgnored)
+      if (r.ok) await loadReport(currentFilters())
+      else toast.error('Aggiornamento fallito', r.error ?? 'errore sconosciuto')
+    } catch (e) {
+      toast.error('Aggiornamento fallito', (e as Error).message)
+    } finally {
+      setIgnoreBusy(null)
+    }
+  }
+
+  const items = report?.items ?? []
+  const summary = report?.summary
+
+  return (
+    <div className="card p-5 mb-6">
+      <div className="flex items-center justify-between mb-1">
+        <h3 className="font-semibold text-white/80 flex items-center gap-2 text-sm">
+          <Swords size={15} className="text-void-400" /> Conflitti di record (dentro gli ESP)
+        </h3>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => window.api.tools.launchSSEEdit()}
+            className="btn-ghost flex items-center gap-1.5 text-xs"
+            title="Apri SSEEdit per risolvere i conflitti nella patch personale"
+          >
+            <ExternalLink size={12} /> Apri SSEEdit
+          </button>
+          <button
+            onClick={runScan}
+            disabled={scanBusy}
+            className="btn-ghost flex items-center gap-2 text-sm disabled:opacity-50"
+          >
+            <RefreshCw size={14} className={scanBusy ? 'animate-spin' : ''} />
+            {scanBusy ? 'Scansione…' : report ? 'Riscansiona' : 'Scansiona record'}
+          </button>
+        </div>
+      </div>
+      <p className="text-xs text-dark-400 mb-3">
+        Stesso record (FormID) modificato da più plugin: chi carica per ultimo vince. Qui vedi DOVE serve una
+        decisione e quali conflitti la tua patch{' '}
+        <span className="text-void-300 font-medium">{report?.patchName ?? 'FantasyLauncher_Output.esp'}</span>{' '}
+        copre già — la risoluzione campo-per-campo si fa in SSEEdit.
+      </p>
+
+      {scanBusy && progress && (
+        <div className="mb-3">
+          <div className="flex items-center justify-between text-xs text-dark-300 mb-1">
+            <span className="truncate">{progress.plugin}</span>
+            <span>
+              {progress.done}/{progress.total}
+            </span>
+          </div>
+          <div className="h-1.5 rounded bg-dark-800 overflow-hidden">
+            <div
+              className="h-full bg-void-500 transition-all"
+              style={{ width: `${Math.round((progress.done / Math.max(1, progress.total)) * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {summary && (
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          {STATUS_ORDER.map((s) => (
+            <button
+              key={s}
+              onClick={() => toggleStatus(s)}
+              className={clsx(
+                'flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg transition-all',
+                STATUS_META[s].chip,
+                statusFilter.size > 0 && !statusFilter.has(s) && 'opacity-40',
+              )}
+              title={
+                statusFilter.has(s)
+                  ? 'Rimuovi dal filtro'
+                  : 'Mostra solo questo stato (clic su più stati per combinarli)'
+              }
+            >
+              {STATUS_META[s].label}
+              <span className="font-bold">{summary.byStatus[s]}</span>
+            </button>
+          ))}
+          <div className="relative ml-auto">
+            <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-dark-500" />
+            <input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filtra per EDID, plugin, signature…"
+              className="bg-dark-900 border border-dark-800 rounded-lg pl-7 pr-2 py-1 text-xs text-white/85 placeholder:text-dark-500 w-64 focus:outline-none focus:border-void-700"
+            />
+          </div>
+        </div>
+      )}
+
+      {report === null && !scanBusy && (
+        <p className="text-xs text-dark-500">
+          Nessuna scansione ancora: premi <b>Scansiona record</b>. La prima passata legge tutti i plugin
+          attivi (decine di secondi su una collezione grande); le successive rileggono solo i file cambiati.
+        </p>
+      )}
+      {report !== null && summary && summary.total === 0 && (
+        <p className="text-xs text-green-400">Nessun conflitto di record tra i plugin attivi.</p>
+      )}
+      {report !== null && items.length === 0 && summary && summary.total > 0 && (
+        <p className="text-xs text-dark-400">Nessun conflitto corrisponde ai filtri correnti.</p>
+      )}
+
+      {items.length > 0 && (
+        <>
+          <Virtuoso
+            style={{ height: 420 }}
+            data={items}
+            initialItemCount={Math.min(items.length, 15)}
+            computeItemKey={(i, item) => item?.formKey ?? i}
+            itemContent={(_i, item) =>
+              // Durante lo swap di `data` verso un array più corto (cambio filtro) Virtuoso
+              // può chiedere transitoriamente un indice oltre la nuova lunghezza.
+              item ? (
+                <RecordConflictRow
+                  item={item}
+                  busy={ignoreBusy === item.formKey}
+                  onToggleIgnore={() => toggleIgnore(item)}
+                />
+              ) : null
+            }
+          />
+          {report?.truncated && (
+            <p className="text-[11px] text-dark-500 mt-2">
+              Elenco troncato: affina i filtri per vedere le voci rimanenti (il riepilogo in alto conta
+              comunque tutto).
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
+function RecordConflictRow({
+  item,
+  busy,
+  onToggleIgnore,
+}: {
+  item: RecordConflictItem
+  busy: boolean
+  onToggleIgnore: () => void
+}) {
+  const meta = STATUS_META[item.status]
+  const sigLabel = SIG_LABELS[item.signature]
+  const isIgnored = item.status === 'ignored'
+  return (
+    <div className="flex items-center gap-3 border-b border-dark-800/60 py-2 pr-1 text-xs">
+      <span
+        className={clsx(
+          'text-[10px] font-bold px-2 py-0.5 rounded flex-shrink-0 w-28 text-center',
+          meta.badge,
+        )}
+      >
+        {meta.label}
+      </span>
+      <span
+        className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-dark-900 text-dark-300 flex-shrink-0"
+        title={sigLabel ?? item.signature}
+      >
+        {item.signature}
+        {sigLabel ? ` · ${sigLabel}` : ''}
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="text-white/85 truncate" title={item.formKey}>
+          {item.edid ?? item.formKey}
+        </p>
+        <p className="text-dark-500 truncate" title={item.participants.map((p) => p.displayName).join(' → ')}>
+          {item.participants.map((p, idx) => (
+            <span key={p.plugin + idx}>
+              {idx > 0 && <span className="text-dark-600"> → </span>}
+              <span
+                className={clsx(
+                  p.plugin === item.winner ? 'text-green-400' : p.isOwn ? 'text-dark-400' : 'text-dark-300',
+                )}
+              >
+                {p.displayName}
+              </span>
+            </span>
+          ))}
+        </p>
+      </div>
+      <button
+        onClick={onToggleIgnore}
+        disabled={busy}
+        title={isIgnored ? 'Riporta tra i conflitti da valutare' : 'Segna come non-problema (persistito)'}
+        className="flex items-center gap-1 px-2 py-1 rounded-lg bg-dark-900 text-dark-300 hover:bg-dark-800 transition-all disabled:opacity-50 flex-shrink-0"
+      >
+        {isIgnored ? <Eye size={11} /> : <EyeOff size={11} />}
+        {isIgnored ? 'Riattiva' : 'Ignora'}
+      </button>
     </div>
   )
 }

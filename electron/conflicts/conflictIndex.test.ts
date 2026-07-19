@@ -5,7 +5,13 @@ import { join } from 'node:path'
 import { buildPlugin, buildGrup, buildRecord } from '../plugins/tes4Fixture'
 import { openTestDb } from '../db/openTestDb'
 import type { SqliteDb } from '../db/sqlite'
-import { indexLoadOrder, listConflicts, type ConflictPluginInput } from './conflictIndex'
+import {
+  indexLoadOrder,
+  indexLoadOrderAsync,
+  listConflicts,
+  type ConflictPluginInput,
+  type IndexProgress,
+} from './conflictIndex'
 
 // Layout di prova:
 //   Base.esm (0 master)      → definisce i record propri 0x000001..0x000003
@@ -129,6 +135,19 @@ describe('indexLoadOrder + listConflicts', () => {
     expect(second.failed).toEqual(['ModA.esp'])
     const conflicts = listConflicts(db, { excludeFromCount: 'Patch.esp' })
     expect(conflicts).toHaveLength(0) // senza ModA resta un solo override per chiave
+  })
+
+  it('driver async: stessa semantica del sincrono + progress per ogni plugin', async () => {
+    const events: IndexProgress[] = []
+    const summary = await indexLoadOrderAsync(db, order, (p) => events.push(p))
+    expect(summary.indexed).toBe(4)
+    expect(summary.failed).toEqual([])
+    expect(events).toHaveLength(4)
+    expect(events[3]).toMatchObject({ done: 4, total: 4, cached: false })
+    expect(listConflicts(db, { excludeFromCount: 'Patch.esp' })).toHaveLength(2)
+    // Warm run async sopra cache scritta dal sync driver e viceversa: stessa cache.
+    const warm = indexLoadOrder(db, order)
+    expect(warm.cached).toBe(4)
   })
 
   it('plugin corrotto → parse fallito, escluso dall analisi senza record parziali', () => {

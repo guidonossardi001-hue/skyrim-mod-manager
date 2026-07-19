@@ -224,6 +224,22 @@ contextBridge.exposeInMainWorld('api', {
     qacClean: (pluginName: string) => invoke('plugins:qac-clean', pluginName),
   },
 
+  // Conflitti record-level (dentro gli ESP): scansione binaria del load order attivo +
+  // report tracciato contro la patch di risoluzione personale. Solo filtri/form_key
+  // sull'IPC, mai path — dataDir/plugins.txt li risolve il main process.
+  conflicts: {
+    scan: () => invoke('conflicts:scan'),
+    report: (filter?: { statuses?: string[]; search?: string; limit?: number }) =>
+      invoke('conflicts:report', filter),
+    setIgnored: (formKey: string, ignored: boolean, reason?: string) =>
+      invoke('conflicts:set-ignored', formKey, ignored, reason),
+    onProgress: (callback: (p: unknown) => void) => {
+      const listener = (_e: IpcRendererEvent, p: unknown) => callback(p)
+      ipcRenderer.on('conflicts:progress', listener)
+      return () => ipcRenderer.removeListener('conflicts:progress', listener)
+    },
+  },
+
   // Download manager
   download: {
     start: (id: number) => invoke('download:start', id),
@@ -297,7 +313,8 @@ contextBridge.exposeInMainWorld('api', {
   // Preset INI derivati da BethINI Pie (Grass/Distant Detail/Shadow) + Quick Auto Clean
   // headless via xEdit/SSEEdit su un singolo plugin dirty.
   ini: {
-    applyBethiniPreset: (tier: string, flavor: 'bethini' | 'vanilla') => invoke('ini:apply-bethini-preset', tier, flavor),
+    applyBethiniPreset: (tier: string, flavor: 'bethini' | 'vanilla') =>
+      invoke('ini:apply-bethini-preset', tier, flavor),
   },
 
   // Advisory hardware (sola lettura): GPU/VRAM/RAM rilevati + tier BethINI massimo consigliato.

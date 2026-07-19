@@ -93,13 +93,7 @@ export interface Download {
 }
 
 export type DownloadStatus =
-  | 'pending'
-  | 'downloading'
-  | 'paused'
-  | 'completed'
-  | 'failed'
-  | 'queued'
-  | 'installing'
+  'pending' | 'downloading' | 'paused' | 'completed' | 'failed' | 'queued' | 'installing'
 
 export interface AppSettings {
   nexusApiKey?: string
@@ -175,6 +169,37 @@ export interface SaveLoadOrderResult {
   written: number
   backupPath: string | null
   error?: string
+}
+
+// ── Conflitti record-level (dentro gli ESP) ─────────────────────────────────
+// Specchio dei tipi di electron/conflicts (conflictIndex/patchTracker): il renderer
+// non importa moduli del main process, quindi le shape viaggiano qui.
+export type RecordConflictStatus = 'ignored' | 'resolved' | 'shadowed' | 'identical' | 'unresolved'
+export interface RecordConflictParticipant {
+  plugin: string
+  displayName: string
+  orderIdx: number
+  dataCrc: number
+  isOwn: boolean
+}
+export interface RecordConflictItem {
+  formKey: string
+  signature: string
+  edid: string | null
+  participants: RecordConflictParticipant[]
+  identicalOverrides: boolean
+  status: RecordConflictStatus
+  winner: string
+}
+export interface RecordConflictSummary {
+  total: number
+  byStatus: Record<RecordConflictStatus, number>
+}
+export interface RecordConflictScanProgress {
+  done: number
+  total: number
+  plugin: string
+  cached: boolean
 }
 
 // Window API type (injected by preload)
@@ -547,7 +572,9 @@ declare global {
         // Regole conflitto FILE-level (fissano il vincitore per un percorso esatto). Mirrors
         // file_conflict_rules (migration v12, electron/db/migrations.ts).
         conflictRules: {
-          list(profileId: number): Promise<{ id: number; relPath: string; winnerMod: string }[] | { error: string }>
+          list(
+            profileId: number,
+          ): Promise<{ id: number; relPath: string; winnerMod: string }[] | { error: string }>
           set(profileId: number, relPath: string, winnerMod: string): Promise<{ ok: boolean; error?: string }>
           remove(ruleId: number): Promise<{ ok: boolean; error?: string }>
         }
@@ -635,7 +662,12 @@ declare global {
           defaultPreset: string | null
           prereqs: { body: boolean; cbpc: boolean; fsmp: boolean; skeleton: boolean }
           outputRegistered: boolean
-          bodyVariants: { femaleNude: number; femaleNevernude: number; maleNude: number; maleNevernude: number }
+          bodyVariants: {
+            femaleNude: number
+            femaleNevernude: number
+            maleNude: number
+            maleNevernude: number
+          }
           error?: string
         }>
         build(
@@ -688,16 +720,34 @@ declare global {
             crashLoggerVersion: string | null
             exceptionType: string | null
             exceptionModule: string | null
-            callStack: { index: number; address: string; module: string; offset: string; instruction: string | null }[]
+            callStack: {
+              index: number
+              address: string
+              module: string
+              offset: string
+              instruction: string | null
+            }[]
             ssePlugins: { name: string; version: string | null }[]
             plugins: string[]
             recognized: boolean
           }
           analysis?: {
-            culprit: { index: number; address: string; module: string; offset: string; instruction: string | null } | null
+            culprit: {
+              index: number
+              address: string
+              module: string
+              offset: string
+              instruction: string | null
+            } | null
             suggestions: string[]
             // Firme note (DB derivato da Phostwood's Crash Log Analyzer, GPL-3.0).
-            knownPatterns?: { id: string; label: string; matched: string[]; advice: string; priority: number }[]
+            knownPatterns?: {
+              id: string
+              label: string
+              matched: string[]
+              advice: string
+              priority: number
+            }[]
           }
           rawExcerpt?: string
           error?: string
@@ -762,7 +812,12 @@ declare global {
             bGenerateGrassDataFiles: boolean | null
             markerPresent: boolean
           }
-          summary?: { totalFiles: number; parsedCount: number; unparsedCount: number; byWorldspace: Record<string, number> }
+          summary?: {
+            totalFiles: number
+            parsedCount: number
+            unparsedCount: number
+            byWorldspace: Record<string, number>
+          }
         }>
         startPrecache(): Promise<{
           success: boolean
@@ -835,8 +890,37 @@ declare global {
         qacClean(pluginName: string): Promise<{
           verdict: 'cleaned' | 'nothing-to-clean' | 'crashed' | 'timeout' | 'launch-failed' | 'blocked'
           summary: string
-          log: { undeleted: string[]; removed: string[]; skippedNavmeshes: string[]; nothingToClean: boolean } | null
+          log: {
+            undeleted: string[]
+            removed: string[]
+            skippedNavmeshes: string[]
+            nothingToClean: boolean
+          } | null
         }>
+      }
+      // Conflitti record-level (dentro gli ESP): scan binario del load order + report
+      // tracciato contro la patch di risoluzione personale (FantasyLauncher_Output.esp).
+      conflicts: {
+        scan(): Promise<{
+          ok: boolean
+          error?: string
+          pluginsActive?: number
+          summary?: { indexed: number; cached: number; failed: string[]; totalRecords: number }
+        }>
+        report(filter?: { statuses?: RecordConflictStatus[]; search?: string; limit?: number }): Promise<{
+          ok: boolean
+          error?: string
+          patchName?: string
+          summary?: RecordConflictSummary
+          items?: RecordConflictItem[]
+          truncated?: boolean
+        }>
+        setIgnored(
+          formKey: string,
+          ignored: boolean,
+          reason?: string,
+        ): Promise<{ ok: boolean; error?: string }>
+        onProgress(callback: (p: RecordConflictScanProgress) => void): () => void
       }
       // StockGame builder — isolated vanilla copy (companion-safe, read-only source).
       stockGame: {
@@ -845,10 +929,7 @@ declare global {
       }
       // Mass-sync — drive the whole modlist into the isolated StockGame.
       sync: {
-        start(opts?: {
-          concurrency?: number
-          limit?: number
-        }): Promise<{
+        start(opts?: { concurrency?: number; limit?: number }): Promise<{
           ok: boolean
           total?: number
           stockGameDir?: string

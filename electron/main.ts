@@ -1,6 +1,21 @@
 import { app, BrowserWindow, ipcMain, dialog, shell, nativeTheme, session, safeStorage, Menu } from 'electron'
 import { join, resolve, dirname, basename } from 'path'
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, statSync, readdirSync, realpathSync, cpSync, openSync, readSync, closeSync, copyFileSync, createWriteStream } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  readdirSync,
+  realpathSync,
+  cpSync,
+  openSync,
+  readSync,
+  closeSync,
+  copyFileSync,
+  createWriteStream,
+} from 'fs'
 import { readdir, lstat } from 'fs/promises'
 import { spawn } from 'child_process'
 import Store from 'electron-store'
@@ -96,6 +111,13 @@ import {
 } from './util/openTargets'
 import { resolveActiveProfileId } from './util/activeProfile'
 import { detectPandora, pandoraRoots, realFsProbe } from './tools/pandora'
+import {
+  runConflictScan,
+  getConflictReport,
+  DEFAULT_PATCH_NAME,
+  DEFAULT_REPORT_LIMIT,
+} from './conflicts/conflictService'
+import { setIgnored as setConflictIgnored, type ConflictStatus } from './conflicts/patchTracker'
 import { initBodySlideEngine } from './tools/bodyslideEngine'
 import {
   buildXLODGenArgs,
@@ -189,7 +211,10 @@ let downloadQueue: { enqueue: (id: number) => void; processPending: () => { queu
 // left db=null), we throw a CLEAR, descriptive error instead of an opaque
 // "Cannot read properties of null" — no undefined behaviour in the app lifecycle.
 function getRawDb(): Database.Database {
-  if (!db) throw new Error('DB non inizializzato: operazione richiesta prima del boot del database (o dopo un abort per DB corrotto)')
+  if (!db)
+    throw new Error(
+      'DB non inizializzato: operazione richiesta prima del boot del database (o dopo un abort per DB corrotto)',
+    )
   return db
 }
 /** Same guarantee, exposed as the engine-agnostic SqliteDb surface used by the subsystems. */
@@ -394,8 +419,7 @@ function applySecurityPolicies() {
   // object-src/base-uri/form-action/frame-ancestors are locked down in BOTH modes:
   // there is no plugin content, no <base> rewriting, no form posts, and the app must
   // never be embeddable — these close injection vectors CSP omits by default.
-  const lockdown =
-    "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
+  const lockdown = "object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; "
   const csp = isDev
     ? lockdown +
       "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:5173 ws://localhost:5173; " +
@@ -563,10 +587,10 @@ async function enrichNxmRequest(token: string, link: NxmLink) {
   const key = readSecret('nexusApiKey')
   if (!key) return
   try {
-    const res = await axios.get(
-      `https://api.nexusmods.com/v1/games/${link.game}/mods/${link.modId}.json`,
-      { headers: { apikey: key, 'User-Agent': 'SkyrimAEModManager/1.0' }, timeout: 8000 },
-    )
+    const res = await axios.get(`https://api.nexusmods.com/v1/games/${link.game}/mods/${link.modId}.json`, {
+      headers: { apikey: key, 'User-Agent': 'SkyrimAEModManager/1.0' },
+      timeout: 8000,
+    })
     const name = (res.data as { name?: unknown })?.name
     if (typeof name === 'string' && name) {
       nxmConsent.patch(token, { name })
@@ -700,8 +724,7 @@ app.whenReady().then(() => {
     resolveInstanceDataDir: (profileId) => {
       if (deployTargetIsGame()) return resolveGameDataDir()
       const prof = getRawDb().prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
-        | { name: string }
-        | undefined
+        { name: string } | undefined
       if (!prof) return null
       const instanceRoot =
         (store.get('instancePath') as string | undefined) || join(app.getPath('userData'), 'instances')
@@ -737,7 +760,7 @@ app.whenReady().then(() => {
     // target istanza non c'è un exe reale da validare né una root da proteggere.
     resolveGameExeDir: () =>
       deployTargetIsGame()
-        ? detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
+        ? (detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null)
         : null,
     log: (level, msg) => (level === 'warn' ? logger.warn('deploy', msg) : logger.info('deploy', msg)),
   })
@@ -831,7 +854,10 @@ app.whenReady().then(() => {
         try {
           const proc = spawn(exe, args, { cwd, windowsHide: false })
           const timer = setTimeout(() => {
-            finish({ code: null, error: `timeout dopo ${BODYSLIDE_TIMEOUT_MS / 60000} minuti (dialogo bloccante? verifica manualmente BodySlide)` })
+            finish({
+              code: null,
+              error: `timeout dopo ${BODYSLIDE_TIMEOUT_MS / 60000} minuti (dialogo bloccante? verifica manualmente BodySlide)`,
+            })
             try {
               proc.kill('SIGKILL')
             } catch {
@@ -948,7 +974,18 @@ app.whenReady().then(() => {
   ipcMain.handle('deploy:verify', () => {
     const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
     const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
-    if (!dataDir) return { checked: false, totalFiles: 0, intactFiles: 0, missing: [], replaced: [], junctionsMissing: [], missingCount: 0, replacedCount: 0, junctionsMissingCount: 0 }
+    if (!dataDir)
+      return {
+        checked: false,
+        totalFiles: 0,
+        intactFiles: 0,
+        missing: [],
+        replaced: [],
+        junctionsMissing: [],
+        missingCount: 0,
+        replacedCount: 0,
+        junctionsMissingCount: 0,
+      }
     return verifyDeployLive(dataDir)
   })
   ipcMain.handle('launch:run', async () => {
@@ -983,7 +1020,10 @@ app.whenReady().then(() => {
   async function fireBootstrap(): Promise<{ success: boolean; pid?: number; error?: string; via?: string }> {
     const target = resolveBootstrapper(bootstrapContext())
     if (!target) {
-      return { success: false, error: 'Nessun metodo di avvio disponibile: installa SKSE64 nella cartella del gioco' }
+      return {
+        success: false,
+        error: 'Nessun metodo di avvio disponibile: installa SKSE64 nella cartella del gioco',
+      }
     }
     if (target.mode === 'protocol' && target.uri) {
       try {
@@ -1019,7 +1059,10 @@ app.whenReady().then(() => {
   try {
     const lastLaunchAt = readSmartStartup(store as unknown as KeyValueStore).lastLaunchAt
     if (lastLaunchAt) {
-      const missed = findMissedCrash(Date.parse(lastLaunchAt), store.get('lastNotifiedCrashLog') as string | undefined)
+      const missed = findMissedCrash(
+        Date.parse(lastLaunchAt),
+        store.get('lastNotifiedCrashLog') as string | undefined,
+      )
       if (missed) {
         logger.warn('crash', `crash NON notificato trovato al riavvio: ${missed.file}`)
         store.set('lastNotifiedCrashLog', missed.file)
@@ -1035,7 +1078,8 @@ app.whenReady().then(() => {
         // La finestra potrebbe non essere ancora pronta: consegna al primo paint utile.
         const deliver = () => {
           try {
-            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('crash:detected', payload)
+            if (mainWindow && !mainWindow.isDestroyed())
+              mainWindow.webContents.send('crash:detected', payload)
           } catch {
             /* resta il log */
           }
@@ -1135,7 +1179,11 @@ app.whenReady().then(() => {
         recordGameVersion(store, detectSteamEnv().skyrim.version)
         try {
           const profileId = resolveActiveProfileId(getRawDb(), store)
-          recordLaunch(kvStore, { bootstrapperId: target.bootstrapperId, profileId }, new Date().toISOString())
+          recordLaunch(
+            kvStore,
+            { bootstrapperId: target.bootstrapperId, profileId },
+            new Date().toISOString(),
+          )
         } catch (err) {
           logger.warn('launcher', `smart-startup non registrato: ${(err as Error).message}`)
         }
@@ -1220,9 +1268,90 @@ app.whenReady().then(() => {
   // a { success, error?, backupPath, written } Result to the renderer.
   ipcMain.handle('plugin:save-order', (_e, entries: LoadOrderEntry[]) => {
     const res = saveLoadOrder(entries, resolvePluginsTxtPath())
-    if (res.success) logger.info('plugin', `plugins.txt salvato (${res.written} righe, backup: ${res.backupPath ?? 'nessuno'})`)
+    if (res.success)
+      logger.info(
+        'plugin',
+        `plugins.txt salvato (${res.written} righe, backup: ${res.backupPath ?? 'nessuno'})`,
+      )
     else logger.warn('plugin', `salvataggio plugins.txt fallito: ${res.error}`)
     return res
+  })
+
+  // ── Conflitti record-level (CONFLICTS Fase 2) ───────────────────────────────
+  // Scansione binaria dei plugin del load order attivo + report tracciato contro la
+  // patch di risoluzione personale. Il renderer manda SOLO filtri/form_key, mai path:
+  // dataDir e plugins.txt li risolvono gli stessi resolver di plugin:get-order.
+  let conflictScanBusy = false
+  ipcMain.handle('conflicts:scan', async () => {
+    if (conflictScanBusy) return { ok: false as const, error: 'Scansione già in corso' }
+    conflictScanBusy = true
+    try {
+      // Progress throttlato (~6/s): con ~2000 plugin un send per plugin inonderebbe l'IPC.
+      let lastSent = 0
+      return await runConflictScan(
+        requireDb(),
+        { dataDir: resolveLoadOrderDataDir(), pluginsTxtPath: resolvePluginsTxtPath() },
+        (p) => {
+          const now = Date.now()
+          if (now - lastSent >= 150 || p.done === p.total) {
+            lastSent = now
+            mainWindow?.webContents.send('conflicts:progress', p)
+          }
+        },
+      )
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message }
+    } finally {
+      conflictScanBusy = false
+    }
+  })
+
+  // Nome della patch personale: override da settings (validato: solo un NOME file
+  // .esp/.esm/.esl, mai un path), default FantasyLauncher_Output.esp.
+  const conflictPatchName = (): string => {
+    const v = store.get('conflictPatchName')
+    return typeof v === 'string' && /^[^\\/:*?"<>|]+\.es[pml]$/i.test(v) ? v : DEFAULT_PATCH_NAME
+  }
+
+  const CONFLICT_STATUSES: ReadonlySet<string> = new Set([
+    'ignored',
+    'resolved',
+    'shadowed',
+    'identical',
+    'unresolved',
+  ])
+  ipcMain.handle('conflicts:report', (_e, rawFilter?: unknown) => {
+    try {
+      const f = (rawFilter && typeof rawFilter === 'object' ? rawFilter : {}) as Record<string, unknown>
+      const statuses = Array.isArray(f.statuses)
+        ? f.statuses.filter((s): s is ConflictStatus => typeof s === 'string' && CONFLICT_STATUSES.has(s))
+        : undefined
+      const search = typeof f.search === 'string' ? f.search.slice(0, 200) : undefined
+      const limit =
+        typeof f.limit === 'number' && Number.isFinite(f.limit)
+          ? Math.min(Math.max(1, Math.trunc(f.limit)), 10000)
+          : DEFAULT_REPORT_LIMIT
+      return getConflictReport(requireDb(), conflictPatchName(), { statuses, search, limit })
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message }
+    }
+  })
+
+  ipcMain.handle('conflicts:set-ignored', (_e, formKey: unknown, ignored: unknown, reason?: unknown) => {
+    if (typeof formKey !== 'string' || formKey.length === 0 || formKey.length > 300) {
+      return { ok: false as const, error: 'formKey non valida' }
+    }
+    try {
+      setConflictIgnored(
+        requireDb(),
+        formKey,
+        ignored === true,
+        typeof reason === 'string' ? reason.slice(0, 500) : undefined,
+      )
+      return { ok: true as const }
+    } catch (e) {
+      return { ok: false as const, error: (e as Error).message }
+    }
   })
 
   // Pandora detection (PANDORA-REGISTER-01): locate the engine exe, persist its path,
@@ -1434,7 +1563,10 @@ app.whenReady().then(() => {
   }
   // ── Sorgente sync: backup persistito → scan live, con sanificazione fail-safe ───────────────
   /** Primo backup collezioni parseabile tra i percorsi noti (settings → userData → cwd/data). */
-  const readBackupRaw = (): { backup: BackupCollectionsLike & { deduped?: unknown[] }; path: string } | null => {
+  const readBackupRaw = (): {
+    backup: BackupCollectionsLike & { deduped?: unknown[] }
+    path: string
+  } | null => {
     const candidates = [
       store.get('collectionsBackupPath') as string | undefined,
       join(app.getPath('userData'), 'vortex-collections-backup.json'),
@@ -1462,7 +1594,10 @@ app.whenReady().then(() => {
     }>
     // Reconstruct resolution VARIANTS from the raw per-collection files: `deduped` keeps one
     // file per modId, but the raw collections may hold the same mod in 2K AND 4K.
-    const rawByMod = new Map<number, Array<{ fileId: number; name: string; md5?: string; fileSize?: number }>>()
+    const rawByMod = new Map<
+      number,
+      Array<{ fileId: number; name: string; md5?: string; fileSize?: number }>
+    >()
     for (const c of (b.collections ?? []) as Array<{
       mods?: Array<{ modId: number; fileId: number; name: string; md5?: string; fileSize?: number }>
     }>) {
@@ -1524,10 +1659,7 @@ app.whenReady().then(() => {
    *  2) collezioni potate (prunedCollections): il piano viene RICALCOLATO a ogni load sul backup
    *     corrente (esclusività raw + dependency-keep sul grafo requires) — niente id hardcoded.
    */
-  const sanitizeSyncSource = (
-    mods: SyncMod[],
-    backup: BackupCollectionsLike | null,
-  ): SyncMod[] => {
+  const sanitizeSyncSource = (mods: SyncMod[], backup: BackupCollectionsLike | null): SyncMod[] => {
     const { valid, invalid, warnings } = validateDownloadSchema(mods)
     if (invalid.length)
       logger.warn(
@@ -1535,7 +1667,10 @@ app.whenReady().then(() => {
         `schema download: ${invalid.length} entry invalide escluse dalla coda — ${summarizeInvalid(invalid)}`,
       )
     if (warnings.length)
-      logger.warn('sync', `schema download: ${warnings.length} entry con anomalie soft — ${summarizeInvalid(warnings)}`)
+      logger.warn(
+        'sync',
+        `schema download: ${warnings.length} entry con anomalie soft — ${summarizeInvalid(warnings)}`,
+      )
     let out = valid
     const pruned = readPrunedCollections()
     if (pruned.length && backup) {
@@ -1661,7 +1796,18 @@ app.whenReady().then(() => {
       downloadsFreeBytes,
       ...syncFactors(),
     })
-    return { stockDir, all, mods, profile, enableAutoTranslate, req, freeBytes, sameDisk, downloadsDir, decision }
+    return {
+      stockDir,
+      all,
+      mods,
+      profile,
+      enableAutoTranslate,
+      req,
+      freeBytes,
+      sameDisk,
+      downloadsDir,
+      decision,
+    }
   }
 
   let syncAbort: AbortController | null = null
@@ -1689,8 +1835,18 @@ app.whenReady().then(() => {
       logger.error('sync', `pre-flight sync fallito: ${emsg}`)
       return { ok: false, error: `Pre-flight non riuscito: ${emsg}` }
     }
-    const { stockDir, all, mods, profile, enableAutoTranslate, req, freeBytes, sameDisk, downloadsDir, decision } =
-      plan
+    const {
+      stockDir,
+      all,
+      mods,
+      profile,
+      enableAutoTranslate,
+      req,
+      freeBytes,
+      sameDisk,
+      downloadsDir,
+      decision,
+    } = plan
     if (!all.length) {
       syncAbort = null
       return { ok: false, error: 'Nessun mod da sincronizzare (backup e scan Vortex vuoti).' }
@@ -1700,7 +1856,10 @@ app.whenReady().then(() => {
       return { ok: false, error: 'Tutte le mod risultano già sincronizzate nello StockGame.' }
     }
     if (db && !req.usedDependencyGraph) {
-      logger.warn('sync', 'catalogo dipendenze non usabile: stima spazio sul solo blocco (nessuna espansione deps)')
+      logger.warn(
+        'sync',
+        'catalogo dipendenze non usabile: stima spazio sul solo blocco (nessuna espansione deps)',
+      )
     }
     const steam = resolveGameSource()
     // Clamp ANCHE il valore dal renderer (non solo il default dallo store): il renderer è untrusted
@@ -1722,8 +1881,7 @@ app.whenReady().then(() => {
       syncAbort = null // the queue never started — free the lock so a corrected retry can run
       // Se il volume StockGame ha passato entrambi i modelli, il blocco viene dal SECONDO volume
       // (cache download cross-disk): il messaggio deve puntare al disco giusto.
-      const cacheBlocked =
-        decision.downloadsFreeBytes != null && decision.gate.ok && decision.preflight.ok
+      const cacheBlocked = decision.downloadsFreeBytes != null && decision.gate.ok && decision.preflight.ok
       const diskError = {
         reason: decision.reason,
         requiredBytes: decision.requiredBytes,
@@ -1821,13 +1979,20 @@ app.whenReady().then(() => {
               installPath: modDestDir(modsDirNow, m),
               fileSize: m.fileSize,
             }))
-          const reg = registerInstalledMods(requireDb(), resolveActiveProfileId(getRawDb(), store), candidates)
+          const reg = registerInstalledMods(
+            requireDb(),
+            resolveActiveProfileId(getRawDb(), store),
+            candidates,
+          )
           logger.info(
             'sync',
             `registrazione mods: ${reg.inserted} nuove, ${reg.updated} aggiornate, ${reg.unchanged} già registrate`,
           )
         } catch (e) {
-          logger.warn('sync', `registrazione mods fallita (il deploy non vedrà queste estrazioni): ${(e as Error).message}`)
+          logger.warn(
+            'sync',
+            `registrazione mods fallita (il deploy non vedrà queste estrazioni): ${(e as Error).message}`,
+          )
         }
         // Step 3 — post-list ESL/254 scan. Skyrim won't launch with >254 FULL plugins; ESL /
         // ESL-flagged plugins are free. The verdict is SENT TO THE RENDERER on a dedicated channel:
@@ -1919,7 +2084,12 @@ app.whenReady().then(() => {
   // Registrazione estrazioni → tabella mods. CONDIVISA tra l'IPC (bottone "Registra estratte")
   // e la riparazione automatica pre-avvio: il deploy legge `is_installed`, quindi senza questo
   // passo le mod estratte sul disco resterebbero invisibili al collegamento.
-  const registerInstalledFromDisk = (): { found: number; inserted: number; updated: number; unchanged: number } => {
+  const registerInstalledFromDisk = (): {
+    found: number
+    inserted: number
+    updated: number
+    unchanged: number
+  } => {
     const stockDir = resolveStockTarget()
     const modsDirNow = stockGameModsDir(stockDir)
     const all = loadSyncMods() // già sanificata (schema download + collezioni potate)
@@ -1964,7 +2134,10 @@ app.whenReady().then(() => {
     if (!q) return { ok: false, error: 'Nome collezione mancante' }
     const raw = readBackupRaw()
     if (!raw)
-      return { ok: false, error: 'Backup collezioni non trovato: impossibile calcolare il piano in sicurezza.' }
+      return {
+        ok: false,
+        error: 'Backup collezioni non trovato: impossibile calcolare il piano in sicurezza.',
+      }
     const plan = computePrunePlan(raw.backup, q, catalogRequiresMap())
     if (isPruneError(plan)) return { ok: false, error: plan.error }
     let catalogRowsDeleted = 0
@@ -2039,7 +2212,10 @@ app.whenReady().then(() => {
         warnings: v.warnings.slice(0, 50),
       }
       if (v.invalid.length)
-        logger.warn('catalog', `validazione coda: ${v.invalid.length} entry invalid/missing-url — ${summarizeInvalid(v.invalid)}`)
+        logger.warn(
+          'catalog',
+          `validazione coda: ${v.invalid.length} entry invalid/missing-url — ${summarizeInvalid(v.invalid)}`,
+        )
     }
     let backfilled = 0
     let catalog: {
@@ -2087,7 +2263,8 @@ app.whenReady().then(() => {
           'catalog',
           `validazione catalogo: ${rep.missingUrl.length}/${rep.checked} righe flaggate missing-url (né nexus_file_id né nexus_download_url)`,
         )
-      if (backfilled) logger.info('catalog', `backfill nexus_file_id dal backup: ${backfilled} righe aggiornate`)
+      if (backfilled)
+        logger.info('catalog', `backfill nexus_file_id dal backup: ${backfilled} righe aggiornate`)
     } catch (e) {
       logger.warn('catalog', `validazione catalogo fallita (fail-safe, solo report): ${(e as Error).message}`)
     }
@@ -2488,7 +2665,9 @@ ipcMain.handle('mods:add-many', (_e, rawRows: Record<string, unknown>[]) => {
       const placeholders = Object.keys(data)
         .map(() => '?')
         .join(', ')
-      getRawDb().prepare(`INSERT INTO mods (${cols}) VALUES (${placeholders})`).run(...Object.values(data))
+      getRawDb()
+        .prepare(`INSERT INTO mods (${cols}) VALUES (${placeholders})`)
+        .run(...Object.values(data))
     }
   })
   tx(rows)
@@ -2540,7 +2719,9 @@ ipcMain.handle('catalog:list', (_e, filter?: { category?: string; search?: strin
   }
   if (conditions.length) query += ' WHERE ' + conditions.join(' AND ')
   query += ' ORDER BY priority_order ASC, name ASC'
-  return getRawDb().prepare(query).all(...params)
+  return getRawDb()
+    .prepare(query)
+    .all(...params)
 })
 
 ipcMain.handle('catalog:seed', (_e, mods: unknown[]) => {
@@ -2626,10 +2807,18 @@ ipcMain.handle('catalog:import-nexus-collection', async (_e, input: string) => {
     return { success: false, error: 'Nessuna API key Nexus: impostala nelle Impostazioni prima di importare' }
   const parsed = parseCollectionInput(input)
   if (!parsed)
-    return { success: false, error: 'Slug o URL collezione non riconosciuto (es. "abc123" o link nexusmods.com/…/collections/abc123)' }
+    return {
+      success: false,
+      error:
+        'Slug o URL collezione non riconosciuto (es. "abc123" o link nexusmods.com/…/collections/abc123)',
+    }
   let revision: CollectionRevisionResult
   try {
-    revision = await fetchCollectionRevision(axiosPostJson, { slug: parsed.slug, revision: parsed.revision, apiKey })
+    revision = await fetchCollectionRevision(axiosPostJson, {
+      slug: parsed.slug,
+      revision: parsed.revision,
+      apiKey,
+    })
   } catch (e) {
     return { success: false, error: (e as Error).message }
   }
@@ -2641,7 +2830,8 @@ ipcMain.handle('catalog:import-nexus-collection', async (_e, input: string) => {
       error: `Collezione per "${revision.gameDomain}", non Skyrim Special Edition: import rifiutato`,
     }
   }
-  if (!revision.mods.length) return { success: false, error: `Collezione "${revision.collectionName}" senza mod` }
+  if (!revision.mods.length)
+    return { success: false, error: `Collezione "${revision.collectionName}" senza mod` }
 
   const rows = buildCatalogRowsFromCollection(revision)
   const db = getRawDb()
@@ -2690,7 +2880,9 @@ const buildMissingFilesPlan = () => {
     )
     .all(`${NEXUS_COLLECTION_IMPORT_NOTE}%`) as Parameters<typeof planMissingFiles>[0]
   const existing = db
-    .prepare('SELECT nexus_id, file_id, status FROM downloads WHERE nexus_id IS NOT NULL AND file_id IS NOT NULL')
+    .prepare(
+      'SELECT nexus_id, file_id, status FROM downloads WHERE nexus_id IS NOT NULL AND file_id IS NOT NULL',
+    )
     .all() as Parameters<typeof planMissingFiles>[1]
   const modsRoot = (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods')
   return planMissingFiles(rows, existing, (dirName) => existsSync(join(modsRoot, dirName)))
@@ -2699,7 +2891,11 @@ const buildMissingFilesPlan = () => {
 ipcMain.handle('catalog:plan-missing-files', () => {
   try {
     const plan = buildMissingFilesPlan()
-    return { ok: true as const, missing: plan.length, totalMB: Math.round(plan.reduce((a, p) => a + p.sizeBytes, 0) / 1024 ** 2) }
+    return {
+      ok: true as const,
+      missing: plan.length,
+      totalMB: Math.round(plan.reduce((a, p) => a + p.sizeBytes, 0) / 1024 ** 2),
+    }
   } catch (e) {
     return { ok: false as const, error: (e as Error).message }
   }
@@ -2799,7 +2995,9 @@ ipcMain.handle(
     const extra = rawExtra ? pickColumns(rawExtra, DOWNLOAD_COLUMNS) : undefined
     if (extra && Object.keys(extra).length > 0) {
       const fields = ['status', ...Object.keys(extra)].map((k) => `${k} = ?`).join(', ')
-      getRawDb().prepare(`UPDATE downloads SET ${fields} WHERE id = ?`).run(status, ...Object.values(extra), id)
+      getRawDb()
+        .prepare(`UPDATE downloads SET ${fields} WHERE id = ?`)
+        .run(status, ...Object.values(extra), id)
     } else {
       getRawDb().prepare('UPDATE downloads SET status = ? WHERE id = ?').run(status, id)
     }
@@ -2979,7 +3177,10 @@ const revealProbe: RevealProbe = { exists: existsSync, realpath: (p) => realpath
 ipcMain.handle('fs:reveal-folder', async (_e, kind: string) => {
   const dir = revealDirForKind(kind, revealRoots())
   if (!dir) {
-    logger.warn('security', `fs:reveal-folder rifiutato (kind non valido/non configurato): ${String(kind).slice(0, 60)}`)
+    logger.warn(
+      'security',
+      `fs:reveal-folder rifiutato (kind non valido/non configurato): ${String(kind).slice(0, 60)}`,
+    )
     return { success: false, error: 'Cartella non disponibile' }
   }
   // App-managed dirs may not exist yet on first use; create them. We never create the
@@ -3024,8 +3225,7 @@ ipcMain.handle('fs:reveal-folder', async (_e, kind: string) => {
 ipcMain.handle('fs:open-download', (_e, downloadId: number) => {
   if (!Number.isInteger(downloadId) || downloadId <= 0) return { success: false, error: 'id non valido' }
   const row = getRawDb().prepare('SELECT file_path FROM downloads WHERE id=?').get(downloadId) as
-    | { file_path: string | null }
-    | undefined
+    { file_path: string | null } | undefined
   if (!row?.file_path) return { success: false, error: 'File non disponibile' }
   // A completed download ALWAYS lives under the app-managed userData/downloads dir (the download
   // manager writes only there). Confine to that ONE non-store-tunable root — validating against
@@ -3107,36 +3307,54 @@ ipcMain.handle('tools:launch-dyndolod', () => launchTool(toolPath('dyndolodPath'
 // GUI (scelta worldspace + risoluzioni), ma parte già pronta per questa collezione.
 ipcMain.handle('tools:launch-xlodgen', () => {
   const exe = toolPath('xlodgenPath')
-  if (!exe) return Promise.resolve({ success: false, error: 'Percorso xLODGen non configurato: impostalo nelle Impostazioni' })
+  if (!exe)
+    return Promise.resolve({
+      success: false,
+      error: 'Percorso xLODGen non configurato: impostalo nelle Impostazioni',
+    })
   const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
   if (!gamePath) return Promise.resolve({ success: false, error: 'Percorso del gioco non configurato' })
 
   // Output isolato come mod generata (stesso pattern di BodySlide): mkdir + registrazione nel
   // profilo attivo ad alto peso, così il terrain LOD generato vince ogni LOD deployato.
-  const outputDir = xlodgenOutputDir((store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'))
+  const outputDir = xlodgenOutputDir(
+    (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'),
+  )
   try {
     mkdirSync(outputDir, { recursive: true })
     const profileId = resolveActiveProfileId(getRawDb(), store)
     const db = getRawDb()
-    const existing = db.prepare('SELECT id FROM mods WHERE profile_id=? AND name=?').get(profileId, XLODGEN_OUTPUT_MOD_NAME) as
-      | { id: number }
-      | undefined
+    const existing = db
+      .prepare('SELECT id FROM mods WHERE profile_id=? AND name=?')
+      .get(profileId, XLODGEN_OUTPUT_MOD_NAME) as { id: number } | undefined
     if (existing) {
-      db.prepare('UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?').run(
-        outputDir,
-        'patch',
-        XLODGEN_OUTPUT_WEIGHT,
-        existing.id,
-      )
+      db.prepare(
+        'UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?',
+      ).run(outputDir, 'patch', XLODGEN_OUTPUT_WEIGHT, existing.id)
     } else {
-      const maxPrio = (db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as { mp: number | null }).mp
+      const maxPrio = (
+        db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as {
+          mp: number | null
+        }
+      ).mp
       db.prepare(
         `INSERT INTO mods (profile_id, name, category, install_path, is_enabled, is_installed, priority, deploy_category, resolution_weight)
          VALUES (?,?,?,?,1,1,?,?,?)`,
-      ).run(profileId, XLODGEN_OUTPUT_MOD_NAME, 'Generated', outputDir, (maxPrio ?? 0) + 1, 'patch', XLODGEN_OUTPUT_WEIGHT)
+      ).run(
+        profileId,
+        XLODGEN_OUTPUT_MOD_NAME,
+        'Generated',
+        outputDir,
+        (maxPrio ?? 0) + 1,
+        'patch',
+        XLODGEN_OUTPUT_WEIGHT,
+      )
     }
   } catch (e) {
-    logger.warn('tools', `xLODGen: registrazione mod output fallita (procedo comunque): ${(e as Error).message}`)
+    logger.warn(
+      'tools',
+      `xLODGen: registrazione mod output fallita (procedo comunque): ${(e as Error).message}`,
+    )
   }
 
   const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
@@ -3202,8 +3420,7 @@ ipcMain.handle('diagnostics:generate-report', (): { report: string } => {
   try {
     const profileId = resolveActiveProfileId(db, store)
     const row = db.prepare('SELECT name FROM profiles WHERE id=?').get(profileId) as
-      | { name: string }
-      | undefined
+      { name: string } | undefined
     activeProfileName = row?.name ?? null
     const counts = db
       .prepare(
@@ -3265,9 +3482,13 @@ ipcMain.handle('diagnostics:generate-report', (): { report: string } => {
 // ── T18 — Preset INI derivati da BethINI Pie: applica a Documents/My Games/... (la
 // stessa cartella che il runtime legge davvero, non la root del gioco).
 ipcMain.handle('ini:apply-bethini-preset', async (_e, tier: string, flavor: string) => {
-  if (flavor !== 'bethini' && flavor !== 'vanilla') return { success: false, error: `flavor sconosciuto: ${flavor}` }
+  if (flavor !== 'bethini' && flavor !== 'vanilla')
+    return { success: false, error: `flavor sconosciuto: ${flavor}` }
   if (!isValidBethiniTier(flavor as BethiniFlavor, tier))
-    return { success: false, error: `tier "${tier}" non valido per il flavor "${flavor}" (validi: ${BETHINI_TIERS_BY_FLAVOR[flavor as BethiniFlavor].join(', ')})` }
+    return {
+      success: false,
+      error: `tier "${tier}" non valido per il flavor "${flavor}" (validi: ${BETHINI_TIERS_BY_FLAVOR[flavor as BethiniFlavor].join(', ')})`,
+    }
   try {
     const template = bethiniPresetTemplate(tier as BethiniTier, flavor as BethiniFlavor)
     await applyIniSettings(documentsGameDir(), template, {})
@@ -3302,15 +3523,23 @@ ipcMain.handle('grass:start-precache', async () => {
   const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
   if (!gamePath) return { success: false, error: 'Percorso del gioco non configurato' }
   const target = resolveBootstrapper({ gamePath, mo2Path: null })
-  if (!target || target.mode !== 'exe') return { success: false, error: 'Nessun metodo di avvio SKSE disponibile' }
+  if (!target || target.mode !== 'exe')
+    return { success: false, error: 'Nessun metodo di avvio SKSE disponibile' }
 
   grassPrecacheRunning = true
   try {
     writeMarkerFile(gamePath)
     try {
-      await applyIniSettings(documentsGameDir(), { name: 'grass-precache', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 1 } } } }, {})
+      await applyIniSettings(
+        documentsGameDir(),
+        { name: 'grass-precache', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 1 } } } },
+        {},
+      )
     } catch (e) {
-      logger.warn('grass', `impostazione bGenerateGrassDataFiles fallita (procedo comunque): ${(e as Error).message}`)
+      logger.warn(
+        'grass',
+        `impostazione bGenerateGrassDataFiles fallita (procedo comunque): ${(e as Error).message}`,
+      )
     }
     const result = await supervisePrecache({
       launch: () => launchGame({ exePath: target.exe!, cwd: target.cwd!, args: target.args ?? [] }),
@@ -3323,12 +3552,18 @@ ipcMain.handle('grass:start-precache', async () => {
     // (rilanci del gioco inclusi) — senza questo un esito silenzioso passerebbe inosservato.
     notifyWindowIfUnfocused(mainWindow, {
       title: result.completed ? 'Grass cache completato' : 'Grass cache interrotto',
-      body: result.reason ?? (result.completed ? 'Precache terminato con successo' : 'Controlla i dettagli nell’app'),
+      body:
+        result.reason ??
+        (result.completed ? 'Precache terminato con successo' : 'Controlla i dettagli nell’app'),
     })
     return { success: true, result }
   } finally {
     try {
-      await applyIniSettings(documentsGameDir(), { name: 'grass-precache-off', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 0 } } } }, {})
+      await applyIniSettings(
+        documentsGameDir(),
+        { name: 'grass-precache-off', settings: { 'Skyrim.ini': { Grass: { bGenerateGrassDataFiles: 0 } } } },
+        {},
+      )
     } catch {
       /* best-effort: non deve far fallire la risposta */
     }
@@ -3339,7 +3574,8 @@ ipcMain.handle('grass:start-precache', async () => {
 // Uscita manuale da uno stato bloccato: rimuove il marker senza avviare nulla (es. l'utente
 // ha deciso di interrompere e vuole che un prossimo "Avvia" parta da zero, non da un residuo).
 ipcMain.handle('grass:clear-marker', () => {
-  if (grassPrecacheRunning) return { success: false, error: 'Precache in corso: attendi il termine prima di azzerare il marker' }
+  if (grassPrecacheRunning)
+    return { success: false, error: 'Precache in corso: attendi il termine prima di azzerare il marker' }
   const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
   if (!gamePath) return { success: false, error: 'Percorso del gioco non configurato' }
   removeMarkerFileIfExists(gamePath)
@@ -3350,12 +3586,19 @@ ipcMain.handle('grass:clear-marker', () => {
 // devono essere chiusi (raccomandazione community): qui si applica lo stesso gate
 // game-running già usato dal Deploy.
 ipcMain.handle('plugins:qac-clean', async (_e, pluginName: string) => {
-  if (isGameRunning()) return { verdict: 'blocked' as const, summary: 'Skyrim è in esecuzione: chiudilo prima di pulire un plugin', log: null }
+  if (isGameRunning())
+    return {
+      verdict: 'blocked' as const,
+      summary: 'Skyrim è in esecuzione: chiudilo prima di pulire un plugin',
+      log: null,
+    }
   const xeditPath = toolPath('sseeditPath')
-  if (!xeditPath) return { verdict: 'launch-failed' as const, summary: 'Percorso SSEEdit non configurato', log: null }
+  if (!xeditPath)
+    return { verdict: 'launch-failed' as const, summary: 'Percorso SSEEdit non configurato', log: null }
   const gamePath = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
   const dataDir = activeDeployDataDir(getRawDb(), store, gamePath)
-  if (!dataDir) return { verdict: 'launch-failed' as const, summary: 'Nessuna Data deployata trovata', log: null }
+  if (!dataDir)
+    return { verdict: 'launch-failed' as const, summary: 'Nessuna Data deployata trovata', log: null }
   return runQuickAutoClean({ xeditPath, dataPath: dataDir, pluginName })
 })
 
@@ -3371,7 +3614,10 @@ ipcMain.handle('tools:launch-pandora', async () => {
   // invariante del BodySlide batch). L'output viene registrato come mod 'patch' a peso
   // massimo: al Deploy successivo vince ogni conflitto. Senza gamePath → GUI (fallback).
   const gp = detectSteamEnv().skyrim.path ?? (store.get('gamePath') as string | undefined) ?? null
-  const outDir = join((store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'), 'pandora-output')
+  const outDir = join(
+    (store.get('modsPath') as string) || join(app.getPath('userData'), 'mods'),
+    'pandora-output',
+  )
   let args: string[] = []
   if (gp) {
     try {
@@ -3382,7 +3628,11 @@ ipcMain.handle('tools:launch-pandora', async () => {
     args = [`--tesv:${gp}`, `-o:${outDir}`, '--auto_run', '--auto_close']
     logger.info('tools', `Pandora headless: --tesv "${gp}" → output "${outDir}" (auto_run/auto_close)`)
   }
-  const res = (await launchTool(toolPath('pandoraPath'), args)) as { success: boolean; code?: number; error?: string }
+  const res = (await launchTool(toolPath('pandoraPath'), args)) as {
+    success: boolean
+    code?: number
+    error?: string
+  }
   // Registrazione come mod SOLO a run riuscito e con output non vuoto (idempotente).
   if (gp && res.success) {
     try {
@@ -3394,16 +3644,32 @@ ipcMain.handle('tools:launch-pandora', async () => {
           .prepare('SELECT id FROM mods WHERE profile_id=? AND name=?')
           .get(profileId, PANDORA_OUTPUT_MOD_NAME) as { id: number } | undefined
         if (existing) {
-          db.prepare('UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?')
-            .run(outDir, 'patch', 1_000_000, existing.id)
+          db.prepare(
+            'UPDATE mods SET install_path=?, is_enabled=1, is_installed=1, deploy_category=?, resolution_weight=? WHERE id=?',
+          ).run(outDir, 'patch', 1_000_000, existing.id)
         } else {
-          const maxPrio = (db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as { mp: number | null }).mp
+          const maxPrio = (
+            db.prepare('SELECT MAX(priority) mp FROM mods WHERE profile_id=?').get(profileId) as {
+              mp: number | null
+            }
+          ).mp
           db.prepare(
             `INSERT INTO mods (profile_id, name, category, install_path, is_enabled, is_installed, priority, deploy_category, resolution_weight)
              VALUES (?,?,?,?,1,1,?,?,?)`,
-          ).run(profileId, PANDORA_OUTPUT_MOD_NAME, 'Generated', outDir, (maxPrio ?? 0) + 1, 'patch', 1_000_000)
+          ).run(
+            profileId,
+            PANDORA_OUTPUT_MOD_NAME,
+            'Generated',
+            outDir,
+            (maxPrio ?? 0) + 1,
+            'patch',
+            1_000_000,
+          )
         }
-        logger.info('tools', `Pandora: output registrato come mod "${PANDORA_OUTPUT_MOD_NAME}" — riesegui il Deploy per applicarlo`)
+        logger.info(
+          'tools',
+          `Pandora: output registrato come mod "${PANDORA_OUTPUT_MOD_NAME}" — riesegui il Deploy per applicarlo`,
+        )
       }
     } catch (e) {
       logger.warn('tools', `Pandora: registrazione output fallita — ${(e as Error).message}`)
