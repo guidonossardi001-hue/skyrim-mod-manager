@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import { scanEnbPresets, applyEnbPreset, removeEnbPreset, type EnbPreset } from './enbManager'
+import { isPathInside } from '../install/extract'
 
 // Thin ipcMain wrapper (stesso pattern degli altri *engine.ts). Path resolution iniettata
 // da main.ts: modsRoot (estrazioni) e gameRoot (root del gioco, NON Data).
@@ -25,10 +26,12 @@ export function initEnbEngine(opts: EnbEngineOptions) {
   ipcMain.handle('enb:apply', (_e, presetDir: string, label: string) => {
     const gameRoot = opts.resolveGameRoot()
     if (!gameRoot) return { ok: false as const, error: 'Cartella del gioco non risolvibile' }
-    // Il presetDir arriva dalla lista di enb:scan (mai un input libero): lo si ri-valida
-    // comunque contro il modsRoot per rifiutare path arbitrari dal renderer.
-    const root = opts.resolveModsRoot().replace(/\\/g, '/').toLowerCase()
-    if (!presetDir.replace(/\\/g, '/').toLowerCase().startsWith(root))
+    // Il presetDir arriva dalla lista di enb:scan (mai un input libero in UI), ma l'IPC è
+    // raggiungibile con qualunque stringa da un renderer compromesso: containment REALE
+    // via isPathInside (resolve+relative), non un semplice startsWith — quest'ultimo passava
+    // sia con './mods2/evil' (collisione di prefisso su cartella sibling) sia con sequenze
+    // '..' non normalizzate, permettendo di copiare .dll arbitrarie nella root del gioco.
+    if (!isPathInside(opts.resolveModsRoot(), presetDir))
       return { ok: false as const, error: 'Percorso preset non valido (fuori dalla cartella mod)' }
     const res = applyEnbPreset(presetDir, gameRoot, label)
     if (res.ok)

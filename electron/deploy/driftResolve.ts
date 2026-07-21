@@ -1,4 +1,5 @@
 import { join, dirname } from 'path'
+import { isPathInside } from '../install/extract'
 
 // Risoluzione interattiva del drift esterno (external-changes): verifyDeployedInstance
 // (verifyDeploy.ts) rileva SOLO — qui l'utente sceglie come chiudere ogni voce segnalata:
@@ -58,6 +59,13 @@ export function resolveDriftedFile(
   winningSource: { src: string } | null,
   io: DriftResolveIo,
 ): ResolveDriftResult {
+  // `rel` arriva grezzo dal renderer via IPC (deploy:resolve-drift): senza containment un
+  // '..' sufficiente fa uscire `join(instanceDataDir, rel)` dalla dir dell'istanza, dando
+  // unlink/link arbitrari (CWE-22). Stesso guard di isPathInside usato altrove (extract.ts,
+  // openTargets.ts, fomodApply.ts).
+  if (!isPathInside(instanceDataDir, join(instanceDataDir, rel))) {
+    return { ok: false, action, rel, error: 'Percorso non valido (fuori dalla cartella istanza)' }
+  }
   if (action === 'accept') {
     try {
       const p = join(instanceDataDir, ACCEPTED_OVERRIDES_FILE)

@@ -15,7 +15,7 @@ import {
 import { join, dirname } from 'path'
 import type { SqliteDb } from '../db/sqlite'
 import { columnExists, tableExists } from '../db/sqlite'
-import { toLongPath, listFilesRel } from '../install/extract'
+import { toLongPath, listFilesRel, isPathInside } from '../install/extract'
 import { sameVolume } from '../install/stockGame'
 import { sanitizePathSegment } from '../util/paths'
 import { atomicWriteFile } from '../backup/snapshot'
@@ -462,9 +462,12 @@ export function resolveWinningSourceForRel(
   rel: string,
   profileId?: number,
 ): { src: string; mod: string } | null {
+  // `rel` arriva grezzo dal renderer (deploy:resolve-drift): senza containment un '..'
+  // sufficiente fa risolvere join(install_path, rel) fuori dalla cartella della mod (CWE-22).
   const rows = queryDeployRows(db, profileId)
   const candidates: DeployMod[] = []
   for (const r of rows) {
+    if (!isPathInside(r.install_path, join(r.install_path, rel))) continue
     if (!existsSync(join(r.install_path, rel))) continue
     candidates.push({
       name: r.name,
